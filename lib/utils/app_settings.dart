@@ -1,0 +1,91 @@
+// 应用全局设置服务
+// 使用 shared_preferences 持久化用户的偏好设置（屏幕旋转、暗色模式等）
+// 通过 ChangeNotifier 通知整个 App 主题/方向发生变化
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'app_logger.dart';
+
+// 应用设置类（继承 ChangeNotifier 以便全局监听变化）
+class AppSettings extends ChangeNotifier {
+  // SharedPreferences key 常量
+  static const String _kAllowRotation = 'settings_allow_rotation';
+  static const String _kDarkMode = 'settings_dark_mode';
+
+  // 内部 SharedPreferences 实例
+  SharedPreferences? _prefs;
+
+  // 是否允许屏幕旋转（默认 false：关闭屏幕旋转）
+  bool _allowRotation = false;
+  bool get allowRotation => _allowRotation;
+
+  // 是否启用暗色模式（默认 false：使用亮色主题）
+  bool _darkMode = false;
+  bool get darkMode => _darkMode;
+
+  // 初始化设置：从 SharedPreferences 读取已保存的偏好
+  // 必须在 runApp 之前调用一次以加载历史数据
+  Future<void> load() async {
+    try {
+      _prefs = await SharedPreferences.getInstance();
+      _allowRotation = _prefs?.getBool(_kAllowRotation) ?? false;
+      _darkMode = _prefs?.getBool(_kDarkMode) ?? false;
+      AppLogger.i(
+        'AppSettings',
+        '设置已加载 - 屏幕旋转: $_allowRotation, 暗色模式: $_darkMode',
+      );
+    } catch (e, st) {
+      // 加载失败时使用默认值，并记录错误
+      AppLogger.e('AppSettings', '加载设置失败：$e', e, st);
+      _allowRotation = false;
+      _darkMode = false;
+    }
+    // 应用加载到的初始屏幕方向
+    _applyOrientation(_allowRotation);
+    // 通知监听者设置已就绪
+    notifyListeners();
+  }
+
+  // 设置是否允许屏幕旋转
+  // 切换后立即将新的方向策略应用到系统，并持久化到本地
+  Future<void> setAllowRotation(bool value) async {
+    if (_allowRotation == value) return;
+    _allowRotation = value;
+    AppLogger.i('AppSettings', '屏幕旋转 -> $value');
+    // 立即应用屏幕方向变更
+    _applyOrientation(value);
+    // 持久化到本地
+    await _prefs?.setBool(_kAllowRotation, value);
+    notifyListeners();
+  }
+
+  // 设置是否启用暗色模式
+  // 切换后主题会立即变化（由 MaterialApp 的 themeMode 监听）
+  Future<void> setDarkMode(bool value) async {
+    if (_darkMode == value) return;
+    _darkMode = value;
+    AppLogger.i('AppSettings', '暗色模式 -> $value');
+    await _prefs?.setBool(_kDarkMode, value);
+    notifyListeners();
+  }
+
+  // 将屏幕方向设置应用到系统
+  // 当关闭时仅允许竖屏；开启时允许所有方向（随屏幕旋转）
+  void _applyOrientation(bool allow) {
+    if (allow) {
+      // 开启：允许所有方向（横屏/竖屏均可）
+      SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.portraitDown,
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+    } else {
+      // 关闭：仅允许竖屏正方向（默认行为）
+      SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+      ]);
+    }
+  }
+}

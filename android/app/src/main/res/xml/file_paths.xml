@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 路径白名单配置。
+  用于把 App 私有目录下的文件以 content:// URI 形式分享给系统播放器/文件管理器，
+  从而解决 Android 7.0+ 上的 FileUriExposedException。
+
+  关键点：
+    1) `getApplicationDocumentsDirectory()` 在 Android 上对应
+       `<files-dir>/app_flutter/`，所以必须声明 `app_flutter` 这层子目录。
+    2) 同时预留 external-files-path 给后续把视频输出迁移到 App 专属外部存储用。
+    3) authorities 用 ${applicationId} 占位，避免和别的 App 撞。
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- App 内部 files 目录（含 path_provider 文档目录 app_flutter/） -->
+    <files-path
+        name="internal_files"
+        path="." />
+    <!-- App 专属外部存储（getExternalStorageDirectory） -->
+    <external-files-path
+        name="external_files"
+        path="." />
+    <!-- 公共下载目录（getDownloadsDirectory） -->
+    <external-path
+        name="external_storage"
+        path="." />
+    <!-- 缓存目录（getTemporaryDirectory） -->
+    <cache-path
+        name="cache"
+        path="." />
+</paths>

@@ -1,0 +1,80 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 申请网络权限，用于网速测试（HTTP HEAD） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 申请麦克风权限，用于分贝测试 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 视频格式转换：读取设备上的 M3U8 源文件 -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- 视频格式转换：Android 13+ 细粒度读取媒体文件 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- 视频格式转换：保存转换后的 MP4 文件到下载目录（可选） -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <!-- 视频转换后台进度：Android 13+ 通知权限（弹转换进度通知用） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 视频转换后台运行：避免系统杀进程 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <application
+        android:label="toolapp"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+        <!--
+          自定义 FileProvider：
+            - 用于"视频转换完成"页面的"打开文件"/"打开目录"功能
+            - 把 App 私有目录（getApplicationDocumentsDirectory 对应 app_flutter/）下的视频
+              以 content:// URI 暴露给系统播放器/文件管理器，规避 Android 7.0+ 的
+              FileUriExposedException
+            - authorities 用 ${applicationId} 占位，避免和其他 App 冲突
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>
