@@ -14,6 +14,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:path/path.dart' as p;
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit_config.dart';
 import 'package:ffmpeg_kit_flutter_new/ffprobe_kit.dart';
@@ -22,6 +23,7 @@ import 'package:ffmpeg_kit_flutter_new/session.dart';
 import 'package:ffmpeg_kit_flutter_new/statistics.dart';
 
 import 'app_logger.dart';
+import 'convert_speed_settings.dart';
 import 'm3u8_normalizer.dart';
 
 /// 输出质量档位
@@ -363,12 +365,21 @@ class FFmpegService {
       }
       AppLogger.i(_logTag, '输入源时长：${durationMs ?? '未知'} ms');
 
-      // 构造 FFmpeg 参数
+      // v1.6.51+ 修复：确保输出目录存在，FFmpeg 不会自动创建父目录
+      final outputDir = Directory(p.dirname(outputPath));
+      if (!await outputDir.exists()) {
+        await outputDir.create(recursive: true);
+        AppLogger.i(_logTag, '已创建输出目录：${outputDir.path}');
+      }
+
+      // 构造 FFmpeg 参数（读取加速模式）
+      final speedMode = await ConvertSpeedSettings.load();
       final args = _buildArgs(
         input: effectiveInput,
         outputPath: outputPath,
         format: format,
         quality: quality,
+        speedMode: speedMode,
       );
       final command = args.join(' ');
       AppLogger.i(_logTag, '执行 FFmpeg 命令：$command');
@@ -775,12 +786,15 @@ class FFmpegService {
       final seekSeconds = resumeFromMs / 1000.0;
       // v1.6.25+ 修复（bug6）：用规范化后的 effectiveInput 作为 FFmpeg 输入，
       //   而不是 resume state 里的原始 input
+      // v1.6.43+ 新增：读取加速模式
+      final speedMode = await ConvertSpeedSettings.load();
       final encodeArgs = _buildArgs(
         input: effectiveInput,
         outputPath: part2Path,
         format: format,
         quality: quality,
         seekSeconds: seekSeconds,
+        speedMode: speedMode,
       );
       AppLogger.i(_logTag, '恢复-编码剩余段：${encodeArgs.join(' ')}');
 
@@ -1107,6 +1121,7 @@ class FFmpegService {
     required VideoFormat format,
     required VideoQuality quality,
     double? seekSeconds,
+    ConvertSpeedMode speedMode = ConvertSpeedMode.off,
   }) {
     // 通用前缀：
     // -y：覆盖输出
@@ -1190,19 +1205,38 @@ class FFmpegService {
           preset = 'ultrafast';
           audioBitrateK = 128;
       }
-      encodeArgs.addAll([
-        '-c:v', 'libx264',
-        '-preset', preset,
-        '-crf', '$crf',
-        '-pix_fmt', 'yuv420p', // 提升兼容性
-        '-c:a', 'aac',
-        '-b:a', '${audioBitrateK}k',
-        // movflags 对 MP4 输出尤其重要：让 moov atom 写到文件头部，
-        // 这样转换完成的 MP4 可以立即被播放器读取（无需先 seek）
-        if (format == VideoFormat.mp4) ...[
-          '-movflags', '+faststart',
-        ],
-      ]);
+
+      // v1.6.43+ 新增：根据加速模式选择编码方式
+      if (speedMode == ConvertSpeedMode.hardware) {
+        // 硬件编码模式：使用 Android MediaCodec 硬件加速
+        encodeArgs.addAll([
+          '-c:v', 'h264_mediacodec',
+          '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac',
+          '-b:a', '${audioBitrateK}k',
+          if (format == VideoFormat.mp4) ...[
+            '-movflags', '+faststart',
+          ],
+        ]);
+      } else {
+        // 软件编码模式：根据 speedMode 选择 preset
+        final effectivePreset = speedMode == ConvertSpeedMode.ultrafast
+            ? 'ultrafast'
+            : preset;
+        encodeArgs.addAll([
+          '-c:v', 'libx264',
+          '-preset', effectivePreset,
+          '-crf', '$crf',
+          '-pix_fmt', 'yuv420p', // 提升兼容性
+          '-c:a', 'aac',
+          '-b:a', '${audioBitrateK}k',
+          // movflags 对 MP4 输出尤其重要：让 moov atom 写到文件头部，
+          // 这样转换完成的 MP4 可以立即被播放器读取（无需先 seek）
+          if (format == VideoFormat.mp4) ...[
+            '-movflags', '+faststart',
+          ],
+        ]);
+      }
     }
 
     return [

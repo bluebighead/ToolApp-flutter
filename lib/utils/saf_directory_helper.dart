@@ -28,12 +28,123 @@ import 'package:flutter/services.dart';
 
 import 'app_logger.dart';
 
+/// 复制进度数据
+class CopyProgress {
+  final int fileCount;
+  final int byteCount;
+
+  const CopyProgress({required this.fileCount, required this.byteCount});
+
+  @override
+  String toString() => 'CopyProgress(files: $fileCount, bytes: $byteCount)';
+}
+
+/// 前台服务控制工具
+///
+/// 用于在 FFmpeg 转换期间启动 Android 前台服务，保持 App 进程不被系统限制。
+/// 息屏、切后台、离开页面时 FFmpeg 仍能正常执行。
+class ForegroundServiceHelper {
+  ForegroundServiceHelper._();
+
+  static const _logTag = 'ForegroundServiceHelper';
+  static const _channel = MethodChannel('com.example.toolapp/foreground_service');
+
+  // v1.6.56+ 修复：通知栏"停止"按钮取消回调
+  // 当用户在通知栏点击"停止"时，Kotlin 端通过 MethodChannel 回调到此处，
+  // 再通知 ConvertCoordinator / BatchConvertCoordinator 取消 FFmpeg
+  static void Function()? _onCancelRequested;
+
+  /// 注册通知栏"停止"按钮的取消回调
+  /// 在 App 启动时调用一次，将 Kotlin 端的取消事件桥接到 Dart 端
+  static void registerCancelCallback(void Function() onCancel) {
+    _onCancelRequested = onCancel;
+    // 通过 MethodChannel 告诉 Kotlin 端注册回调
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onCancelRequested') {
+        AppLogger.i(_logTag, '收到通知栏取消请求');
+        _onCancelRequested?.call();
+      }
+    });
+  }
+
+  /// 启动前台服务
+  /// [title] 通知标题
+  /// [content] 通知内容（如输入源名称）
+  static Future<void> start({
+    required String title,
+    required String content,
+  }) async {
+    try {
+      AppLogger.i(_logTag, '请求启动前台服务: $title - $content');
+      await _channel.invokeMethod('startForegroundService', {
+        'title': title,
+        'content': content,
+      });
+      AppLogger.i(_logTag, '前台服务启动成功');
+    } catch (e) {
+      AppLogger.w(_logTag, '启动前台服务失败：$e');
+    }
+  }
+
+  /// 更新前台服务进度
+  /// [title] 通知标题
+  /// [content] 通知内容
+  /// [progress] 进度百分比（0~100）
+  /// [subtext] 子文本（如剩余时间）
+  static Future<void> update({
+    required String title,
+    required String content,
+    required int progress,
+    String? subtext,
+  }) async {
+    try {
+      await _channel.invokeMethod('updateForegroundService', {
+        'title': title,
+        'content': content,
+        'progress': progress,
+        'subtext': subtext ?? '',
+      });
+    } catch (e) {
+      AppLogger.w(_logTag, '更新前台服务失败：$e');
+    }
+  }
+
+  /// 停止前台服务
+  static Future<void> stop() async {
+    try {
+      AppLogger.i(_logTag, '请求停止前台服务');
+      await _channel.invokeMethod('stopForegroundService');
+      AppLogger.i(_logTag, '前台服务已停止');
+    } catch (e) {
+      AppLogger.w(_logTag, '停止前台服务失败：$e');
+    }
+  }
+}
+
 /// SAF 目录操作工具类
 class SafDirectoryHelper {
   SafDirectoryHelper._();
 
   static const _logTag = 'SafDirHelper';
   static const _channel = MethodChannel('com.example.toolapp/saf_helper');
+
+  /// 复制进度 EventChannel（Kotlin 端主动推送实时进度）
+  static const _progressChannel = EventChannel('com.example.toolapp/copy_progress');
+
+  /// 复制进度流（广播流，多个监听者可同时接收）
+  static final Stream<CopyProgress> copyProgressStream = _progressChannel
+      .receiveBroadcastStream()
+      .map((event) {
+        final map = event as Map<dynamic, dynamic>;
+        return CopyProgress(
+          fileCount: (map['fileCount'] as num).toInt(),
+          byteCount: (map['byteCount'] as num).toInt(),
+        );
+      })
+      .handleError((error) {
+        AppLogger.w(_logTag, '复制进度流异常：$error');
+      })
+      .asBroadcastStream();
 
   /// 弹出系统 SAF 目录选择器，让用户选择 M3U8 所在目录。
   /// 返回 `content://com.android.externalstorage.documents/tree/...` 形式的 URI；

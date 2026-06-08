@@ -27,6 +27,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import 'app_logger.dart';
 
@@ -115,7 +116,12 @@ class M3U8Normalizer {
     AppLogger.i(_logTag, '原始 M3U8 完整内容：\n  ${rawLines.join('\n  ')}');
 
     // 创建临时目录
-    final tempDir = await Directory.systemTemp.createTemp(
+    // v1.6.51+ 修复：使用 getApplicationCacheDirectory() 代替 Directory.systemTemp
+    // 原因：Android 11+ 限制 FFmpeg 原生库访问 code_cache 目录，
+    //   导致 "No such file or directory" 错误。
+    //   getApplicationCacheDirectory() 返回的 cache 目录 FFmpeg 可以正常访问。
+    final cacheDir = await getApplicationCacheDirectory();
+    final tempDir = await cacheDir.createTemp(
       'm3u8_norm_${DateTime.now().millisecondsSinceEpoch}_',
     );
     final newM3u8Lines = <String>[];
@@ -171,8 +177,12 @@ class M3U8Normalizer {
       );
       if (!exists) {
         missingCount++;
-        AppLogger.w(_logTag, 'segment 文件不存在：$absPath');
-        newM3u8Lines.add(line);
+        // 关键修复：segment 文件不存在时跳过，不写入规范化 M3U8
+        // 旧版会保留原始行，导致 FFmpeg 尝试打开不存在的路径而报错
+        AppLogger.w(
+          _logTag,
+          'segment 文件不存在，跳过：$absPath（规范化 M3U8 中将不包含此 segment）',
+        );
         continue;
       }
 
@@ -192,9 +202,9 @@ class M3U8Normalizer {
           'segment[$segIndex]: "$line" -> "$absPath" -> "$newPath" ✓',
         );
       } catch (e) {
-        AppLogger.e(_logTag, '复制 segment 失败：$absPath -> $newPath', e);
-        AppLogger.i(_logTag, 'segment[失败]: "$line" 保留原样写入 M3U8');
-        newM3u8Lines.add(line);
+        // 关键修复：复制失败时跳过，不写入规范化 M3U8
+        // 旧版会保留原始行，导致 FFmpeg 尝试打开不存在的路径而报错
+        AppLogger.e(_logTag, '复制 segment 失败，跳过：$absPath -> $newPath', e);
       }
     }
 
@@ -217,51 +227,22 @@ class M3U8Normalizer {
     await File(newM3u8Path).writeAsString(newM3u8Lines.join('\n'));
 
     // ----------------------------------------------------------------
-    // 关键提速：把所有 segment 字节流拼接成一个单一 merged.ts 文件
+    // v1.6.51+ 修复：禁用 merged.ts 字节拼接合并
     //
-    // 原理：
-    //   MPEG-TS 是面向流的容器，每个 segment 的开头是 0x47 同步字节。
-    //   把多个 TS segment 的字节按顺序拼接到一起，得到的就是一个合法的
-    //   长 TS 文件。FFmpeg 把它当作单一输入处理：
-    //     - 一次 open()，一次 seek
-    //     - 不需要重新解析 M3U8 playlist
-    //     - HLS demuxer 不再为每个 segment 单独建 stream
-    //   对数千个小 segment 的 M3U8 来说，这是几倍甚至一个数量级的提速。
+    // 原因：
+    //   实际测试发现大量 M3U8 的 segment 不是标准 MPEG-TS 格式：
+    //   - 有些 segment 开头是 0x83（加密或自定义格式）
+    //   - 有些是 fMP4 格式（自带 ftyp box）
+    //   字节拼接这些 segment 会产生无效的 merged.ts 文件，
+    //   FFmpeg 报 "Invalid data found when processing input"。
     //
-    // 安全：
-    //   - 不会修改音视频内容（字节级拼接，不重编码）
-    //   - 对 fMP4（fragmented MP4，扩展名是 .m4s/.mp4）也安全：
-    //     每个 fragment 自身就是带 moof/mdat 的自包含块
-    //   - 仅在 copiedCount > 0 时才生成 merged.ts（避免空文件）
-    //
-    // 失败兜底：
-    //   任何一步异常都把 mergedTsPath 置为 null，调用方会自动回退到
-    //   使用 normalized.m3u8 走 HLS demuxer。
+    // 方案：
+    //   统一使用 normalized.m3u8 走 FFmpeg HLS demuxer，
+    //   让 FFmpeg 自己处理各种 segment 格式。
+    //   虽然比单文件输入慢一些，但兼容性 100%。
     // ----------------------------------------------------------------
     String? mergedTsPath;
-    if (copiedCount > 0) {
-      final mergedPath = p.join(tempDir.path, 'merged.ts');
-      try {
-        final sink = File(mergedPath).openWrite();
-        for (int i = 0; i < copiedCount; i++) {
-          final segName = 'seg_${i.toString().padLeft(6, '0')}.ts';
-          final segPath = p.join(tempDir.path, segName);
-          // 用流式 addStream，避免一次性把大 segment 加载到内存
-          await sink.addStream(File(segPath).openRead());
-        }
-        await sink.close();
-        final mergedSize = await File(mergedPath).length();
-        mergedTsPath = mergedPath;
-        AppLogger.i(
-          _logTag,
-          '已生成合并 TS：$mergedPath（$mergedSize bytes，'
-          '${copiedCount} 个 segment）',
-        );
-      } catch (e, st) {
-        AppLogger.e(_logTag, '生成 merged.ts 失败，将回退到 HLS demuxer', e, st);
-        mergedTsPath = null;
-      }
-    }
+    mergedTsPath = null; // 始终禁用合并，走 HLS demuxer
 
     // 调试：列出 temp 目录里的所有文件（提升到 info 级别）
     try {

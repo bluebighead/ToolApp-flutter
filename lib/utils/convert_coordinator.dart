@@ -42,6 +42,7 @@ import 'convert_history.dart';
 import 'convert_notification.dart';
 import 'convert_resume_state.dart';
 import 'ffmpeg_service.dart';
+import 'saf_directory_helper.dart';
 import 'video_save_settings.dart';
 
 /// Coordinator 状态机
@@ -307,6 +308,15 @@ class ConvertCoordinator {
       _resetRuntimeFields();
       _emitState(ConvertState.running);
 
+      // v1.6.42+ 新增：启动 Android 前台服务，保持 App 进程不被系统限制
+      // （Doze 模式 / App Standby），息屏、切后台、离开页面时 FFmpeg 仍能正常执行
+      unawaited(ForegroundServiceHelper.start(
+        title: '视频转换中…',
+        content: '源：${config.sourceName}',
+      ).catchError((e) {
+        AppLogger.w(_logTag, '启动前台服务失败：$e');
+      }));
+
       // 通知：弹出"开始转换"持续通知
       try {
         final granted = await ConvertNotification.instance.requestPermission();
@@ -337,6 +347,17 @@ class ConvertCoordinator {
           } catch (e) {
             AppLogger.w(_logTag, '推送进度通知失败：$e');
           }
+          // v1.6.42+ 更新前台服务进度
+          final percent = (p.value * 100).clamp(0, 100).toInt();
+          final etaText = _formatEta(p.etaSeconds);
+          unawaited(ForegroundServiceHelper.update(
+            title: '视频转换中…  $percent%',
+            content: '进度 ${p.time.isNotEmpty ? p.time : '-'}',
+            progress: percent,
+            subtext: etaText.isNotEmpty ? etaText : '剩余时间计算中…',
+          ).catchError((e) {
+            AppLogger.w(_logTag, '更新前台服务失败：$e');
+          }));
         },
       );
 
@@ -374,6 +395,10 @@ class ConvertCoordinator {
       } catch (e) {
         AppLogger.w(_logTag, '显示完成通知失败：$e');
       }
+
+      // v1.6.42+ 停止前台服务
+      unawaited(ForegroundServiceHelper.stop()
+          .catchError((e) => AppLogger.w(_logTag, '停止前台服务失败：$e')));
 
       // ============ 保存历史 ============
       await _saveHistory(
@@ -435,6 +460,11 @@ class ConvertCoordinator {
           // 状态切到 paused（保持进度值不变，让 UI 显示"继续转换"按钮）
           _emitState(ConvertState.paused);
           AppLogger.i(_logTag, '已暂停，可恢复（catch 块处理完毕）');
+
+          // v1.6.42+ 暂停时停止前台服务
+          unawaited(ForegroundServiceHelper.stop()
+              .catchError((e) => AppLogger.w(_logTag, '停止前台服务失败：$e')));
+
           return;
         }
         try {
@@ -452,6 +482,9 @@ class ConvertCoordinator {
             errorMessage: '用户取消',
           );
           _emitState(ConvertState.cancelled);
+          // v1.6.42+ 取消时停止前台服务
+          unawaited(ForegroundServiceHelper.stop()
+              .catchError((e) => AppLogger.w(_logTag, '停止前台服务失败：$e')));
         } else {
           AppLogger.d(_logTag, 'cancel() 已处理过取消逻辑，跳过重复收尾');
         }
@@ -480,6 +513,9 @@ class ConvertCoordinator {
           errorMessage: e.message,
         );
         _emitState(ConvertState.failed);
+        // v1.6.42+ 失败时停止前台服务
+        unawaited(ForegroundServiceHelper.stop()
+            .catchError((e) => AppLogger.w(_logTag, '停止前台服务失败：$e')));
       }
     } catch (e, st) {
       AppLogger.e(_logTag, '转换异常', e, st);
@@ -495,6 +531,9 @@ class ConvertCoordinator {
         errorMessage: _errorMessage!,
       );
       _emitState(ConvertState.failed);
+      // v1.6.42+ 异常时停止前台服务
+      unawaited(ForegroundServiceHelper.stop()
+          .catchError((e) => AppLogger.w(_logTag, '停止前台服务失败：$e')));
     } finally {
       // v1.6.22+ 修复（bug5）：
       //   pause() 触发的取消不能清理 M3U8 临时目录（resume() 还要用它），
@@ -656,6 +695,9 @@ class ConvertCoordinator {
       errorMessage: '用户取消',
     );
     _emitState(ConvertState.cancelled);
+    // v1.6.42+ 取消时停止前台服务
+    unawaited(ForegroundServiceHelper.stop()
+        .catchError((e) => AppLogger.w(_logTag, '停止前台服务失败：$e')));
   }
 
   /// 暂停正在运行的转换（仅在 running 状态下有效）
@@ -772,6 +814,14 @@ class ConvertCoordinator {
 
     _emitState(ConvertState.running);
 
+    // v1.6.42+ 恢复转换时也启动前台服务（如果之前被暂停时停掉了）
+    unawaited(ForegroundServiceHelper.start(
+      title: '视频转换中…',
+      content: '源：${resume.sourceName}（继续）',
+    ).catchError((e) {
+      AppLogger.w(_logTag, '启动前台服务失败：$e');
+    }));
+
     try {
       // 进度：从中断点开始（占整体 0.0~0.7）
       // 实际进度由 FFmpegService.convertResume 内部重新计算
@@ -861,6 +911,17 @@ class ConvertCoordinator {
           } catch (e) {
             AppLogger.w(_logTag, '推送进度通知失败：$e');
           }
+          // v1.6.42+ 更新前台服务进度
+          final percent = (scaled.value * 100).clamp(0, 100).toInt();
+          final etaText = _formatEta(scaled.etaSeconds);
+          unawaited(ForegroundServiceHelper.update(
+            title: '视频转换中…  $percent%',
+            content: '进度 ${scaled.time.isNotEmpty ? scaled.time : '-'}',
+            progress: percent,
+            subtext: etaText.isNotEmpty ? etaText : '剩余时间计算中…',
+          ).catchError((e) {
+            AppLogger.w(_logTag, '更新前台服务失败：$e');
+          }));
         },
       );
 
@@ -896,6 +957,10 @@ class ConvertCoordinator {
       } catch (e) {
         AppLogger.w(_logTag, '显示完成通知失败：$e');
       }
+
+      // v1.6.42+ 停止前台服务
+      unawaited(ForegroundServiceHelper.stop()
+          .catchError((e) => AppLogger.w(_logTag, '停止前台服务失败：$e')));
 
       // 构造一个伪 ConvertTaskConfig 喂给 _saveHistory
       _config = ConvertTaskConfig(
@@ -970,6 +1035,11 @@ class ConvertCoordinator {
 
           _emitState(ConvertState.paused);
           AppLogger.i(_logTag, '已暂停（resume 流程中），可恢复');
+
+          // v1.6.42+ 暂停时停止前台服务
+          unawaited(ForegroundServiceHelper.stop()
+              .catchError((e) => AppLogger.w(_logTag, '停止前台服务失败：$e')));
+
           return;
         }
         // 恢复过程中被取消：彻底取消，清除恢复状态
@@ -992,6 +1062,9 @@ class ConvertCoordinator {
         _progress = const ConvertProgress(value: 0, hasDuration: false);
         _emitState(ConvertState.cancelled);
         AppLogger.i(_logTag, '恢复-已被用户取消（彻底取消，不是暂停）');
+        // v1.6.42+ 取消时停止前台服务
+        unawaited(ForegroundServiceHelper.stop()
+            .catchError((e) => AppLogger.w(_logTag, '停止前台服务失败：$e')));
       } else {
         // v1.6.31+ 修复（bug17）：区分"源文件不存在"和"普通失败"
         if (e.isResumeSourceMissing) {
@@ -1019,6 +1092,9 @@ class ConvertCoordinator {
         // 这里选择清除 —— 失败后再 resume 没什么意义
         await ConvertResumeStore.instance.clear();
         _emitState(ConvertState.failed);
+        // v1.6.42+ 失败时停止前台服务
+        unawaited(ForegroundServiceHelper.stop()
+            .catchError((e) => AppLogger.w(_logTag, '停止前台服务失败：$e')));
       }
     } catch (e, st) {
       AppLogger.e(_logTag, '恢复-异常', e, st);
@@ -1030,6 +1106,9 @@ class ConvertCoordinator {
       }
       await ConvertResumeStore.instance.clear();
       _emitState(ConvertState.failed);
+      // v1.6.42+ 异常时停止前台服务
+      unawaited(ForegroundServiceHelper.stop()
+          .catchError((e) => AppLogger.w(_logTag, '停止前台服务失败：$e')));
     } finally {
       // v1.6.22+ 修复（bug5）：
       //   pause() 触发的取消不能清理 M3U8 临时目录（resume() 还要用它），
@@ -1141,6 +1220,20 @@ class ConvertCoordinator {
     } catch (e) {
       AppLogger.w(_logTag, '清理导入临时目录失败：$e');
     }
+  }
+
+  /// 格式化剩余时间（供前台服务通知用）
+  String _formatEta(int? seconds) {
+    if (seconds == null || seconds <= 0) return '';
+    if (seconds < 60) return '剩余约 $seconds 秒';
+    if (seconds < 3600) {
+      final m = seconds ~/ 60;
+      final s = seconds % 60;
+      return s > 0 ? '剩余约 $m 分 $s 秒' : '剩余约 $m 分钟';
+    }
+    final h = seconds ~/ 3600;
+    final m = (seconds % 3600) ~/ 60;
+    return m > 0 ? '剩余约 $h 小时 $m 分' : '剩余约 $h 小时';
   }
 
   /// 保存历史记录（失败不影响主流程）

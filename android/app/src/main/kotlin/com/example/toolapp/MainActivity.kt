@@ -3,12 +3,14 @@ package com.example.toolapp
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.DocumentsContract
 import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileNotFoundException
@@ -62,7 +64,14 @@ class MainActivity : FlutterActivity() {
      * 与 SAF 通道分离，避免和目录选择流程耦合。
      */
     private val storageChannelName = "com.example.toolapp/storage"
+    /** 复制进度 EventChannel：用于向 Dart 端推送实时进度 */
+    private val copyProgressChannelName = "com.example.toolapp/copy_progress"
+    /** 前台服务控制 MethodChannel：用于启动/停止转换保活服务 */
+    private val foregroundServiceChannelName = "com.example.toolapp/foreground_service"
     private val TAG = "SafHelper"
+
+    /** 当前活跃的进度事件流（用于 copyM3u8WithSegments 期间推送进度） */
+    private var copyProgressSink: EventChannel.EventSink? = null
 
     /** 选目录请求码：保证唯一，避免与 Flutter 自身 onActivityResult 冲突 */
     private val REQUEST_CODE_PICK_DIRECTORY = 0x1001
@@ -310,6 +319,7 @@ class MainActivity : FlutterActivity() {
                         Log.i(TAG, "copyM3u8WithSegments [后台线程] 开始: $treeUri / $m3u8Rel -> $destDir")
                         Thread {
                             try {
+                                resetProgressState()
                                 val total = copyM3u8WithSegments(
                                     treeUri, File(destDir), m3u8Rel
                                 )
@@ -388,6 +398,149 @@ class MainActivity : FlutterActivity() {
                                 }
                             }
                         }.start()
+                    }
+
+                    // v1.6.55+ 新增：弹出视频播放器选择器
+                    // 不依赖实际文件，而是用 ACTION_VIEW + video/* 列出所有能处理视频的 App
+                    "showVideoPlayerChooser" -> {
+                        try {
+                            // 使用一个虚拟的 video/* intent 来查询所有能播放视频的 App
+                            val probeIntent = Intent(Intent.ACTION_VIEW).apply {
+                                type = "video/*"
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            val chooser = Intent.createChooser(probeIntent, "选择视频播放器").apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            startActivity(chooser)
+                            result.success(true)
+                        } catch (e: ActivityNotFoundException) {
+                            result.error("NO_HANDLER", "未找到可播放视频的应用", null)
+                        } catch (e: Throwable) {
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+
+                    // v1.6.57+ 新增：从 SAF 自定义目录中删除指定文件
+                    // 参数：treeUri (SAF 目录 URI), fileName (要删除的文件名)
+                    // 使用 DocumentFile API（与 writeFileToSafTree 一致），兼容性更好
+                    // v1.6.58+ 修复：result 回调必须在主线程，否则 Flutter 端收不到结果
+                    "deleteFileFromSafTree" -> {
+                        val treeUriStr = call.argument<String>("treeUri")
+                        val fileName = call.argument<String>("fileName")
+                        if (treeUriStr == null || fileName == null) {
+                            result.error("INVALID_ARGS", "treeUri 和 fileName 不能为空", null)
+                        } else {
+                            Thread {
+                                try {
+                                    val tree = DocumentFile.fromTreeUri(this@MainActivity, Uri.parse(treeUriStr))
+                                    if (tree == null || !tree.exists()) {
+                                        runOnUiThread {
+                                            result.error("INVALID_URI", "SAF 目录不存在或已失效", null)
+                                        }
+                                        return@Thread
+                                    }
+                                    // 在目录中查找同名文件
+                                    val targetFile = tree.findFile(fileName)
+                                    if (targetFile != null && targetFile.exists()) {
+                                        val deleted = targetFile.delete()
+                                        if (deleted) {
+                                            Log.i(TAG, "deleteFileFromSafTree: 已删除 $fileName")
+                                            runOnUiThread { result.success(true) }
+                                        } else {
+                                            runOnUiThread {
+                                                result.error("DELETE_FAILED", "删除 SAF 文件失败：$fileName", null)
+                                            }
+                                        }
+                                    } else {
+                                        // 文件不存在于 SAF 目录中，不算错误
+                                        Log.i(TAG, "deleteFileFromSafTree: 文件不存在 $fileName")
+                                        runOnUiThread { result.success(false) }
+                                    }
+                                } catch (e: Throwable) {
+                                    Log.e(TAG, "deleteFileFromSafTree 异常", e)
+                                    runOnUiThread {
+                                        result.error("EXCEPTION", e.message ?: "unknown", null)
+                                    }
+                                }
+                            }.start()
+                        }
+                    }
+
+                    // v1.6.58+ 新增：获取 App 本体大小（APK 大小）
+                    "getAppSize" -> {
+                        try {
+                            val appInfo = applicationContext.applicationInfo
+                            val apkFile = File(appInfo.sourceDir)
+                            val apkSize = if (apkFile.exists()) apkFile.length() else 0L
+                            result.success(apkSize)
+                        } catch (e: Throwable) {
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+
+                    else -> result.notImplemented()
+                }
+            }
+
+        // 注册复制进度 EventChannel（用于向 Dart 端推送实时进度）
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, copyProgressChannelName)
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    copyProgressSink = events
+                    Log.i(TAG, "copy_progress: Dart 端开始监听进度")
+                }
+                override fun onCancel(arguments: Any?) {
+                    copyProgressSink = null
+                    Log.i(TAG, "copy_progress: Dart 端停止监听进度")
+                }
+            })
+
+        // 注册前台服务控制通道（用于转换保活）
+        val foregroundChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, foregroundServiceChannelName)
+
+        // v1.6.56+ 修复：注册通知栏"停止"按钮的取消回调
+        // 当用户在通知栏点击"停止"时，Kotlin 端通过此回调通知 Flutter 端取消 FFmpeg
+        ConvertForegroundService.setOnCancelRequestedListener {
+            Log.i(TAG, "通知栏停止按钮被点击，通知 Flutter 端取消转换")
+            foregroundChannel.invokeMethod("onCancelRequested", null)
+        }
+
+        foregroundChannel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "startForegroundService" -> {
+                        val title = call.argument<String>("title") ?: "视频转换中…"
+                        val content = call.argument<String>("content") ?: "正在转换"
+                        try {
+                            ConvertForegroundService.start(this, title, content)
+                            Log.i(TAG, "前台服务已请求启动: $title - $content")
+                            result.success(true)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "启动前台服务失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", e.stackTraceToString())
+                        }
+                    }
+                    "updateForegroundService" -> {
+                        val title = call.argument<String>("title") ?: "视频转换中…"
+                        val content = call.argument<String>("content") ?: ""
+                        val progress = call.argument<Int>("progress") ?: 0
+                        val subtext = call.argument<String>("subtext") ?: ""
+                        try {
+                            ConvertForegroundService.update(this, title, content, progress, subtext)
+                        } catch (e: Throwable) {
+                            Log.w(TAG, "更新前台服务失败: ${e.message}")
+                        }
+                        result.success(true)
+                    }
+                    "stopForegroundService" -> {
+                        try {
+                            ConvertForegroundService.stop(this)
+                            Log.i(TAG, "前台服务已请求停止")
+                            result.success(true)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "停止前台服务失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", e.stackTraceToString())
+                        }
                     }
                     else -> result.notImplemented()
                 }
@@ -603,41 +756,54 @@ class MainActivity : FlutterActivity() {
         // 1. 复制 M3U8 文件本身
         count += copySingleFile(treeUriOrPath, m3u8Rel, destDir)
 
+        // #region debug-point 1
+        // v1.6.48+ 调试日志：打印复制前的状态
+        Log.i(TAG, "[DEBUG] copyM3u8WithSegments: m3u8Rel='$m3u8Rel', destDir='${destDir.absolutePath}'")
+        // #endregion
+
         // 2. 多候选启发式：依次尝试不同命名规则的同名 segments 文件夹
         //
         // 实际场景的命名约定（按命中概率排序）：
         //   a) "<M3U8文件名>.m3u8_contents" — 一些视频下载工具/网盘客户端的命名规则
-        //      例：TUE-142...2896591493.m3u8 -> TUE-142...2896591493.m3u8_contents/
+        //      例：video1.m3u8 -> video1.m3u8_contents/
         //   b) "<M3U8文件名>（去后缀）" — 通用约定
-        //      例：测试视频.m3u8 -> 测试视频/
+        //      例：video1.m3u8 -> video1/
         //   c) "<M3U8完整文件名>" — 极少见但无副作用
         //   d) 从 M3U8 内部 segment refs 第一段提取的父目录 — 兜底
-        val m3u8BaseName = m3u8Rel.substringBeforeLast('/', m3u8Rel)
+        //
+        // v1.6.46+ 修复：m3u8BaseName 是相对路径前缀（如 "subdir"），
+        // 不是文件夹名的一部分。启发式搜索的文件夹名应该只基于 m3u8FileName。
         val m3u8FileName = File(m3u8Rel).name
         val m3u8Stem = m3u8FileName.substringBeforeLast('.', m3u8FileName)
 
-        val candidates = mutableListOf<String>().apply {
+        val candidates = listOf(
             // a) <M3U8文件名>.m3u8_contents（实测最常见）
-            add("$m3u8BaseName/$m3u8FileName.m3u8_contents")
+            "${m3u8FileName}.m3u8_contents",
             // b) <M3U8文件名>（去 .m3u8 后缀）
-            add("$m3u8BaseName/$m3u8Stem")
+            m3u8Stem,
             // c) <M3U8完整文件名>（极少见但尝试一下）
-            add("$m3u8BaseName/$m3u8FileName")
-        }
+            m3u8FileName,
+        )
 
-        for (candidate in candidates) {
-            val folderName = candidate.substringAfterLast('/')
+        // #region debug-point 2
+        Log.i(TAG, "[DEBUG] 启发式候选文件夹: $candidates")
+        // #endregion
+
+        for (folderName in candidates) {
             val copied = tryCopyHeuristicFolder(treeUriOrPath, folderName, destDir)
             if (copied > 0) {
                 count += copied
                 Log.i(TAG, "copyM3u8WithSegments: 启发式命中 '$folderName'，复制 $copied 个文件")
+                // #region debug-point 3
+                Log.i(TAG, "[DEBUG] 成功复制了 $copied 个文件到 ${destDir.absolutePath}")
+                // #endregion
                 return count
             }
         }
 
         // 3. 上面启发式都失败 → 解析 M3U8 拿到 segment refs，从第一段提取候选文件夹名
         val parsedFirstSeg = firstSegmentFolderFromM3u8(destDir, m3u8Rel)
-        if (parsedFirstSeg != null && parsedFirstSeg !in candidates.map { it.substringAfterLast('/') }) {
+        if (parsedFirstSeg != null && parsedFirstSeg !in candidates) {
             val copied = tryCopyHeuristicFolder(treeUriOrPath, parsedFirstSeg, destDir)
             if (copied > 0) {
                 count += copied
@@ -741,7 +907,10 @@ class MainActivity : FlutterActivity() {
                 outFile.parentFile?.mkdirs()
                 val ok = try {
                     contentResolver.openInputStream(sourceFile.uri)?.use { input ->
-                        outFile.outputStream().use { output -> input.copyTo(output) }
+                        val fileSize = outFile.outputStream().use { output -> input.copyTo(output) }
+                        totalCopiedFiles++
+                        totalCopiedBytes += fileSize
+                        reportProgress()
                         true
                     } ?: false
                 } catch (e: Throwable) {
@@ -755,9 +924,12 @@ class MainActivity : FlutterActivity() {
                     return 0
                 }
                 outFile.parentFile?.mkdirs()
-                sourceFile.inputStream().use { input ->
+                val fileSize = sourceFile.inputStream().use { input ->
                     outFile.outputStream().use { output -> input.copyTo(output) }
                 }
+                totalCopiedFiles++
+                totalCopiedBytes += fileSize
+                reportProgress()
                 1
             }
         } catch (e: Throwable) {
@@ -897,12 +1069,60 @@ class MainActivity : FlutterActivity() {
     private fun isContentUri(s: String): Boolean = s.startsWith("content://")
 
     // ----------------------------------------------------------------------
+    // 进度上报辅助
+    // ----------------------------------------------------------------------
+
+    /** 累计已复制文件数（由 copy 函数更新，reportProgress 读取） */
+    private var totalCopiedFiles = 0
+    /** 累计已复制字节数（由 copy 函数更新，reportProgress 读取） */
+    private var totalCopiedBytes = 0L
+    /** 上次上报进度后的已复制文件数，用于节流（每 10 个文件或每 5MB 上报一次） */
+    private var lastReportedFileCount = 0
+    private var lastReportedByteCount = 0L
+
+    /** 上报进度到 Dart 端（读取累计值，节流后推送） */
+    private fun reportProgress(force: Boolean = false) {
+        val sink = copyProgressSink ?: return
+        // 节流：每 10 个文件或累计 5MB 才上报一次，避免 EventChannel 过载
+        if (!force &&
+            totalCopiedFiles - lastReportedFileCount < 10 &&
+            totalCopiedBytes - lastReportedByteCount < 5 * 1024 * 1024
+        ) {
+            return
+        }
+        lastReportedFileCount = totalCopiedFiles
+        lastReportedByteCount = totalCopiedBytes
+        try {
+            runOnUiThread {
+                sink.success(mapOf(
+                    "fileCount" to totalCopiedFiles,
+                    "byteCount" to totalCopiedBytes
+                ))
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "reportProgress 失败: ${e.message}")
+        }
+    }
+
+    /** 重置进度上报状态 */
+    private fun resetProgressState() {
+        totalCopiedFiles = 0
+        totalCopiedBytes = 0L
+        lastReportedFileCount = 0
+        lastReportedByteCount = 0L
+    }
+
+    // ----------------------------------------------------------------------
     // SAF 分支
     // ----------------------------------------------------------------------
 
     private fun copyDirRecursiveSaf(source: DocumentFile, dest: File): Int {
         var count = 0
         if (!dest.exists()) dest.mkdirs()
+        
+        // v1.6.45+ 优化：在 listFiles() 前先强制上报一次进度，避免 SAF 扫描期间显示"已复制0"
+        reportProgress(force = true)
+        
         val children = try {
             source.listFiles()
         } catch (e: Throwable) {
@@ -914,33 +1134,118 @@ class MainActivity : FlutterActivity() {
             return 0
         }
         Log.i(TAG, "SAF 目录 ${source.name ?: "(未命名)"} 包含 ${children.size} 个直接子项，开始复制")
+        
+        // v1.6.44+ 优化：分离文件和文件夹，先并行复制文件，再递归处理子目录
+        val files = mutableListOf<DocumentFile>()
+        val dirs = mutableListOf<DocumentFile>()
         for (file in children) {
-            val name = file.name ?: continue
             if (file.isDirectory) {
-                count += copyDirRecursiveSaf(file, File(dest, name))
+                dirs.add(file)
             } else if (file.isFile) {
-                val outFile = File(dest, name)
-                try {
-                    contentResolver.openInputStream(file.uri).use { input ->
-                        if (input == null) continue
-                        outFile.outputStream().use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                    count++
-                    // 每 50 个文件打一次进度
-                    if (count % 50 == 0) {
-                        Log.i(TAG, "SAF 复制进度: 已复制 $count 个文件")
-                    }
-                } catch (e: Throwable) {
-                    Log.w(
-                        TAG,
-                        "SAF 复制失败: ${file.uri} -> ${outFile.absolutePath}: ${e.message}"
-                    )
-                }
+                files.add(file)
             }
         }
+        
+        // 并行复制文件（使用 Java 原生线程池，最多 4 个线程同时复制）
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(4)
+        val futures = mutableListOf<java.util.concurrent.Future<*>>()
+        
+        for (file in files) {
+            futures.add(executor.submit {
+                try {
+                    val name = file.name ?: return@submit
+                    val outFile = File(dest, name)
+                    val fileSize = copyFileFastSaf(file, outFile)
+                    if (fileSize > 0) {
+                        synchronized(this@MainActivity) {
+                            count++
+                            totalCopiedFiles++
+                            totalCopiedBytes += fileSize
+                            reportProgress()
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "SAF 复制失败: ${file.uri} -> $dest/${file.name}: ${e.message}")
+                }
+            })
+        }
+        
+        // 等待所有文件复制完成
+        for (future in futures) {
+            try {
+                future.get()
+            } catch (e: java.util.concurrent.ExecutionException) {
+                Log.w(TAG, "复制任务异常: ${e.cause?.message}")
+            }
+        }
+        executor.shutdown()
+        
+        // 串行复制子目录（避免过度并发导致内存溢出）
+        for (dir in dirs) {
+            val name = dir.name ?: continue
+            count += copyDirRecursiveSaf(dir, File(dest, name))
+        }
+        
         return count
+    }
+    
+    /**
+     * v1.6.44+ 新增：快速复制单个 SAF 文件
+     * 
+     * 优先使用 FileChannel.transferTo 零拷贝传输，
+     * 如果不可用则回退到大缓冲区流复制（1MB buffer）
+     */
+    private fun copyFileFastSaf(sourceFile: DocumentFile, outFile: File): Long {
+        return try {
+            // 尝试使用 FileDescriptor 零拷贝传输
+            contentResolver.openFileDescriptor(sourceFile.uri, "r")?.use { pfd ->
+                val inputChannel = java.io.FileInputStream(pfd.fileDescriptor).channel
+                val outputChannel = java.io.FileOutputStream(outFile).channel
+                
+                val size = inputChannel.size()
+                var position = 0L
+                var remaining = size
+                
+                // transferTo 在 Android 上对某些 SAF URI 可能不支持
+                // 所以使用带大缓冲区的循环
+                while (remaining > 0) {
+                    val transferred = inputChannel.transferTo(position, minOf(remaining, 1024 * 1024), outputChannel)
+                    if (transferred <= 0) break
+                    position += transferred
+                    remaining -= transferred
+                }
+                
+                inputChannel.close()
+                outputChannel.close()
+                size
+            } ?: run {
+                // 回退到大缓冲区流复制
+                copyWithLargeBuffer(sourceFile, outFile)
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "零拷贝复制失败，回退到流复制: ${e.message}")
+            copyWithLargeBuffer(sourceFile, outFile)
+        }
+    }
+    
+    /**
+     * 使用 1MB 大缓冲区进行流复制（比默认 8KB 快很多）
+     */
+    private fun copyWithLargeBuffer(sourceFile: DocumentFile, outFile: File): Long {
+        contentResolver.openInputStream(sourceFile.uri)?.use { input ->
+            val buffer = ByteArray(1024 * 1024) // 1MB 缓冲区
+            var totalRead = 0L
+            outFile.outputStream().use { output ->
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    output.write(buffer, 0, read)
+                    totalRead += read
+                }
+            }
+            return totalRead
+        }
+        return 0
     }
 
     private fun collectM3u8Saf(

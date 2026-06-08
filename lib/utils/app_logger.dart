@@ -94,9 +94,8 @@ class AppLogger {
     );
 
     // Release 模式下也通过 debugPrint 输出，避免日志在 release 构建中被完全剥离
-    if (!kReleaseMode) {
-      debugPrint(entry.format());
-    }
+    // v1.6.49+ 调试：始终输出到 debugPrint，确保 logcat 能看到
+    debugPrint(entry.format());
   }
 
   /// 把日志级别映射为 dart:developer 使用的整型

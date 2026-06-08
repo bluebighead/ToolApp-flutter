@@ -65,6 +65,17 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <!--
+          视频转换前台服务：
+            - 在 FFmpeg 转换期间保持 App 进程不被系统限制（Doze / App Standby）
+            - 息屏、切后台、离开页面时 FFmpeg 仍能正常执行
+            - 通知栏持续显示转换进度，用户可随时查看
+        -->
+        <service
+            android:name=".ConvertForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

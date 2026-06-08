@@ -1,13 +1,17 @@
 // 工具箱 App 主入口
 // 配置 Material 3 主题并启动首页
 // 通过 AppSettings 控制屏幕旋转/暗色模式
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'pages/home_page.dart';
 import 'pages/settings_page.dart';
 import 'utils/app_info.dart';
 import 'utils/app_logger.dart';
+import 'utils/convert_coordinator.dart';
 import 'utils/convert_notification.dart';
+import 'utils/saf_directory_helper.dart';
 
 void main() async {
   // 确保 Flutter 绑定已初始化（异步加载 SharedPreferences 前必须调用）
@@ -33,6 +37,14 @@ void main() async {
   // 初始化视频转换后台通知服务
   // 注意：必须在 runApp 之前完成，否则 video_convert_page 第一次弹通知可能失败
   await ConvertNotification.instance.init();
+
+  // v1.6.56+ 修复：注册通知栏"停止"按钮的取消回调
+  // 当用户在通知栏点击"停止"时，Kotlin 端通过 MethodChannel 回调到此处，
+  // 再通知 ConvertCoordinator 取消 FFmpeg 转换
+  ForegroundServiceHelper.registerCancelCallback(() {
+    AppLogger.i('Main', '收到通知栏取消请求，取消转换');
+    unawaited(ConvertCoordinator.instance.cancel());
+  });
 
   runApp(const ToolApp());
 }

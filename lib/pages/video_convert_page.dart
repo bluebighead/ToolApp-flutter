@@ -29,18 +29,23 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:percent_indicator/circular_percent_indicator.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../utils/app_logger.dart';
 import '../utils/app_storage.dart';
+import '../utils/batch_convert_coordinator.dart';
 import '../utils/convert_coordinator.dart';
 import '../utils/convert_resume_state.dart';
 import '../utils/ffmpeg_service.dart';
+import '../utils/convert_speed_settings.dart';
 import '../utils/saf_directory_helper.dart';
 import '../utils/video_save_settings.dart';
+import 'batch_convert_page.dart';
 import 'convert_history_page.dart';
 import 'settings_page.dart';
 
@@ -120,6 +125,39 @@ class VideoConvertPage extends StatefulWidget {
 
   @override
   State<VideoConvertPage> createState() => _VideoConvertPageState();
+}
+
+/// v1.6.53+ 新增：M3U8 文件夹选择持久化
+///
+/// 记住用户选择的 M3U8 所在目录（SAF treeUri），
+/// 重启 App 或版本更新后不需要重新选择。
+/// 只要用户没有手动更换目录，就一直记住。
+class M3u8FolderPrefs {
+  static const _kKeyTreeUri = 'm3u8_source_tree_uri';
+
+  /// 保存用户选择的 M3U8 目录 treeUri
+  static Future<void> save(String treeUri) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kKeyTreeUri, treeUri);
+    AppLogger.i('M3u8FolderPrefs', '已保存 M3U8 目录：$treeUri');
+  }
+
+  /// 读取上次保存的 M3U8 目录 treeUri，不存在返回 null
+  static Future<String?> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final uri = prefs.getString(_kKeyTreeUri);
+    if (uri != null && uri.isNotEmpty) {
+      AppLogger.i('M3u8FolderPrefs', '恢复 M3U8 目录：$uri');
+    }
+    return (uri != null && uri.isNotEmpty) ? uri : null;
+  }
+
+  /// 清除保存的 M3U8 目录（用户手动更换目录时调用）
+  static Future<void> clear() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_kKeyTreeUri);
+    AppLogger.i('M3u8FolderPrefs', '已清除 M3U8 目录记录');
+  }
 }
 
 class _VideoConvertPageState extends State<VideoConvertPage> {
@@ -330,6 +368,10 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
     // v1.6.21+ 新增：检查磁盘上是否有上次未完成的暂停任务
     //   如果有，立即把状态机恢复为 paused（_syncFromCoordinatorSnapshot 会处理 UI 投影）
     unawaited(_tryBootstrapPausedTask());
+
+    // v1.6.53+ 新增：自动恢复上次选择的 M3U8 目录
+    //   如果用户之前选择过 M3U8 目录且没有手动更换，重启 App 后自动恢复
+    unawaited(_tryRestoreM3u8Folder());
   }
 
   /// v1.6.21+ 新增：从磁盘加载上次未完成的暂停任务
@@ -352,6 +394,43 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
       );
     } catch (e) {
       AppLogger.w('VideoConvertPage', '加载暂停任务失败：$e', e);
+    }
+  }
+
+  /// v1.6.53+ 新增：自动恢复上次选择的 M3U8 目录
+  ///
+  /// 如果用户之前选择过 M3U8 目录（treeUri 已持久化到 SharedPreferences），
+  /// 且当前没有正在进行的转换任务，则自动恢复该目录的 M3U8 列表。
+  /// 这样用户重启 App 或版本更新后不需要重新选择目录。
+  Future<void> _tryRestoreM3u8Folder() async {
+    // 如果当前有任务在进行中，不恢复
+    if (_isTaskInProgress) return;
+    // 如果已经有输入源了，不覆盖
+    if (_sourceValue != null && _sourceValue!.isNotEmpty) return;
+
+    try {
+      final savedTreeUri = await M3u8FolderPrefs.load();
+      if (savedTreeUri == null || savedTreeUri.isEmpty) return;
+
+      // 验证该 SAF 目录是否仍然可访问
+      final m3u8List = await SafDirectoryHelper.listM3u8InDir(savedTreeUri);
+      if (m3u8List.isEmpty) {
+        AppLogger.i('VideoConvertPage', '上次保存的 M3U8 目录已无 .m3u8 文件，清除记录');
+        await M3u8FolderPrefs.clear();
+        return;
+      }
+
+      // 恢复 treeUri 和兄弟列表
+      _m3u8SourceTreeUri = savedTreeUri;
+      _m3u8Siblings = m3u8List.length > 1 ? List<String>.from(m3u8List) : null;
+      AppLogger.i('VideoConvertPage',
+          '自动恢复 M3U8 目录：$savedTreeUri，${m3u8List.length} 个文件');
+
+      if (mounted) setState(() {});
+    } catch (e) {
+      AppLogger.w('VideoConvertPage', '恢复 M3U8 目录失败：$e');
+      // 恢复失败时清除记录，避免下次继续尝试
+      await M3u8FolderPrefs.clear();
     }
   }
 
@@ -708,41 +787,86 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
         return;
       }
 
+      // ========== v1.6.53+ 持久化用户选择的 M3U8 目录 ==========
+      await M3u8FolderPrefs.save(treeUri);
+
       // ========== v1.6.22+ 新增：记录 treeUri + 兄弟 M3U8 列表 ==========
-      //   这一步在弹"选 M3U8"对话框**之前**做，让输入源卡片可以显示
-      //   "列表"按钮以便快捷切换同目录下的其它 M3U8。
-      //   仅当目录里 m3u8 > 1 个时记下兄弟列表，=1 时不记（不显示列表按钮）。
       _m3u8SourceTreeUri = treeUri;
       _m3u8Siblings = m3u8List.length > 1 ? List<String>.from(m3u8List) : null;
       AppLogger.i('VideoConvertPage',
           '记录 M3U8 来源：treeUri=$treeUri，siblings=${_m3u8Siblings?.length ?? 0}');
 
-      // ========== 用户挑一个 ==========
-      String pickedRel;
+      // ========== v1.6.53+ 优化：直接显示多选列表，一步到位 ==========
       if (m3u8List.length == 1) {
-        pickedRel = m3u8List.first;
+        // 只有一个文件，直接导入
+        await _importM3u8FromTree(treeUri, m3u8List.first);
       } else {
+        // 多个文件：直接弹出多选列表
         if (!mounted) return;
-        final selected = await showDialog<String>(
+        final selected = <String>{};
+        final result = await showDialog<List<String>>(
           context: context,
-          builder: (ctx) => SimpleDialog(
-            title: Text('请选择 M3U8 播放列表（共 ${m3u8List.length} 个）'),
-            children: m3u8List
-                .map(
-                  (rel) => SimpleDialogOption(
-                    onPressed: () => Navigator.pop(ctx, rel),
-                    child: Text(rel, overflow: TextOverflow.ellipsis),
+          builder: (ctx) => StatefulBuilder(
+            builder: (ctx, setDialogState) => AlertDialog(
+              title: Text('选择 M3U8（共 ${m3u8List.length} 个）'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: ListView(
+                  shrinkWrap: true,
+                  children: m3u8List.map((rel) {
+                    final isSelected = selected.contains(rel);
+                    return CheckboxListTile(
+                      title: Text(rel, overflow: TextOverflow.ellipsis),
+                      value: isSelected,
+                      onChanged: (v) {
+                        setDialogState(() {
+                          if (v == true) {
+                            selected.add(rel);
+                          } else {
+                            selected.remove(rel);
+                          }
+                        });
+                      },
+                    );
+                  }).toList(),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('取消'),
+                ),
+                // 只选了1个：直接导入该文件
+                if (selected.length == 1)
+                  FilledButton(
+                    onPressed: () => Navigator.pop(ctx, ['__SINGLE__', selected.first]),
+                    child: const Text('导入'),
                   ),
-                )
-                .toList(),
+                // 选了多个：批量转换
+                if (selected.length > 1)
+                  FilledButton(
+                    onPressed: () => Navigator.pop(ctx, selected.toList()),
+                    child: Text('批量转换（${selected.length} 个）'),
+                  ),
+              ],
+            ),
           ),
         );
-        if (selected == null) return;
-        pickedRel = selected;
-      }
 
-      // ========== 走共享的 import 流程 ==========
-      await _importM3u8FromTree(treeUri, pickedRel);
+        if (result == null || result.isEmpty) return;
+
+        // 单选导入
+        if (result.length == 2 && result.first == '__SINGLE__') {
+          await _importM3u8FromTree(treeUri, result.last);
+          return;
+        }
+
+        // 多选批量转换
+        if (result.length > 1) {
+          _navigateToBatchConvert(result);
+          return;
+        }
+      }
     } catch (e, st) {
       AppLogger.e('VideoConvertPage', '选择 M3U8 目录失败', e, st);
       _showSnack('选择目录失败：$e');
@@ -878,9 +1002,7 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   /// 由输入源卡片右侧的"列表"按钮触发。
   /// 仅在 _m3u8SourceTreeUri 非空 && _m3u8Siblings 非空（=至少 2 个兄弟）时调用。
   ///
-  /// 选中后调 _importM3u8FromTree 复用同 treeUri 走 import 流程：
-  ///   - 缓存命中秒切
-  ///   - 未命中走正常复制（弹 loading）
+  /// v1.6.53+ 优化：直接显示多选列表，一步到位，不再需要先单选再点"多选"按钮
   Future<void> _showM3u8SiblingsDialog() async {
     final treeUri = _m3u8SourceTreeUri;
     final siblings = _m3u8Siblings;
@@ -896,45 +1018,236 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
         '弹出 M3U8 兄弟列表：${siblings.length} 个，当前=$currentName');
 
     if (!mounted) return;
-    final picked = await showDialog<String>(
+
+    // v1.6.53+ 优化：直接使用多选列表，默认选中当前文件
+    final selected = <String>{?currentName};
+
+    final result = await showDialog<List<String>>(
       context: context,
-      builder: (ctx) => SimpleDialog(
-        title: Text('切换 M3U8（共 ${siblings.length} 个）'),
-        children: siblings.map((rel) {
-          final isCurrent = rel == currentName;
-          return SimpleDialogOption(
-            onPressed: () => Navigator.pop(ctx, rel),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    rel,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontWeight:
-                          isCurrent ? FontWeight.w600 : FontWeight.normal,
-                      color: isCurrent ? Colors.blue : null,
-                    ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text('选择 M3U8（共 ${siblings.length} 个）'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView(
+              shrinkWrap: true,
+              children: siblings.map((rel) {
+                final isSelected = selected.contains(rel);
+                final isCurrent = rel == currentName;
+                return CheckboxListTile(
+                  title: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          rel,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (isCurrent)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Text(
+                            '当前',
+                            style: TextStyle(fontSize: 10, color: Colors.blue),
+                          ),
+                        ),
+                    ],
                   ),
-                ),
-                if (isCurrent)
-                  const Icon(Icons.check_circle, size: 16, color: Colors.blue),
-              ],
+                  value: isSelected,
+                  onChanged: (v) {
+                    setDialogState(() {
+                      if (v == true) {
+                        selected.add(rel);
+                      } else {
+                        selected.remove(rel);
+                      }
+                    });
+                  },
+                );
+              }).toList(),
             ),
-          );
-        }).toList(),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            // 只选了1个：切换到该文件
+            if (selected.length == 1)
+              FilledButton(
+                onPressed: selected.first != currentName
+                    ? () => Navigator.pop(ctx, ['__SINGLE__', selected.first])
+                    : null,
+                child: const Text('切换'),
+              ),
+            // 选了多个：批量转换
+            if (selected.length > 1)
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, selected.toList()),
+                child: Text('批量转换（${selected.length} 个）'),
+              ),
+          ],
+        ),
       ),
     );
-    if (picked == null) return;
 
-    // 选了跟当前一样的，啥也不做
-    if (picked == currentName) {
-      _showSnack('已是当前 M3U8：$picked');
+    if (result == null || result.isEmpty) return;
+
+    // 单选切换
+    if (result.length == 2 && result.first == '__SINGLE__') {
+      final picked = result.last;
+      if (picked == currentName) {
+        _showSnack('已是当前 M3U8：$picked');
+        return;
+      }
+      AppLogger.i('VideoConvertPage', '切换 M3U8：$currentName -> $picked');
+      await _importM3u8FromTree(treeUri, picked);
       return;
     }
 
-    AppLogger.i('VideoConvertPage', '切换 M3U8：$currentName -> $picked');
-    await _importM3u8FromTree(treeUri, picked);
+    // 多选批量转换
+    if (result.length > 1) {
+      _navigateToBatchConvert(result);
+      return;
+    }
+
+    // 只选了当前文件且点了切换（不应该到这里，但兜底）
+    if (result.length == 1 && result.first != currentName) {
+      await _importM3u8FromTree(treeUri, result.first);
+    }
+  }
+
+  /// v1.6.43+ 新增：跳转到批量转换页面
+  ///
+  /// 根据选中的 M3U8 文件列表构造 BatchConvertTask 并跳转
+  /// 
+  /// 关键修复：当用户从兄弟列表多选多个 M3U8 时，_importedTempDir 只包含
+  /// 当前单个 M3U8 及其 segments，其他兄弟文件不在该目录中。
+  /// 因此需要把所有选中的 M3U8 都复制到一个新的批量临时目录中。
+  Future<void> _navigateToBatchConvert(List<String> selectedFiles) async {
+    final format = _format;
+    final quality = _quality;
+
+    // 获取保存路径
+    // v1.6.52+ 修复：无论 SAF 还是沙盒模式，FFmpeg 都先写入 App 私有目录
+    // SAF 模式下后续由原生层将文件从私有目录复制到 SAF 自定义目录
+    // 旧版 SAF 模式下 outputPath 为空字符串，导致 FFmpeg 写入当前工作目录
+    final saveDir = await AppStorage.getSubDirectory(
+      '${AppStorage.videosSubFolder}/converted',
+    );
+
+    // 如果是从 SAF treeUri 导入的 M3U8，需要把所有选中的文件复制到新的临时目录
+    Directory? batchTempDir;
+    if (_m3u8SourceTreeUri != null && _m3u8SourceTreeUri!.isNotEmpty) {
+      batchTempDir = await _prepareBatchImportDir(selectedFiles);
+      if (batchTempDir == null) {
+        if (!mounted) return;
+        _showSnack('准备批量转换文件失败');
+        return;
+      }
+    }
+
+    final tasks = <BatchConvertTask>[];
+    for (int i = 0; i < selectedFiles.length; i++) {
+      final rel = selectedFiles[i];
+      // 输入路径：优先用批量临时目录中的文件
+      final inputPath = batchTempDir != null
+          ? '${batchTempDir.path}/$rel'
+          : rel;
+
+      // 输出文件名：原名_序号.扩展名
+      final baseName = p.basenameWithoutExtension(rel);
+      final outputName = '${baseName}_${i + 1}.${format.name}';
+      final outputPath = '${saveDir.path}/$outputName';
+
+      tasks.add(BatchConvertTask(
+        inputPath: inputPath,
+        sourceName: rel,
+        outputPath: outputPath,
+        index: i + 1,
+      ));
+    }
+
+    // v1.6.46+ 修复：把任务保存到协调器，实现记录持久化
+    BatchConvertCoordinator.instance.tasksList = tasks;
+
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => BatchConvertPage(
+          tasks: tasks,
+          format: format,
+          quality: quality,
+          saveSettings: _saveSettings,
+        ),
+      ),
+    );
+  }
+
+  /// v1.6.43+ 新增：为批量转换准备临时目录
+  ///
+  /// 把所有选中的 M3U8 文件及其 segments 复制到一个新的临时目录中
+  Future<Directory?> _prepareBatchImportDir(List<String> selectedFiles) async {
+    final treeUri = _m3u8SourceTreeUri;
+    if (treeUri == null || treeUri.isEmpty) return null;
+
+    // v1.6.52+ 修复：使用 getApplicationCacheDirectory() 代替 Directory.systemTemp
+    // 原因：Android 11+ 限制 FFmpeg 原生库访问 systemTemp 目录，
+    //   导致 "No such file or directory" 错误。
+    //   getApplicationCacheDirectory() 返回的 cache 目录 FFmpeg 可以正常访问。
+    final cacheDir = await getApplicationCacheDirectory();
+    final batchDir = await cacheDir.createTemp(
+      'm3u8_batch_${DateTime.now().millisecondsSinceEpoch}_',
+    );
+    AppLogger.i('VideoConvertPage', '批量转换临时目录：${batchDir.path}');
+
+    // 显示进度对话框
+    if (!mounted) return null;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => _ImportProgressDialog(destDirPath: batchDir.path),
+    );
+
+    // v1.6.46+ 优化：并行复制所有选中的 M3U8 文件及其 segments
+    // 使用 Future.wait 同时发起所有复制任务，而非串行逐个复制
+    final copyFutures = <Future<int>>[];
+    for (int i = 0; i < selectedFiles.length; i++) {
+      final rel = selectedFiles[i];
+      copyFutures.add(
+        SafDirectoryHelper.copyM3u8WithSegments(
+          treeUri: treeUri,
+          destDir: batchDir.path,
+          m3u8Rel: rel,
+        ).then((copied) {
+          AppLogger.i('VideoConvertPage', '已复制 $rel：$copied 个文件');
+          return copied;
+        }).catchError((e) {
+          AppLogger.e('VideoConvertPage', '复制 $rel 失败：$e');
+          return 0;
+        }),
+      );
+    }
+
+    // 等待所有复制任务完成
+    final results = await Future.wait(copyFutures);
+    final totalCopied = results.fold<int>(0, (sum, count) => sum + count);
+
+    // 关闭进度对话框
+    if (!mounted) return null;
+    Navigator.of(context, rootNavigator: true).pop();
+
+    if (totalCopied == 0) {
+      AppLogger.e('VideoConvertPage', '批量复制失败：没有文件被复制');
+      return null;
+    }
+
+    AppLogger.i('VideoConvertPage', '批量复制完成：共 $totalCopied 个文件');
+    return batchDir;
   }
 
   /// 为单个 M3U8 准备 import 目录：缓存命中直接复用；缓存未命中则精准复制
@@ -964,8 +1277,11 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
     // 切到新 root 时，旧 root 的缓存从磁盘清掉
     await _evictCachesForOtherTrees(treeUri, deleteDirs: true);
 
-    // 先把目标目录建出来，progress dialog 才能轮询到它
-    final newDir = await Directory.systemTemp.createTemp(
+    // v1.6.52+ 修复：使用 getApplicationCacheDirectory() 代替 Directory.systemTemp
+    // 原因：Android 11+ 限制 FFmpeg 原生库访问 systemTemp 目录，
+    //   导致 "No such file or directory" 错误。
+    final cacheDir = await getApplicationCacheDirectory();
+    final newDir = await cacheDir.createTemp(
       'm3u8_import_${DateTime.now().millisecondsSinceEpoch}_',
     );
     AppLogger.i('VideoConvertPage', '精准复制到：${newDir.path}');
@@ -1774,6 +2090,18 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
     }
   }
 
+  /// v1.6.44+ 新增：加速模式 → 中文显示名
+  String _speedModeLabel(ConvertSpeedMode mode) {
+    switch (mode) {
+      case ConvertSpeedMode.off:
+        return '关闭（默认）';
+      case ConvertSpeedMode.hardware:
+        return '硬件编码';
+      case ConvertSpeedMode.ultrafast:
+        return 'ultrafast';
+    }
+  }
+
   /// 质量档位 → 中文显示名
   String _qualityDisplayName(VideoQuality q) {
     switch (q) {
@@ -1835,16 +2163,34 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   }
 
   /// 质量档位 → 输出体积相对源的比例系数
+  ///
+  /// v1.6.56+ 优化：不同格式的压缩效率不同，预估系数应随格式变化
+  ///   - MP4 (H.264): 基准
+  ///   - MKV (H.264): 容器开销略小，约 -2%
+  ///   - MOV (H.264): 容器开销略大，约 +3%
   double _qualitySizeFactor(VideoQuality q) {
+    // 基础系数（MP4 H.264）
+    double base;
     switch (q) {
       case VideoQuality.original:
-        return 1.00;
+        base = 1.00;
       case VideoQuality.high:
-        return 0.65;
+        base = 0.65;
       case VideoQuality.standard:
-        return 0.40;
+        base = 0.40;
       case VideoQuality.low:
-        return 0.22;
+        base = 0.22;
+    }
+    // 根据输出格式微调
+    switch (_format) {
+      case VideoFormat.mp4:
+        return base; // 基准
+      case VideoFormat.mkv:
+        // MKV 容器开销略小
+        return q == VideoQuality.original ? base : base * 0.98;
+      case VideoFormat.mov:
+        // MOV 容器开销略大
+        return q == VideoQuality.original ? base * 1.03 : base * 1.03;
     }
   }
 
@@ -1909,6 +2255,12 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
             ],
           ),
           actions: [
+            // v1.6.43+ 新增：批量转换入口
+            IconButton(
+              tooltip: '批量转换',
+              icon: const Icon(Icons.playlist_play),
+              onPressed: _openBatchConvertPage,
+            ),
             // 顶栏历史记录入口
             IconButton(
               tooltip: '历史记录',
@@ -2270,6 +2622,38 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
                   style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
                 ),
               ],
+            ),
+            const SizedBox(height: 4),
+            // v1.6.44+ 新增：显示当前加速模式
+            FutureBuilder<ConvertSpeedMode>(
+              future: ConvertSpeedSettings.load(),
+              builder: (context, snapshot) {
+                final mode = snapshot.data ?? ConvertSpeedMode.off;
+                return Row(
+                  children: [
+                    Icon(Icons.speed, size: 14, color: Colors.grey.shade600),
+                    const SizedBox(width: 4),
+                    Text(
+                      '加速模式：${_speedModeLabel(mode)}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: mode == ConvertSpeedMode.off
+                            ? Colors.grey.shade600
+                            : Theme.of(context).colorScheme.primary,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '（设置中可修改）',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.grey.shade500,
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
             const SizedBox(height: 4),
             Text(
@@ -2999,6 +3383,24 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
     );
   }
 
+  /// v1.6.43+ 新增：打开批量转换页面
+  ///
+  /// v1.6.46+ 修复：从协调器获取已保存的任务列表，实现记录持久化
+  Future<void> _openBatchConvertPage() async {
+    AppLogger.i('VideoConvertPage', '打开批量转换页面');
+    final savedTasks = BatchConvertCoordinator.instance.mutableTasks;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => BatchConvertPage(
+          tasks: savedTasks,
+          format: _format,
+          quality: _quality,
+          saveSettings: _saveSettings,
+        ),
+      ),
+    );
+  }
+
   /// 通用：键值对信息行
   ///
   /// v1.6.22+ 新增 [trailing] 槽位：可选地放一个控件在行的最右侧（值文本之后）。
@@ -3207,8 +3609,10 @@ class _SourceChoiceCard extends StatelessWidget {
   }
 }
 
-/// 导入进度对话框：每 300ms 轮询 [destDirPath] 的递归文件数，
-/// 实时显示"已复制 N 个文件…"，避免用户在长时间复制时误以为卡死。
+/// 导入进度对话框：监听 Kotlin 端 EventChannel 推送的实时进度，
+/// 显示"已复制 N 个文件（X MB）…"，避免用户在长时间复制时误以为卡死。
+/// v1.6.41+ 修复：旧版每 300ms 轮询 dir.list(recursive: true) 导致大目录卡顿，
+///   新版改为 Kotlin 端主动推送（每 10 个文件或 5MB 上报一次），UI 不再阻塞。
 class _ImportProgressDialog extends StatefulWidget {
   const _ImportProgressDialog({required this.destDirPath});
 
@@ -3219,52 +3623,33 @@ class _ImportProgressDialog extends StatefulWidget {
 }
 
 class _ImportProgressDialogState extends State<_ImportProgressDialog> {
-  // 实时统计的目标目录里的文件总数
+  // 实时统计的目标目录里的文件总数（由 Kotlin 端 EventChannel 推送）
   int _fileCount = 0;
-  // 累计复制的字节数
+  // 累计复制的字节数（由 Kotlin 端 EventChannel 推送）
   int _byteCount = 0;
-  Timer? _timer;
+  StreamSubscription<CopyProgress>? _subscription;
 
   @override
   void initState() {
     super.initState();
-    // 立刻刷一次，UI 上来就有数字
-    _poll();
-    // 然后每 300ms 轮询
-    _timer = Timer.periodic(const Duration(milliseconds: 300), (_) => _poll());
-  }
-
-  Future<void> _poll() async {
-    try {
-      final dir = Directory(widget.destDirPath);
-      if (!await dir.exists()) return;
-      // 只统计文件数 + 字节数；目录本身忽略
-      int files = 0;
-      int bytes = 0;
-      await for (final ent
-          in dir.list(recursive: true, followLinks: false)) {
-        try {
-          if (ent is File) {
-            files++;
-            bytes += await ent.length();
-          }
-        } catch (_) {
-          // 复制中可能瞬时读不到 size，忽略
-        }
-      }
-      if (!mounted) return;
-      setState(() {
-        _fileCount = files;
-        _byteCount = bytes;
-      });
-    } catch (_) {
-      // 轮询失败不要弹错误，复制还在进行中
-    }
+    // 监听 Kotlin 端推送的实时进度，不再轮询文件系统
+    _subscription = SafDirectoryHelper.copyProgressStream.listen(
+      (progress) {
+        if (!mounted) return;
+        setState(() {
+          _fileCount = progress.fileCount;
+          _byteCount = progress.byteCount;
+        });
+      },
+      onError: (error) {
+        AppLogger.w('VideoConvertPage', '复制进度流异常：$error');
+      },
+    );
   }
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _subscription?.cancel();
     super.dispose();
   }
 

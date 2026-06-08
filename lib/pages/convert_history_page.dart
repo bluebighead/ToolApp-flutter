@@ -17,6 +17,7 @@ import 'package:open_filex/open_filex.dart';
 
 import '../utils/app_logger.dart';
 import '../utils/convert_history.dart';
+import '../utils/video_save_settings.dart';
 
 class ConvertHistoryPage extends StatefulWidget {
   const ConvertHistoryPage({super.key});
@@ -95,26 +96,107 @@ class _ConvertHistoryPageState extends State<ConvertHistoryPage> {
   }
 
   /// 单条删除
+  /// v1.6.55+ 优化：询问用户是仅删除记录还是同时删除输出文件
   Future<void> _onDeleteOne(ConvertHistoryEntry e) async {
-    final ok = await showDialog<bool>(
+    final hasOutputFile = e.outputPath != null && e.outputPath!.isNotEmpty;
+    final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('删除该条记录？'),
-        content: Text('确定要删除这条 ${TimeFormat.shortDateTime(e.timestampMs)} 的记录吗？'),
+        title: const Text('删除记录'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('记录时间：${TimeFormat.shortDateTime(e.timestampMs)}'),
+            const SizedBox(height: 12),
+            if (hasOutputFile)
+              const Text('请选择删除方式：')
+            else
+              const Text('该记录没有输出文件，仅删除记录。'),
+          ],
+        ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
+            onPressed: () => Navigator.of(ctx).pop(null),
             child: const Text('取消'),
           ),
+          // 仅删除记录
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('删除'),
+            onPressed: () => Navigator.of(ctx).pop('record_only'),
+            child: const Text('仅删除记录'),
           ),
+          // 同时删除输出文件
+          if (hasOutputFile)
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop('with_file'),
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              child: const Text('同时删除文件'),
+            ),
         ],
       ),
     );
-    if (ok != true) return;
+    if (result == null) return;
+
+    // 如果选择同时删除文件，先尝试删除输出文件
+    if (result == 'with_file' && e.outputPath != null) {
+      int deletedCount = 0;
+      final errors = <String>[];
+
+      // 1) 删除沙盒路径的文件
+      final file = File(e.outputPath!);
+      if (await file.exists()) {
+        try {
+          await file.delete();
+          deletedCount++;
+          AppLogger.i('ConvertHistory', '已删除沙盒文件：${e.outputPath}');
+        } catch (err) {
+          errors.add('沙盒文件删除失败：$err');
+          AppLogger.e('ConvertHistory', '删除沙盒文件失败：$err');
+        }
+      } else {
+        AppLogger.i('ConvertHistory', '沙盒文件不存在：${e.outputPath}');
+      }
+
+      // 2) v1.6.57+ 修复：如果是 SAF 模式，还需要删除 SAF 自定义目录中的文件
+      // v1.6.58+ 修复：使用 path 包的 basename 提取文件名，兼容不同平台路径分隔符
+      try {
+        final saveSettings = await VideoSaveSettings.load();
+        if (saveSettings.mode == VideoSaveMode.customSaf &&
+            saveSettings.customSafTreeUri != null) {
+          // 从输出路径中提取文件名（兼容 / 和 \ 路径分隔符）
+          final outputPath = e.outputPath!;
+          final lastSep = outputPath.lastIndexOf(RegExp(r'[/\\]'));
+          final fileName = lastSep >= 0 ? outputPath.substring(lastSep + 1) : outputPath;
+          AppLogger.i('ConvertHistory', '尝试删除 SAF 文件：$fileName（原始路径：$outputPath）');
+          const channel = MethodChannel('com.example.toolapp/storage');
+          final safDeleted = await channel.invokeMethod<bool?>(
+            'deleteFileFromSafTree',
+            {
+              'treeUri': saveSettings.customSafTreeUri,
+              'fileName': fileName,
+            },
+          );
+          if (safDeleted == true) {
+            deletedCount++;
+            AppLogger.i('ConvertHistory', '已删除 SAF 文件：$fileName');
+          } else {
+            AppLogger.i('ConvertHistory', 'SAF 文件不存在或未找到：$fileName');
+          }
+        }
+      } catch (err) {
+        errors.add('SAF 文件删除失败：$err');
+        AppLogger.e('ConvertHistory', '删除 SAF 文件失败：$err');
+      }
+
+      if (deletedCount > 0) {
+        _snack('已删除 $deletedCount 个输出文件');
+      } else if (errors.isNotEmpty) {
+        _snack('删除失败：${errors.first}');
+      } else {
+        _snack('输出文件已不存在，仅删除记录');
+      }
+    }
+
     await ConvertHistory.remove(e.id);
     await _load();
   }
