@@ -35,6 +35,10 @@ class HomePage extends StatelessWidget {
       name: '视频格式转换',
       icon: Icons.video_settings,
       color: Colors.deepOrange,
+      // v1.6.34+ 标记为 Beta：视频格式转换功能还在实验室阶段，
+      //   暂停/取消/状态机还存在一些边界场景未完全收敛，
+      //   标 Beta 提示用户该功能尚未完全稳定
+      isBeta: true,
       pageBuilder: (_) => const VideoConvertPage(),
     ),
   ];

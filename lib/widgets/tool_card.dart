@@ -38,19 +38,33 @@ class ToolCard extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               mainAxisSize: MainAxisSize.min,
               children: [
-                // 工具图标（带浅色圆形背景）
-                Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: tool.color.withValues(alpha: 0.15),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    tool.icon,
-                    size: 28,
-                    color: tool.color,
-                  ),
+                // 工具图标（带浅色圆形背景）+ 右上角 Beta 角标
+                Stack(
+                  clipBehavior: Clip.none,
+                  alignment: Alignment.center,
+                  children: [
+                    Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: tool.color.withValues(alpha: 0.15),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        tool.icon,
+                        size: 28,
+                        color: tool.color,
+                      ),
+                    ),
+                    // v1.6.34+ Beta 角标：仅当 isBeta=true 时显示
+                    //   放在 Stack 右上角，绝对定位，圆形 + 橙色 + 白字
+                    if (tool.isBeta)
+                      Positioned(
+                        top: -4,
+                        right: -4,
+                        child: _buildBetaBadge(tool.color),
+                      ),
+                  ],
                 ),
                 const SizedBox(height: 8),
                 // 工具名称
@@ -67,6 +81,38 @@ class ToolCard extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  /// 构建 Beta 实验室功能角标
+  ///
+  /// 样式：圆形 + 浅色背景 + 主题色文字 + "Beta" 文字。
+  /// 用主题色（tool.color）作边框和文字色，与卡片配色协调。
+  Widget _buildBetaBadge(Color themeColor) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: themeColor, width: 1.2),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.08),
+            blurRadius: 2,
+            offset: const Offset(0, 1),
+          ),
+        ],
+      ),
+      child: Text(
+        'Beta',
+        style: TextStyle(
+          fontSize: 9,
+          color: themeColor,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.3,
+          height: 1.0,
         ),
       ),
     );

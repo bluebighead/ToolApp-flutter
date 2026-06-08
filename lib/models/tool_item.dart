@@ -12,11 +12,16 @@ class ToolItem {
   final Color color;
   // 点击工具后跳转的页面构建器
   final WidgetBuilder pageBuilder;
+  // 是否标记为 Beta（实验室功能，开发中、可能存在不足）
+  //   true 时 ToolCard 会在右上角显示一个 "Beta" 小角标，
+  //   提示用户该功能尚未完全稳定
+  final bool isBeta;
 
   const ToolItem({
     required this.name,
     required this.icon,
     required this.color,
     required this.pageBuilder,
+    this.isBeta = false,
   });
 }

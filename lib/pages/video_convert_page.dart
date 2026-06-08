@@ -37,6 +37,7 @@ import 'package:path/path.dart' as p;
 import '../utils/app_logger.dart';
 import '../utils/app_storage.dart';
 import '../utils/convert_coordinator.dart';
+import '../utils/convert_resume_state.dart';
 import '../utils/ffmpeg_service.dart';
 import '../utils/saf_directory_helper.dart';
 import '../utils/video_save_settings.dart';
@@ -148,6 +149,15 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   /// 转换状态
   _ConvertStatus _status = _ConvertStatus.idle;
 
+  /// v1.6.28+ 新增（bug12 需求配套）：
+  ///   用户要求"在开始转换时（running）以及暂停时（paused），
+  ///   不能修改输出格式、输出质量、保存位置，只有重新开始才能修改"。
+  ///   之前 _status == _ConvertStatus.running 是唯一判定，会让 paused
+  ///   状态下这些控件还活着，用户能改但改了也没用（实际不生效，体验割裂）。
+  ///   改成两个状态都视为"任务进行中"，所有相关控件都 disabled。
+  bool get _isTaskInProgress =>
+      _status == _ConvertStatus.running || _status == _ConvertStatus.paused;
+
   /// 进度 0.0~1.0
   double _progress = 0.0;
 
@@ -182,6 +192,26 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   /// 通过"选择 M3U8 所在目录"导入的临时目录（转换完成后清理）
   Directory? _importedTempDir;
 
+  /// v1.6.22+ 新增：M3U8 来源 treeUri
+  ///
+  /// 当输入源是通过"添加 M3U8 源 -> 选择目录"流程导入的 M3U8 时，
+  /// 记录该目录的 SAF treeUri，用于：
+  ///   - 后续在输入源卡片中显示"列表"按钮，让用户快捷切换同目录下的其它 M3U8
+  ///   - 切换时不需要重新授权目录，直接复用 treeUri
+  ///
+  /// 只在 M3U8 导入流程中赋值，切换到其它输入类型（URL / 本地视频）时清空。
+  String? _m3u8SourceTreeUri;
+
+  /// v1.6.22+ 新增：同目录下所有 M3U8 文件列表
+  ///
+  /// 只在以下条件**同时**满足时才有值：
+  ///   1) 输入源是 M3U8（_m3u8SourceTreeUri 非空）
+  ///   2) 该目录下 .m3u8 文件数量 > 1（=1 时不显示列表按钮）
+  ///
+  /// 用于在输入源卡片中显示"列表"按钮，弹出的列表展示这一组兄弟 M3U8。
+  /// 切换其中任意一个都会触发同目录下的重新 import（缓存命中则秒切）。
+  List<String>? _m3u8Siblings;
+
   /// 当前视频保存设置（每次页面进入时从 SharedPreferences 重读一次；
   /// 设置页改完返回后，didChangeDependencies 会触发重读）
   VideoSaveSettingsSnapshot _saveSettings = (
@@ -196,6 +226,58 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   /// (v1.6.18 留作扩展位；v1.6.19+ 后该字段仅作为 UI 提示位，
   ///  真正的后台运行由 ConvertCoordinator 持续跑 FFmpeg 实现)
   bool _backgroundMode = false;
+
+  /// v1.6.29+ 新增（bug13 修复配套）：
+  ///   标记"用户已请求取消转换，正在等待 FFmpeg 原生层收尾"。
+  ///   旧版没有这个标志，用户点完取消按钮后：
+  ///     - await ConvertCoordinator.instance.cancel() 会一直阻塞 5~30s
+  ///     - 这期间用户看到按钮没反应，会反复点（甚至以为 App 卡死）
+  ///   新版 Coordinator.cancel() 改为非阻塞（不 await FFmpegService.cancel()），
+  ///   立即返回。这里配套加 _cancelling 标志：
+  ///     - 用户点取消 → _cancelling = true，按钮立即变成"取消中..."且禁用
+  ///     - 状态机收到 FFmpeg session 回调 → _emitState(cancelled)
+  ///       Coordinator.cancelled 状态会触发 _syncFromCoordinatorSnapshot，
+  ///       那里 _cancelling 应该被复位为 false（见 _syncFromCoordinatorSnapshot）
+  ///   这样大体积文件取消时用户有即时视觉反馈，体感流畅。
+  bool _cancelling = false;
+
+  /// v1.6.29+ 新增（bug13 修复配套）：
+  ///   同 _cancelling，标记"用户已请求暂停转换，正在等待 FFmpeg 收尾"。
+  ///   暂停时也要走非阻塞流程（v1.6.29+ 把 pause() 也改成了 fire-and-forget），
+  ///   所以也需要一个标志让按钮立即变"暂停中..."且禁用，避免用户重复点。
+  bool _pausing = false;
+
+  /// v1.6.29+ 新增（bug15 修复配套）：
+  ///   标记"用户已请求继续转换（resume），正在等待 FFmpeg 启动"。
+  ///   resume() 调用后 Coordinator 会立刻 _emitState(running)，
+  ///   状态机会切到 running，UI 进入"准备中..."分支。
+  ///   但大体积文件时 FFmpeg 启动 + input seek 可能要 5~10 秒才出第一帧，
+  ///   这期间进度环停在"准备中..."会让用户以为卡死。
+  ///   加 _resuming 标志后，UI 可以用"正在恢复..."替代"准备中..."，
+  ///   让用户清楚知道系统在干活。
+  ///   标志在第一次收到 _hasDuration=true 的进度事件时复位（见
+  ///   _onCoordinatorEvent / ConvertProgressEvent 分支）。
+  bool _resuming = false;
+
+  /// v1.6.30+ 新增（bug16 修复配套）：
+  ///   标记"FFmpeg 会话已创建，正在启动到出第一帧之间"。
+  ///   跟 _resuming 的区别：
+  ///     - _resuming：用户视角"点了继续转换"
+  ///     - _ffmpegStarting：FFmpeg 视角"session 已建好，主线程在跑"
+  ///   流程：
+  ///     - 用户点继续 → _resuming=true
+  ///     - Coordinator 发初始进度 → UI 收到（_resuming 不复位）
+  ///     - FFmpegKit.executeWithArgumentsAsync 返回 session
+  ///       → Coordinator 收到 onSessionStarting 回调
+  ///       → 推 ConvertSessionStartingEvent(phase="starting-resume")
+  ///       → UI 收到，_ffmpegStarting=true，按钮文字从
+  ///         "正在恢复转换..." 切到 "FFmpeg 启动中..."
+  ///     - 第一帧 statistics 到达 → ConvertProgressEvent(hasDuration=true)
+  ///       → UI 收到，_resuming=false（已存在的逻辑）
+  ///       → _ffmpegStarting=false（新增的复位逻辑）
+  ///   没这个标志：用户会卡在"正在恢复转换..." 5~10 秒，
+  ///   不知道系统在干啥。
+  bool _ffmpegSessionStarting = false;
 
   /// 导入缓存：`treeUri + NUL + m3u8Rel` -> 缓存条目
   ///
@@ -232,6 +314,18 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
 
     // 订阅 Coordinator 事件流，把 FFmpeg 进度/状态同步到 UI
     _coordSub = ConvertCoordinator.instance.subscribe(_onCoordinatorEvent);
+
+    // v1.6.22+ 修复（bug1）：
+    //   退出页面再重新进入时，如果 Coordinator 上还有任务在跑（running），
+    //   必须立即把 Coordinator 的状态/进度/输入源信息投影到本地 UI，
+    //   否则按钮会停留在"开始转换"的禁用态（因为 _canConvert 看到
+    //   Coordinator 正在跑就判 false），且输入源/格式/质量等信息也会全部清空。
+    //
+    //   这里先调一次 _syncFromCoordinatorSnapshot(eventDriven: false)，
+    //   后续再走 _tryBootstrapPausedTask 走"暂停任务从磁盘恢复"流程。
+    //   两条路径互不冲突：running/paused 走前者；纯 paused（无运行时内存状态）
+    //   走后者补充。
+    _syncFromCoordinatorSnapshot();
 
     // v1.6.21+ 新增：检查磁盘上是否有上次未完成的暂停任务
     //   如果有，立即把状态机恢复为 paused（_syncFromCoordinatorSnapshot 会处理 UI 投影）
@@ -274,6 +368,11 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   /// 触发时机：
   ///   1) initState 末尾（如果进来时任务已经在跑，恢复 UI）
   ///   2) Coordinator 状态变化事件里（带 _eventDriven 标记）
+  ///
+  /// v1.6.22+ 修复（bug1）：
+  ///   退出页面再重新进入时，需要把 Coordinator 里 `_config` 持有的
+  ///   输入源信息（路径/URL、名称、模式、格式、质量）也恢复出来，
+  ///   这样按钮区域会显示"暂停/取消"，输入源卡片也保持原来的信息。
   void _syncFromCoordinatorSnapshot({bool eventDriven = false}) {
     final coord = ConvertCoordinator.instance;
     if (coord.state == ConvertState.idle) {
@@ -294,6 +393,30 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
       _bitrateDisplay = coord.progress.bitrate;
       _timeDisplay = coord.progress.time;
       _etaSeconds = coord.progress.etaSeconds;
+      // v1.6.22+ 修复（bug1）：
+      //   恢复输入源信息（仅在本地字段为空时填，避免覆盖用户切换过的输入）
+      final cfg = coord.currentConfig;
+      if (cfg != null) {
+        if (_sourceValue == null || _sourceValue!.isEmpty) {
+          _inputMode = cfg.isNetwork ? _InputMode.url : _InputMode.file;
+          _sourceName = cfg.sourceName;
+          _sourceValue = cfg.input;
+          // M3U8 复制目录来自 Coordinator（任务正在用，不能在 State 重建时清）
+          if (cfg.importedTempDir != null) {
+            _importedTempDir = cfg.importedTempDir;
+          }
+        }
+        // 格式 / 质量：始终用 Coordinator 的，跟随当前任务的配置
+        _format = cfg.format;
+        _quality = cfg.quality;
+        // 保存设置：跟随 Coordinator 的（用户去设置页改过不会回写到 Coordinator，
+        // 这里只在本地空时填，避免覆盖"已经按 Coordinator 配置跑过"的设置）
+        if (_saveSettings.mode != cfg.saveSettings.mode ||
+            _saveSettings.customSafTreeUri != cfg.saveSettings.customSafTreeUri ||
+            _saveSettings.customDisplayName != cfg.saveSettings.customDisplayName) {
+          _saveSettings = cfg.saveSettings;
+        }
+      }
       // 映射状态
       switch (coord.state) {
         case ConvertState.running:
@@ -304,6 +427,15 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
           // v1.6.21+ 新增：保留已编码的进度值，UI 提示"已暂停"
           _status = _ConvertStatus.paused;
           _backgroundMode = false;
+          // v1.6.29+ bug13 配套：状态机从 running 切到 paused 时，
+          //   说明 FFmpeg 已经收尾完成，_pausing 标志位使命结束，复位。
+          //   复位时不需要单独弹 Snack（_onCoordinatorEvent 的 paused 分支会弹）。
+          _pausing = false;
+          // v1.6.36+ 修复（bug21 配套）：
+          //   状态机从 running 切到 paused 时，也复位 _resuming 和 _ffmpegSessionStarting
+          //   标志位，避免下次续转时 UI 一直显示"恢复中..."或"FFmpeg 启动中..."。
+          _resuming = false;
+          _ffmpegSessionStarting = false;
           break;
         case ConvertState.done:
           _status = _ConvertStatus.done;
@@ -317,8 +449,41 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
           _backgroundMode = false;
           break;
         case ConvertState.cancelled:
+          // v1.6.31+ 修复（bug4 第三次升级）：
+          //   v1.6.22+ 第一次：取消时清空输入源卡片（防"No such file or directory"）
+          //   v1.6.30+ 第二次：取消时保留 _inputMode/_sourceValue/_sourceName 等
+          //                    用户态数据，但清掉 _importedTempDir/_m3u8SourceTreeUri/_m3u8Siblings
+          //   v1.6.31+ 第三次：用户再次反馈"列表按钮和列表内容都消失了，体验差"。
+          //                    这次彻底保留输入源卡片的**所有**数据：
+          //                      - _inputMode / _sourceValue / _sourceName / _sourceSize
+          //                        / _sourceDurationMs / _bitrateDisplay / _timeDisplay
+          //                        （用户手动选/输入的，下次点"开始转换"还能复用）
+          //                      - _m3u8SourceTreeUri / _m3u8Siblings
+          //                        （M3U8 列表按钮 + 列表内容，用户反馈必须保留）
+          //                      - _importedTempDir
+          //                        （指向被 Coordinator 删的 tempDir，引用失效但留
+          //                          着不影响显示；如果用户从列表重新选 .m3u8，
+          //                          _pickM3u8Folder 会重新创建并赋值）
+          //                    关键点：如果用户用的是"本地 M3U8 文件"模式
+          //                    （_inputMode=file 且 _sourceValue 指向 .m3u8），
+          //                    点了"开始转换"后会重新走 M3U8Normalizer 规范化，
+          //                    **自动**用 fresh tempDir，不需要用户再点 M3U8 列表按钮
+          //                    清空触发条件：用户**主动**调 _pickM3u8Folder() 重新
+          //                    选 M3U8 文件夹时，_evictCachesForOtherTrees() 会删
+          //                    旧 cache + 重新扫描填充 _m3u8Siblings；
+          //                    或者用户主动清空输入源（暂未提供此 UI）
+          //   对"暂停"无影响：暂停走 paused 分支，不进这里
           _status = _ConvertStatus.idle;
           _backgroundMode = false;
+          // v1.6.31+ 第三次升级：什么都不清！只重置输出状态。
+          //   _importedTempDir 留着（指向已删的 tempDir，无害）；
+          //   _m3u8SourceTreeUri / _m3u8Siblings 留着（列表按钮 + 列表内容）；
+          //   _inputMode / _sourceValue / _sourceName / _sourceSize 留着（用户输入）。
+          // 重置输出状态
+          _resetOutputState();
+          // v1.6.29+ bug13 配套：状态机切到 cancelled 时，FFmpeg 已经收尾完毕，
+          //   取消流程走完，_cancelling 标志位使命结束，复位。
+          _cancelling = false;
           break;
         case ConvertState.idle:
           break;
@@ -346,6 +511,32 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
         _bitrateDisplay = event.progress.bitrate;
         _timeDisplay = event.progress.time;
         _etaSeconds = event.progress.etaSeconds;
+        // v1.6.29+ 修复（bug15 配套）：
+        //   第一次收到 _hasDuration=true 的进度事件，说明 FFmpeg 已经出第一帧，
+        //   "正在恢复..."的提示可以撤了，进度环开始显示真实进度。
+        // v1.6.36+ 修复（bug22 配套）：
+        //   续转时不再传 onSessionStarting 回调，UI 不会进入"FFmpeg 启动中"状态。
+        //   _resuming 只在收到 hasDuration=true 的进度事件时才复位，
+        //   确保"正在恢复转换..."一直显示到 FFmpeg 真正出第一帧。
+        if (_resuming && event.progress.hasDuration) {
+          _resuming = false;
+        }
+        // v1.6.30+ 修复（bug16 配套）：
+        //   第一帧 statistics 到达同时也意味着 FFmpeg 启动阶段结束，
+        //   复位 _ffmpegSessionStarting 标志，让 UI 从 "FFmpeg 启动中..."
+        //   切回 "正在转换..." 文字。
+        if (event.progress.hasDuration) {
+          _ffmpegSessionStarting = false;
+        }
+      });
+    } else if (event is ConvertSessionStartingEvent) {
+      // v1.6.30+ 修复（bug16 配套）：
+      //   收到 FFmpeg 会话启动事件，UI 切换文字为 "FFmpeg 启动中..."。
+      //   此时进度条已经在 resumeProgressBase（如 30%），用户能看到
+      //   "进度没动但系统在干活" 的状态。
+      if (!mounted) return;
+      setState(() {
+        _ffmpegSessionStarting = true;
       });
     } else if (event is ConvertStateEvent) {
       // done / failed / cancelled 状态时 Coordinator 会更新 _outputPath /
@@ -415,9 +606,14 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
     //   - 重新进入页面时，initState 里的 _syncFromCoordinatorSnapshot 会恢复 UI
     _coordSub?.cancel();
     _coordSub = null;
-    // 清理 M3U8 缓存目录（被 Coordinator 选中的那个由 Coordinator 自行清理，
-    // 这里清掉的是缓存里"用户没选中的备选 m3u8"）
+    // v1.6.40+ 修复（问题3配套）：
+    //   清理 M3U8 缓存目录。被 Coordinator 选中的那个由 Coordinator 自行清理，
+    //   这里清掉的是缓存里"用户没选中的备选 m3u8"。
+    //   如果 Coordinator 没在运行，也清理 _importedTempDir（当前选中的目录）。
     _evictAllCaches();
+    if (!ConvertCoordinator.instance.isRunning) {
+      _cleanupImportedTempDir();
+    }
     super.dispose();
   }
 
@@ -456,11 +652,17 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
         size = await File(path).length();
       } catch (_) {}
       AppLogger.i('VideoConvertPage', '已选文件：${file.name}（$size bytes）');
+      // v1.6.40+ 修复（问题3配套）：用户切换输入源时，清理旧的 M3U8 临时目录
+      await _cleanupImportedTempDir();
       setState(() {
         _inputMode = _InputMode.file;
         _sourceName = file.name;
         _sourceValue = path;
         _sourceSize = size;
+        // v1.6.22+ 修复：本地文件入口下清掉 M3U8 列表按钮的关联数据
+        //   之前选 M3U8 后切到本地文件，"列表"按钮会一直挂着但点了也找不到 treeUri
+        _m3u8SourceTreeUri = null;
+        _m3u8Siblings = null;
         // 切换输入源后清空旧的输出/错误信息
         _resetOutputState();
       });
@@ -506,6 +708,15 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
         return;
       }
 
+      // ========== v1.6.22+ 新增：记录 treeUri + 兄弟 M3U8 列表 ==========
+      //   这一步在弹"选 M3U8"对话框**之前**做，让输入源卡片可以显示
+      //   "列表"按钮以便快捷切换同目录下的其它 M3U8。
+      //   仅当目录里 m3u8 > 1 个时记下兄弟列表，=1 时不记（不显示列表按钮）。
+      _m3u8SourceTreeUri = treeUri;
+      _m3u8Siblings = m3u8List.length > 1 ? List<String>.from(m3u8List) : null;
+      AppLogger.i('VideoConvertPage',
+          '记录 M3U8 来源：treeUri=$treeUri，siblings=${_m3u8Siblings?.length ?? 0}');
+
       // ========== 用户挑一个 ==========
       String pickedRel;
       if (m3u8List.length == 1) {
@@ -530,89 +741,200 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
         pickedRel = selected;
       }
 
-      // ========== 准备 import 目录（缓存命中 / 未命中走不同分支） ==========
-      final prep = await _prepareImportDirForM3u8(treeUri, pickedRel);
-      if (prep == null) return;
-      final Directory destDir = prep.dir;
-      final bool cacheHit = prep.cacheHit;
-      final int copied = prep.copiedCount;
-
-      // ========== 找 M3U8、注册到 UI ==========
-      final m3u8Path = p.join(destDir.path, pickedRel);
-      AppLogger.i('VideoConvertPage', '最终 M3U8：$m3u8Path');
-
-      // 关键自检：路径真的存在吗？找不到时回退到递归扫描
-      final existsDirectly = await File(m3u8Path).exists();
-      AppLogger.i('VideoConvertPage',
-          'm3u8Path.exists() = $existsDirectly  (destDir=${destDir.path}, pickedRel=$pickedRel)');
-
-      String actualM3u8Path = m3u8Path;
-      if (!existsDirectly) {
-        AppLogger.w('VideoConvertPage',
-            '按 pickedRel 找不到 m3u8，递归扫描 destDir 找同名 M3U8 …');
-        final found = await _findM3u8Recursive(destDir.path);
-        if (found.isEmpty) {
-          _showSnack('复制完成但在 $pickedRel 位置找不到 M3U8（$destDir）');
-          return;
-        }
-        if (found.length == 1) {
-          actualM3u8Path = found.first;
-          AppLogger.i('VideoConvertPage', '回退匹配到唯一 M3U8：$actualM3u8Path');
-        } else {
-          if (!mounted) return;
-          final picked = await showDialog<String>(
-            context: context,
-            builder: (ctx) => SimpleDialog(
-              title: const Text('找到多个同名 M3U8，请选择实际文件'),
-              children: found
-                  .map(
-                    (full) => SimpleDialogOption(
-                      onPressed: () => Navigator.pop(ctx, full),
-                      child: Text(
-                        p.relative(full, from: destDir.path),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  )
-                  .toList(),
-            ),
-          );
-          if (picked == null) return;
-          actualM3u8Path = picked;
-        }
-      }
-
-      // ⚠️ 缓存命中时需要先临时把 _importedTempDir 置空，
-      // 否则 _resetOutputState 会把"上一次"指向同一个缓存目录的引用清掉，
-      // 缓存目录直接被删，下次选同一个 M3U8 就缓存 miss 了
-      if (cacheHit) {
-        _importedTempDir = null;
-      }
-      int size = 0;
-      try {
-        size = await File(actualM3u8Path).length();
-      } catch (_) {}
-      setState(() {
-        _inputMode = _InputMode.file;
-        _sourceName = pickedRel;
-        _sourceValue = actualM3u8Path;
-        _sourceSize = size;
-        _resetOutputState();
-      });
-      // 缓存命中：不注册 _importedTempDir（缓存自己管生命周期，dispose / 切目录时清）
-      // 缓存未命中：注册新的临时目录（让旧目录被清，但新的保留）
-      if (!cacheHit) {
-        _importedTempDir = destDir;
-      }
-      _showSnack(cacheHit
-          ? '已命中缓存：$pickedRel（跳过复制）'
-          : '已导入：$pickedRel（共 $copied 个文件）');
-      // 异步探测时长 + 码率（用于输出质量卡片预估体积）
-      unawaited(_probeSourceMeta(actualM3u8Path));
+      // ========== 走共享的 import 流程 ==========
+      await _importM3u8FromTree(treeUri, pickedRel);
     } catch (e, st) {
       AppLogger.e('VideoConvertPage', '选择 M3U8 目录失败', e, st);
       _showSnack('选择目录失败：$e');
     }
+  }
+
+  /// v1.6.22+ 新增：在已授权的 SAF tree 下导入指定 M3U8
+  ///
+  /// 复用 _pickM3u8Folder 流程里的"准备 import 目录 → 找 M3U8 → 注册 UI"那一段，
+  /// 让"列表"按钮（已经知道 treeUri）的快捷切换不需要重新走目录选择。
+  ///
+  /// 调用前必须保证：
+  ///   - treeUri 是当前用户已授权过的目录（_m3u8SourceTreeUri 里的）
+  ///   - 目标 pickedRel 也在该目录下
+  ///
+  /// 行为：
+  ///   - 缓存命中：秒切（复用 _importCache）
+  ///   - 缓存未命中：弹 loading + 复制 + 注册新缓存
+  ///   - 复制完成后调用 _probeSourceMeta 探测时长 / 码率
+  Future<void> _importM3u8FromTree(String treeUri, String pickedRel) async {
+    AppLogger.i(
+        'VideoConvertPage', '_importM3u8FromTree: $treeUri/$pickedRel');
+
+    // v1.6.31+ 修复（bug17 配套，针对续转"No such file or directory"问题）：
+    //   用户主动选 M3U8 文件夹时，意味着要换输入源了。
+    //   之前如果存在 paused 状态的 resume（磁盘上还有 convert_resume_state.json），
+    //   resume state 里的 input 和 importedTempDirPath 还指向**旧**的 tempDir。
+    //   但 _evictCachesForOtherTrees() / _importM3u8FromTree() 流程会删掉
+    //   旧 cache（旧的 m3u8_import_* 目录），结果 resume state 变成"野指针"：
+    //     - 用户看不到"继续转换"按钮（UI 没刷新，但 disk state 还在）
+    //     - 理论上不会进入 resume 流程
+    //     - 但如果有别的代码路径触发 resume，就会报"No such file or directory"
+    //   修复：选 M3U8 文件夹时主动清掉旧的 resume state。
+    //   语义合理：用户换输入源 = 旧的"从中断点恢复"语义已经失效
+    //   （输入源都不一样了），提示用户重新开始一次转换更直接。
+    final hadResume = await ConvertResumeStore.instance.load();
+    if (hadResume != null) {
+      AppLogger.i('VideoConvertPage',
+          '选 M3U8 文件夹触发清旧 resume state：'
+          'encodedTimeMs=${hadResume.encodedTimeMs}ms');
+      await ConvertResumeStore.instance.clear();
+    }
+
+    // ========== 准备 import 目录（缓存命中 / 未命中走不同分支） ==========
+    final prep = await _prepareImportDirForM3u8(treeUri, pickedRel);
+    if (prep == null) return;
+    final Directory destDir = prep.dir;
+    final bool cacheHit = prep.cacheHit;
+    final int copied = prep.copiedCount;
+
+    // ========== 找 M3U8、注册到 UI ==========
+    final m3u8Path = p.join(destDir.path, pickedRel);
+    AppLogger.i('VideoConvertPage', '最终 M3U8：$m3u8Path');
+
+    // 关键自检：路径真的存在吗？找不到时回退到递归扫描
+    final existsDirectly = await File(m3u8Path).exists();
+    AppLogger.i('VideoConvertPage',
+        'm3u8Path.exists() = $existsDirectly  (destDir=${destDir.path}, pickedRel=$pickedRel)');
+
+    String actualM3u8Path = m3u8Path;
+    if (!existsDirectly) {
+      AppLogger.w('VideoConvertPage',
+          '按 pickedRel 找不到 m3u8，递归扫描 destDir 找同名 M3U8 …');
+      final found = await _findM3u8Recursive(destDir.path);
+      if (found.isEmpty) {
+        _showSnack('复制完成但在 $pickedRel 位置找不到 M3U8（$destDir）');
+        return;
+      }
+      if (found.length == 1) {
+        actualM3u8Path = found.first;
+        AppLogger.i('VideoConvertPage', '回退匹配到唯一 M3U8：$actualM3u8Path');
+      } else {
+        if (!mounted) return;
+        final picked = await showDialog<String>(
+          context: context,
+          builder: (ctx) => SimpleDialog(
+            title: const Text('找到多个同名 M3U8，请选择实际文件'),
+            children: found
+                .map(
+                  (full) => SimpleDialogOption(
+                    onPressed: () => Navigator.pop(ctx, full),
+                    child: Text(
+                      p.relative(full, from: destDir.path),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                )
+                .toList(),
+          ),
+        );
+        if (picked == null) return;
+        actualM3u8Path = picked;
+      }
+    }
+
+    // ⚠️ 缓存命中时需要先临时把 _importedTempDir 置空，
+    // 否则 _resetOutputState 会把"上一次"指向同一个缓存目录的引用清掉，
+    // 缓存目录直接被删，下次选同一个 M3U8 就缓存 miss 了
+    if (cacheHit) {
+      _importedTempDir = null;
+    }
+    // v1.6.22+ 修复（bug2）：
+    //   之前 _sourceSize 只读 M3U8 文件自身大小（几 KB），
+    //   整个 destDir 里真正大头是 segments（几百 MB ~ 几 GB），
+    //   这导致后续"输出质量卡片"按 _sourceSize 估算各档位输出体积时严重偏小。
+    //   正确做法：递归累加 destDir 所有文件总字节数（M3U8 + segments）。
+    final int size = await _dirSizeRecursive(destDir);
+    AppLogger.i('VideoConvertPage',
+        'M3U8 导入目录总大小：${_formatSize(size)}（$size bytes，$copied 个文件）');
+    // v1.6.40+ 修复（问题3配套）：用户切换 M3U8 输入源时，清理旧的临时目录
+    await _cleanupImportedTempDir();
+    setState(() {
+      _inputMode = _InputMode.file;
+      _sourceName = pickedRel;
+      _sourceValue = actualM3u8Path;
+      _sourceSize = size;
+      _resetOutputState();
+    });
+    // 缓存命中：不注册 _importedTempDir（缓存自己管生命周期，dispose / 切目录时清）
+    // 缓存未命中：注册新的临时目录（让旧目录被清，但新的保留）
+    if (!cacheHit) {
+      _importedTempDir = destDir;
+    }
+    _showSnack(cacheHit
+        ? '已命中缓存：$pickedRel（跳过复制）'
+        : '已导入：$pickedRel（共 $copied 个文件）');
+    // 异步探测时长 + 码率（用于输出质量卡片预估体积）
+    unawaited(_probeSourceMeta(actualM3u8Path));
+  }
+
+  /// v1.6.22+ 新增：弹出"同目录其它 M3U8"列表供用户快捷切换
+  ///
+  /// 由输入源卡片右侧的"列表"按钮触发。
+  /// 仅在 _m3u8SourceTreeUri 非空 && _m3u8Siblings 非空（=至少 2 个兄弟）时调用。
+  ///
+  /// 选中后调 _importM3u8FromTree 复用同 treeUri 走 import 流程：
+  ///   - 缓存命中秒切
+  ///   - 未命中走正常复制（弹 loading）
+  Future<void> _showM3u8SiblingsDialog() async {
+    final treeUri = _m3u8SourceTreeUri;
+    final siblings = _m3u8Siblings;
+    if (treeUri == null ||
+        treeUri.isEmpty ||
+        siblings == null ||
+        siblings.isEmpty) {
+      _showSnack('当前输入源没有可切换的兄弟 M3U8');
+      return;
+    }
+    final currentName = _sourceName;
+    AppLogger.i('VideoConvertPage',
+        '弹出 M3U8 兄弟列表：${siblings.length} 个，当前=$currentName');
+
+    if (!mounted) return;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text('切换 M3U8（共 ${siblings.length} 个）'),
+        children: siblings.map((rel) {
+          final isCurrent = rel == currentName;
+          return SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, rel),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    rel,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontWeight:
+                          isCurrent ? FontWeight.w600 : FontWeight.normal,
+                      color: isCurrent ? Colors.blue : null,
+                    ),
+                  ),
+                ),
+                if (isCurrent)
+                  const Icon(Icons.check_circle, size: 16, color: Colors.blue),
+              ],
+            ),
+          );
+        }).toList(),
+      ),
+    );
+    if (picked == null) return;
+
+    // 选了跟当前一样的，啥也不做
+    if (picked == currentName) {
+      _showSnack('已是当前 M3U8：$picked');
+      return;
+    }
+
+    AppLogger.i('VideoConvertPage', '切换 M3U8：$currentName -> $picked');
+    await _importM3u8FromTree(treeUri, picked);
   }
 
   /// 为单个 M3U8 准备 import 目录：缓存命中直接复用；缓存未命中则精准复制
@@ -807,7 +1129,7 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
 
   /// 确认 URL 输入
   /// 简单校验后保存
-  void _confirmUrl() {
+  Future<void> _confirmUrl() async {
     final raw = _urlController.text.trim();
     if (raw.isEmpty) {
       _showSnack('请输入 URL');
@@ -827,16 +1149,53 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
       }
     } catch (_) {}
     AppLogger.i('VideoConvertPage', '已输入 URL：$raw');
+    // v1.6.40+ 修复（问题3配套）：用户切换输入源时，清理旧的 M3U8 临时目录
+    await _cleanupImportedTempDir();
     setState(() {
       _inputMode = _InputMode.url;
       _sourceName = displayName;
       _sourceValue = raw;
       _sourceSize = null; // URL 模式无法预知大小
+      // v1.6.22+ 修复：URL 入口下也清掉 M3U8 列表按钮的关联数据，
+      // 跟切到本地视频文件入口时一致
+      _m3u8SourceTreeUri = null;
+      _m3u8Siblings = null;
       _resetOutputState();
     });
     _showSnack('已输入 URL：$displayName');
     // 异步探测时长 + 码率（用于输出质量卡片预估体积）
     unawaited(_probeSourceMeta(raw));
+  }
+
+  /// 递归累加目录下所有文件的字节数（M3U8 + segments）
+  ///
+  /// v1.6.22+ 修复（bug2）：
+  ///   之前 M3U8 导入后 _sourceSize 只统计了 M3U8 文件自身（几 KB），
+  ///   没把 segments 的体积算进去，导致后续"输出质量卡片"按"相对源体积"
+  ///   估算各档位输出体积时严重偏小（按一个几 KB 的 M3U8 算）。
+  ///   正确做法：递归累加整个 destDir（含 M3U8 + segments 目录）的总字节数。
+  ///
+  /// 实现要点：
+  ///   - 使用 Directory.list(recursive: true) 一把递归遍历
+  ///   - 单个文件读不到 length() 时忽略（极少数情况下文件被并发写 / 句柄独占）
+  ///   - 累加过程中遇到异常吞掉（不影响主流程，size 给个保守值即可）
+  Future<int> _dirSizeRecursive(Directory dir) async {
+    var total = 0;
+    try {
+      if (!await dir.exists()) return 0;
+      await for (final ent in dir.list(recursive: true, followLinks: false)) {
+        if (ent is File) {
+          try {
+            total += await ent.length();
+          } catch (_) {
+            // 复制中可能瞬时读不到 size，忽略
+          }
+        }
+      }
+    } catch (e) {
+      AppLogger.w('VideoConvertPage', '递归统计目录大小失败：$e');
+    }
+    return total;
   }
 
   /// 异步探测源时长 + 码率
@@ -876,11 +1235,16 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
 
   /// 重置输出相关状态（切换输入源、切换模式时调用）
   void _resetOutputState() {
-    // 清理上次导入的临时目录（仅当没有任务在跑时，
-    // 否则临时目录归 Coordinator 持有，不能删）
-    if (!ConvertCoordinator.instance.isRunning) {
-      _cleanupImportedTempDir();
-    }
+    // v1.6.40+ 修复（问题3）：不再自动清理临时目录。
+    //   旧版在 _resetOutputState() 中清理 _importedTempDir，
+    //   导致取消转换后临时目录被删，重新开始时需要重新复制 M3U8 文件。
+    //   新版保留临时目录，只在以下场景清理：
+    //     1) 用户主动更换输入源（_pickLocalFile / _importM3u8FromTree 中处理）
+    //     2) 转换成功完成（Coordinator 的 finally 块）
+    //     3) Page dispose 时
+    // if (!ConvertCoordinator.instance.isRunning) {
+    //   _cleanupImportedTempDir();
+    // }
     _outputPath = null;
     _outputSize = null;
     _errorMessage = null;
@@ -942,8 +1306,61 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   /// 真正的 FFmpeg 执行、进度回调、SAF 复制、通知、历史全部在 Coordinator 里。
   /// 这样 Page State dispose 时不会中断 FFmpeg，重新进入页面时由订阅恢复 UI。
   Future<void> _startConvert() async {
-    final input = _sourceValue;
+    var input = _sourceValue;
     if (input == null || input.isEmpty) return;
+
+    // v1.6.40+ 修复（BUG-H + 问题3）：
+    //   取消转换后不再删除临时目录（v1.6.40 修复），所以源文件通常仍存在。
+    //   但作为兜底，如果文件确实不存在（如系统清理了缓存），尝试自动重新导入。
+    if (_inputMode != _InputMode.url) {
+      final inputFile = File(input);
+      if (!await inputFile.exists()) {
+        AppLogger.w('VideoConvertPage', '输入源文件已不存在：$input');
+        // 尝试自动重新导入 M3U8（如果来源是 SAF 目录）
+        final treeUri = _m3u8SourceTreeUri;
+        final sourceName = _sourceName;
+        if (treeUri != null && treeUri.isNotEmpty && sourceName != null) {
+          AppLogger.i('VideoConvertPage', '尝试自动重新导入 M3U8：$treeUri/$sourceName');
+          try {
+            await _importM3u8FromTree(treeUri, sourceName);
+            // 重新导入后更新 input 引用
+            input = _sourceValue;
+            if (input == null || input.isEmpty) {
+              _showSnack('重新导入 M3U8 失败，请重新选择输入源');
+              return;
+            }
+            // 再次检查文件是否存在
+            if (!await File(input).exists()) {
+              _showSnack('重新导入后文件仍不存在，请重新选择输入源');
+              return;
+            }
+            AppLogger.i('VideoConvertPage', '自动重新导入 M3U8 成功：$input');
+          } catch (e) {
+            AppLogger.w('VideoConvertPage', '自动重新导入 M3U8 失败：$e');
+            setState(() {
+              _sourceValue = null;
+              _sourceName = null;
+              _sourceSize = null;
+              _importedTempDir = null;
+              _status = _ConvertStatus.idle;
+            });
+            _showSnack('输入源文件已被清理且重新导入失败，请重新选择输入源');
+            return;
+          }
+        } else {
+          // 非 M3U8 来源或缺少 treeUri，无法自动恢复
+          setState(() {
+            _sourceValue = null;
+            _sourceName = null;
+            _sourceSize = null;
+            _importedTempDir = null;
+            _status = _ConvertStatus.idle;
+          });
+          _showSnack('输入源文件已被清理，请重新选择输入源');
+          return;
+        }
+      }
+    }
 
     // 构造输出文件路径：
     //   - 默认模式：App 私有目录 ToolApp/videos/converted/output_<ts>.<ext>
@@ -1008,7 +1425,20 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
     // 期间 Page State 可以被销毁（用户点"后台运行"时），
     // FFmpeg 任务仍由 Coordinator 持有并继续执行。
     // 进度/状态变化通过 _coordSub 流推回 UI。
-    unawaited(ConvertCoordinator.instance.start(config));
+    // v1.6.37+ 修复（BUG6）：捕获 Coordinator.start() 抛出的异常。
+    //   旧版用 unawaited() 包裹，如果 Coordinator 检测到"已有任务在运行"
+    //   抛 StateError，异常变成未处理的异步错误，UI 状态卡在 running。
+    //   新版用 .catchError() 捕获，把 UI 状态复位到 idle。
+    ConvertCoordinator.instance.start(config).catchError((e) {
+      AppLogger.e('VideoConvertPage', 'Coordinator.start() 失败', e);
+      if (mounted) {
+        setState(() {
+          _status = _ConvertStatus.idle;
+          _errorMessage = '启动转换失败：$e';
+        });
+        _showSnack('启动转换失败：$e');
+      }
+    });
 
     AppLogger.i('VideoConvertPage',
         '任务已交给 Coordinator：input=$input, output=$outPath');
@@ -1022,10 +1452,31 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   ///
   /// v1.6.21+ 升级：这是"彻底取消"——会清掉所有恢复状态。
   /// 临时暂停请改用 [_pauseConvert]。
+  ///
+  /// v1.6.29+ 修复（bug13，针对大体积文件取消卡顿）：
+  ///   旧版 `await ConvertCoordinator.instance.cancel()` 会阻塞 5~30s，
+  ///   这期间用户看到按钮无响应，体验非常差。
+  ///   新版 Coordinator.cancel() 改为非阻塞，await 立即返回。
+  ///   这里配套加 _cancelling 标志位：
+  ///     - 点取消瞬间：_cancelling = true，按钮立即变"取消中..."且禁用
+  ///     - Coordinator.cancel() 立即返回（不再卡 UI）
+  ///     - FFmpeg session 回调到达后，_syncFromCoordinatorSnapshot 会把
+  ///       _cancelling 复位为 false（见该方法）
+  ///   这样大体积文件取消时用户有即时视觉反馈。
   Future<void> _cancelConvert() async {
     AppLogger.i('VideoConvertPage', '用户点击取消');
+    if (_cancelling) {
+      // 已经在取消流程中，重复点击直接忽略（按钮已禁用，理论上走不到这里）
+      AppLogger.d('VideoConvertPage', '取消请求已在进行中，忽略重复点击');
+      return;
+    }
+    setState(() {
+      _cancelling = true;
+    });
     _showSnack('正在取消...');
-    await ConvertCoordinator.instance.cancel();
+    // fire-and-forget：Coordinator.cancel() 内部不再 await FFmpeg 收尾，
+    // 立即返回；状态机真正切到 cancelled 要等 FFmpeg session 回调
+    unawaited(ConvertCoordinator.instance.cancel());
   }
 
   /// 暂停转换（v1.6.21+ 新增）
@@ -1040,10 +1491,20 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   /// 与"取消"的关键区别：
   ///   - 取消：彻底清空，输出文件被删，下次需要重新选文件
   ///   - 暂停：进度保留，输出文件保留，下次可继续
+  ///
+  /// v1.6.29+ 修复（bug13 配套）：同 _cancelConvert 的非阻塞改造。
   Future<void> _pauseConvert() async {
     AppLogger.i('VideoConvertPage', '用户点击暂停');
+    if (_pausing) {
+      AppLogger.d('VideoConvertPage', '暂停请求已在进行中，忽略重复点击');
+      return;
+    }
+    setState(() {
+      _pausing = true;
+    });
     _showSnack('正在暂停...');
-    await ConvertCoordinator.instance.pause();
+    // fire-and-forget：Coordinator.pause() 内部不再 await FFmpeg 收尾
+    unawaited(ConvertCoordinator.instance.pause());
   }
 
   /// 继续转换（v1.6.21+ 新增）
@@ -1054,10 +1515,27 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   ///   - 从中断点继续编码剩余段
   ///   - 拼接 partial + 新段 = 完整文件
   ///   - 完成后走正常的"done"流程（保存历史、通知、SAF 复制）
+  ///
+  /// v1.6.29+ 修复（bug15，针对大体积文件续转卡顿体验）：
+  ///   旧版 _resumeConvert() 调 `await ConvertCoordinator.instance.resume()`，
+  ///   resume() 内部 _emitState(running) + 立即发 progress 事件都没问题，
+  ///   但 Coordinator.resume() 自己内部还走 convertResume() 的 await，
+  ///   这个 await 才是真正卡住的地方（大文件 input seek + 启动要 5~10s）。
+  ///   新版改为 fire-and-forget（让 Coordinator 后台跑）+ _resuming 标志位
+  ///   让 UI 立即显示"正在恢复..."提示文字。
   Future<void> _resumeConvert() async {
     AppLogger.i('VideoConvertPage', '用户点击继续转换');
+    if (_resuming) {
+      AppLogger.d('VideoConvertPage', '恢复请求已在进行中，忽略重复点击');
+      return;
+    }
+    setState(() {
+      _resuming = true;
+    });
     _showSnack('正在继续转换...');
-    await ConvertCoordinator.instance.resume();
+    // fire-and-forget：Coordinator.resume() 内部 _emitState(running) 是同步的，
+    //   立刻推 running 状态给 UI 订阅者，UI 立即切到"准备中/正在恢复"状态
+    unawaited(ConvertCoordinator.instance.resume());
   }
 
   /// 放弃恢复（v1.6.21+ 新增）
@@ -1066,10 +1544,29 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   /// 行为：
   ///   - 与"取消"一致：清掉恢复状态，删掉 partial 输出
   ///   - 状态回到 idle，可以重新选文件
+  ///
+  /// v1.6.29+ 修复（bug13 配套）：paused 状态下 cancel() 走的是
+  /// "early return" 分支（_state != running 直接跳过 _ffmpeg.cancel()），
+  /// 所以这个 await 不会卡 UI（paused 时 _state == paused，不是 running，
+  /// cancel 内部检查 _state != running 会直接 return）。
+  /// 但为了和其它取消流程风格统一，也改为 fire-and-forget。
+  ///
+  /// v1.6.32+ 修复（bug18 配套）：
+  ///   Coordinator.cancel() 现在对 paused 状态会同步执行清理
+  /// （清恢复状态 + 清临时目录 + 复位内部字段 + emit cancelled），
+  /// 不再是 no-op。这里去掉"early return"那段过期注释，
+  /// 并改用 await：paused 状态下没有 FFmpeg 在跑，cancel() 立即返回，
+  /// 不会卡 UI。await 完成后 UI 已经被 cancelled 事件切回 idle，
+  /// 不需要 fire-and-forget。
   Future<void> _discardResume() async {
     AppLogger.i('VideoConvertPage', '用户点击放弃恢复');
     _showSnack('正在放弃...');
-    // cancel() 内部会清掉恢复状态
+    // paused 状态下 cancel() 走同步清理流程（v1.6.32+ bug18 修复）：
+    //   - 清掉磁盘上的 resume state
+    //   - 复位 _config / _progress / 输出字段
+    //   - 清掉 M3U8 临时目录
+    //   - emitState(cancelled) → UI 切回 idle
+    // 整个过程瞬时完成，await 不会卡 UI。
     await ConvertCoordinator.instance.cancel();
   }
 
@@ -1569,7 +2066,18 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
             _buildFileInputArea(),
             const SizedBox(height: 10),
             if (_sourceValue != null) ...[
-              _buildInfoRow('名称', _sourceName ?? '-'),
+              // v1.6.22+ 新增：
+              //   "名称" 这一行右侧加一个"列表"小按钮，仅在
+              //   _m3u8Siblings 非空（=至少 2 个兄弟 M3U8）时显示。
+              //   点击后弹出同目录 M3U8 列表让用户快捷切换。
+              //   =1 个 M3U8 时不显示（不增加视觉噪音）。
+              _buildInfoRow(
+                '名称',
+                _sourceName ?? '-',
+                trailing: _canShowM3u8List
+                    ? _buildM3u8ListButton()
+                    : null,
+              ),
               const SizedBox(height: 4),
               if (_sourceSize != null) ...[
                 _buildInfoRow('大小', _formatSize(_sourceSize)),
@@ -1684,12 +2192,44 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
                 ),
               ],
             ),
+            // v1.6.28+ 新增（bug12 需求）：running / paused 时显示
+            //   灰色提示条告诉用户"任务进行中不可改，要重新开始才能改"
+            if (_isTaskInProgress) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.amber.shade50,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: Colors.amber.shade200),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.lock_outline,
+                        size: 14, color: Colors.amber.shade800),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        '任务进行中，输出设置已锁定。'
+                        '如需修改，请先取消转换重新开始。',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.amber.shade900,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 10),
             // 单选列表
+            // v1.6.28+ 修复（bug12）：用 _isTaskInProgress 替代只判 running，
+            //   这样 paused 时 RadioListTile 也是 disabled。
             ...VideoFormat.values.map((f) => RadioListTile<VideoFormat>(
                   value: f,
                   groupValue: _format,
-                  onChanged: _status == _ConvertStatus.running
+                  onChanged: _isTaskInProgress
                       ? null
                       : (v) {
                           if (v != null) setState(() => _format = v);
@@ -1750,7 +2290,8 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   /// 把"质量名 / 参数"放在主标题，"预估体积"放在副标题
   Widget _buildQualityTile(VideoQuality q) {
     final selected = _quality == q;
-    final disabled = _status == _ConvertStatus.running;
+    // v1.6.28+ 修复（bug12）：paused 时也要 disable
+    final disabled = _isTaskInProgress;
     return InkWell(
       onTap: disabled
           ? null
@@ -1916,7 +2457,8 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
           ),
         ),
         trailing: TextButton(
-          onPressed: _status == _ConvertStatus.running
+          // v1.6.28+ 修复（bug12）：paused 时也要 disable（running + paused 都不能改保存位置）
+          onPressed: _isTaskInProgress
               ? null
               : () {
                   // 引导用户去设置页修改保存路径
@@ -2064,23 +2606,67 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // v1.6.29+ 修复（bug15 配套，针对大体积文件续转卡顿体验）：
+                    //   旧版在 _hasDuration=false 时只显示"正在转换..."，
+                    //   对大体积文件而言，FFmpeg 启动 + input seek 出第一帧
+                    //   可能要 5~10 秒，这期间进度环不动 + 文字不变，
+                    //   用户体感就是"卡在准备中"。
+                    //   新版：
+                    //     - _resuming=true 时显示"正在恢复转换..."（提示用户这是续转）
+                    //     - _ffmpegSessionStarting=true 时显示"FFmpeg 启动中..."
+                    //       （v1.6.30+ bug16 新增，FFmpeg 会话已建好但还没出帧）
+                    //     - _hasDuration=false 且以上都为 false 时显示
+                    //       "正在启动转换..." + 额外加一行小字"准备中，请稍候..."
+                    //       让用户知道系统在干活
+                    //     - 正常 _hasDuration=true 时保持原样
+                    //   进度环的状态切换由 _onCoordinatorEvent 推动
+                    //   （第一次 hasDuration=true 时 _resuming/_ffmpegSessionStarting 复位）。
                     Text(
                       isRunning
                           ? (_hasDuration
                               ? '正在转换... $_bitrateDisplay'
-                              : '正在转换...')
+                              : (_ffmpegSessionStarting
+                                  ? 'FFmpeg 启动中...'
+                                  : (_resuming
+                                      ? '正在恢复转换...'
+                                      : '正在启动转换...')))
                           : isPaused
                               ? '已暂停 · 等待继续'
                               : '转换完成',
                       style: TextStyle(
                         fontSize: 13,
                         color: isRunning
-                            ? Colors.blue
+                            ? (_ffmpegSessionStarting
+                                ? Colors.deepPurple
+                                : Colors.blue)
                             : isPaused
                                 ? Colors.amber.shade800
                                 : Colors.green.shade700,
                       ),
                     ),
+                    // v1.6.29+ bug15 配套：未拿到 duration 时的二级提示
+                    //   让用户知道系统在工作中（不是死锁了），并带上活动指示器
+                    if (isRunning && !_hasDuration) ...[
+                      const SizedBox(height: 4),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const SizedBox(
+                            width: 11,
+                            height: 11,
+                            child: CircularProgressIndicator(strokeWidth: 1.5),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            _resuming ? '准备中，请稍候...' : '准备中...',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                     // 预估剩余时间（仅 running 状态 + 有 ETA 时显示）
                     if (isRunning &&
                         _hasDuration &&
@@ -2131,16 +2717,38 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
     final isPaused = _status == _ConvertStatus.paused;
     if (isRunning) {
       // 转换中：【暂停转换】+【取消转换】并排
+      //
+      // v1.6.29+ bug13 修复（UI 配套）：
+      //   旧版两个按钮的 onPressed 在大文件取消/暂停时虽然有"立即返回"的逻辑，
+      //   但用户视觉上还是没反馈。点完按钮后：
+      //     - 暂停按钮还是显示"暂停转换"，用户以为没点中
+      //     - 取消按钮还是显示"取消转换"，用户以为 App 卡死
+      //   现在根据 _cancelling / _pausing 标志位切换按钮文案 + 禁用，
+      //   提供即时视觉反馈：
+      //     - _pausing=true → 暂停按钮显示"暂停中..."、禁用；取消按钮也禁用
+      //     - _cancelling=true → 取消按钮显示"取消中..."、禁用；暂停按钮也禁用
+      // v1.6.36+ 优化（bug22 配套）：
+      //   续转准备期间（_ffmpegSessionStarting=true 或 _resuming=true），
+      //   暂停按钮不可点击，必须等正式开始转换后才能暂停。
+      //   取消按钮不受限制，随时可以取消。
+      final preparing = _ffmpegSessionStarting || _resuming;
       return Row(
         children: [
           // 暂停按钮：主题色 tonal，不警告
+          // 准备期间禁用（等 FFmpeg 出第一帧后才可暂停）
           Expanded(
             child: SizedBox(
               height: 48,
               child: FilledButton.tonalIcon(
-                onPressed: _pauseConvert,
-                icon: const Icon(Icons.pause_circle_outline),
-                label: const Text('暂停转换'),
+                onPressed: (_pausing || _cancelling || preparing) ? null : _pauseConvert,
+                icon: _pausing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.pause_circle_outline),
+                label: Text(_pausing ? '暂停中...' : '暂停转换'),
                 style: FilledButton.styleFrom(
                   // 使用主题的 secondaryContainer 背景（柔和的中性色）
                   backgroundColor:
@@ -2153,13 +2761,24 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
           ),
           const SizedBox(width: 8),
           // 取消按钮：红色 tonal 警示
+          // 随时可以取消，不受准备期间限制
           Expanded(
             child: SizedBox(
               height: 48,
               child: FilledButton.tonalIcon(
-                onPressed: _cancelConvert,
-                icon: const Icon(Icons.cancel_outlined),
-                label: const Text('取消转换'),
+                onPressed: (_cancelling || _pausing) ? null : _cancelConvert,
+                icon: _cancelling
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor:
+                              AlwaysStoppedAnimation<Color>(Colors.red),
+                        ),
+                      )
+                    : const Icon(Icons.cancel_outlined),
+                label: Text(_cancelling ? '取消中...' : '取消转换'),
                 style: FilledButton.styleFrom(
                   backgroundColor: Colors.red.shade50,
                   foregroundColor: Colors.red.shade700,
@@ -2173,6 +2792,12 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
     if (isPaused) {
       // 已暂停：【继续转换】+【取消】并排
       // "取消"在暂停态的含义是"放弃恢复"，与"暂停前的取消"行为一致
+      //
+      // v1.6.29+ bug15 修复（UI 配套）：
+      //   旧版点"继续转换"后按钮文案不变，用户以为 App 卡死。
+      //   现在 _resuming=true 时按钮显示"恢复中..."并禁用，
+      //   标志位在 _onCoordinatorEvent 收到第一个 hasDuration=true 的进度
+      //   事件时复位（见 _onCoordinatorEvent 注释）。
       return Row(
         children: [
           // 继续转换按钮：主题色实心（鼓励用户继续）
@@ -2180,14 +2805,23 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
             child: SizedBox(
               height: 48,
               child: FilledButton.icon(
-                onPressed: _resumeConvert,
-                icon: const Icon(Icons.play_arrow),
-                label: const Text('继续转换'),
+                onPressed: _resuming ? null : _resumeConvert,
+                icon: _resuming
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.play_arrow),
+                label: Text(_resuming ? '恢复中...' : '继续转换'),
               ),
             ),
           ),
           const SizedBox(width: 8),
           // 取消（放弃）按钮：红色 tonal 警示
+          // v1.6.36+ 优化（bug22 配套）：
+          //   恢复中（_resuming=true）时取消按钮仍然可点击，
+          //   用户随时可以取消，不需要等恢复完成。
           Expanded(
             child: SizedBox(
               height: 48,
@@ -2366,7 +3000,17 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
   }
 
   /// 通用：键值对信息行
-  Widget _buildInfoRow(String label, String value, {int maxLines = 1}) {
+  ///
+  /// v1.6.22+ 新增 [trailing] 槽位：可选地放一个控件在行的最右侧（值文本之后）。
+  ///   - 不传 trailing：行为跟 v1.6.22 之前完全一致
+  ///   - 传 trailing：常用于"名称"行后面挂个快捷操作按钮（如 M3U8 列表按钮），
+  ///     不影响 SelectableText 的可复制性
+  Widget _buildInfoRow(
+    String label,
+    String value, {
+    int maxLines = 1,
+    Widget? trailing,
+  }) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -2384,7 +3028,49 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
             style: const TextStyle(fontSize: 13),
           ),
         ),
+        // v1.6.22+：可选的右侧槽位（M3U8 列表按钮等）
+        if (trailing != null) ...[
+          const SizedBox(width: 4),
+          trailing,
+        ],
       ],
+    );
+  }
+
+  /// v1.6.22+ 新增：是否可以显示 M3U8 列表按钮
+  ///
+  /// 显示条件（**同时**满足）：
+  ///   1) _m3u8SourceTreeUri 非空（即当前源是从某个 SAF 目录导入的 M3U8）
+  ///   2) _m3u8Siblings 非空且 >= 2（=1 时不显示，避免视觉噪音）
+  bool get _canShowM3u8List {
+    final siblings = _m3u8Siblings;
+    final treeUri = _m3u8SourceTreeUri;
+    return treeUri != null &&
+        treeUri.isNotEmpty &&
+        siblings != null &&
+        siblings.length >= 2;
+  }
+
+  /// v1.6.22+ 新增：M3U8 列表按钮（"名称"行右侧的"列表"小按钮）
+  ///
+  /// 点击后弹 _showM3u8SiblingsDialog 列出同目录所有 M3U8。
+  ///   - 仅在 _canShowM3u8List = true 时调用方才会渲染这个按钮
+  ///   - 任务正在跑（running / paused）时按钮禁用，防止切到一半 M3U8
+  Widget _buildM3u8ListButton() {
+    final siblings = _m3u8Siblings ?? const <String>[];
+    final disabled = _status == _ConvertStatus.running ||
+        _status == _ConvertStatus.paused;
+    return TextButton.icon(
+      onPressed: disabled ? null : _showM3u8SiblingsDialog,
+      icon: const Icon(Icons.playlist_play_rounded, size: 16),
+      label: Text('列表（${siblings.length}）'),
+      style: TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+        minimumSize: const Size(0, 28),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        textStyle: const TextStyle(fontSize: 12),
+        foregroundColor: Colors.blue.shade700,
+      ),
     );
   }
 }
