@@ -120,6 +120,10 @@ class HeartRateBle {
     // 先停止扫描
     await stopScan();
 
+    // 取消之前的连接订阅（如果有）
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = null;
+
     AppLogger.i('HeartRateBle', '连接设备: $deviceId');
     onStatus('正在连接...');
 
@@ -131,20 +135,30 @@ class HeartRateBle {
             Uuid.parse('00002a37-0000-1000-8000-00805f9b34fb'),
           ],
         },
-        connectionTimeout: const Duration(seconds: 10),
+        connectionTimeout: const Duration(seconds: 15),
       ).listen(
         (connectionState) async {
-          AppLogger.d('HeartRateBle', '连接状态: ${connectionState.connectionState}');
+          AppLogger.d('HeartRateBle', '连接状态更新: ${connectionState.connectionState}, deviceId: ${connectionState.deviceId}');
 
           if (connectionState.connectionState == DeviceConnectionState.connected) {
+            AppLogger.i('HeartRateBle', '设备已连接: $deviceId');
             _isConnected = true;
             _connectedDeviceId = deviceId;
             onStatus('已连接');
+            // 延迟一下再订阅，确保服务发现完成
+            await Future.delayed(const Duration(milliseconds: 500));
             await _subscribeToHeartRate(onStatus: onStatus);
           } else if (connectionState.connectionState == DeviceConnectionState.disconnected) {
-            _isConnected = false;
-            _connectedDeviceId = null;
-            onStatus('已断开');
+            AppLogger.w('HeartRateBle', '设备已断开: $deviceId, 之前已连接: $_isConnected');
+            // 只在之前已连接的情况下才通知断开
+            if (_isConnected) {
+              _isConnected = false;
+              _connectedDeviceId = null;
+              onStatus('已断开');
+            }
+          } else if (connectionState.connectionState == DeviceConnectionState.connecting) {
+            AppLogger.d('HeartRateBle', '正在连接中...');
+            onStatus('正在连接...');
           }
         },
         onError: (error) {
@@ -171,6 +185,10 @@ class HeartRateBle {
       return;
     }
 
+    // 取消之前的订阅（如果有）
+    await _characteristicSubscription?.cancel();
+    _characteristicSubscription = null;
+
     final characteristic = QualifiedCharacteristic(
       serviceId: Uuid.parse('0000180d-0000-1000-8000-00805f9b34fb'),
       characteristicId: Uuid.parse('00002a37-0000-1000-8000-00805f9b34fb'),
@@ -178,20 +196,29 @@ class HeartRateBle {
     );
 
     try {
+      AppLogger.d('HeartRateBle', '开始订阅心率特征值...');
       _characteristicSubscription = _ble.subscribeToCharacteristic(characteristic).listen(
         (data) {
+          AppLogger.d('HeartRateBle', '收到原始数据: $data');
           // 解析标准心率特征值格式
           final heartRate = _parseHeartRate(data);
           if (heartRate != null) {
             AppLogger.d('HeartRateBle', '心率: $heartRate BPM');
             heartRateStream.add(heartRate);
+          } else {
+            AppLogger.w('HeartRateBle', '无法解析心率数据: $data');
           }
         },
         onError: (error) {
           AppLogger.e('HeartRateBle', '订阅错误', error);
           onStatus('接收失败: $error');
         },
+        onDone: () {
+          AppLogger.w('HeartRateBle', '心率订阅完成（可能设备已断开）');
+        },
       );
+      AppLogger.i('HeartRateBle', '心率特征值订阅成功');
+      onStatus('已连接，正在接收心率数据');
     } catch (e) {
       AppLogger.e('HeartRateBle', '订阅特征值失败', e);
       onStatus('订阅失败: $e');
