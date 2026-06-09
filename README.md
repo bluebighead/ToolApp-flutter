@@ -6,7 +6,7 @@
 ![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)
 ![Dart](https://img.shields.io/badge/Dart-3.11-0175C2?logo=dart)
 ![License](https://img.shields.io/badge/license-Private-lightgrey)
-![Version](https://img.shields.io/badge/version-1.6.21%2B47-blue)
+![Version](https://img.shields.io/badge/version-1.7.9%2B96-blue)
 
 ---
 
@@ -33,7 +33,7 @@
 - 完全离线 / 端侧能力：不依赖任何后端服务，所有计算 / 转码均在手机上完成。
 - 工程化约束：源码全部中文注释，遵循统一的日志规范和发版规则（详见 [PROJECT_RULES.md](./PROJECT_RULES.md)）。
 
-> 当前最新版本：**1.6.21+47** （2026-06-07）
+> 当前最新版本：**1.7.9+96** （2026-06-09）
 
 ---
 
@@ -70,7 +70,16 @@
 - 输出文件默认存到 `ToolApp/videos/converted/`，可自定义 SAF 目录。
 - 转换历史记录：可在"转换历史"页面回看、分享、打开输出文件 / 打开所在目录。
 
-### 4. 设置 / 关于 / 日志
+### 4. 心率广播接收器
+- 支持 **BLE 蓝牙低功耗** 和 **WiFi UDP** 两种连接方式。
+- 支持 **数字显示**、**折线图**、**组合** 三种显示模式。
+- BLE 支持标准心率设备（Heart Rate Service UUID: 0x180D）。
+- UDP 支持端口 8888 接收心率数据。
+- **设备连接记忆**：首次连接成功后自动保存，下次打开页面自动扫描并连接记忆设备。
+- **历史记录**：每次测量会话自动保存，支持查看详情（最高/最低/平均心率、测量时间段）。
+- **多选操作**：支持批量删除历史记录，全选/取消全选一键切换。
+
+### 5. 设置 / 关于 / 日志
 - **设置页**：屏幕旋转、暗色模式、视频保存目录。
 - **关于页**：展示 App 信息（版本号、构建号、最后更新时间等）。
 - **日志页**：查看 / 清空 / 复制 / 导出最近 500 条内存日志。
@@ -100,6 +109,7 @@
 | 本地存储         | `shared_preferences`、`path_provider`                                                        |
 | 文件 / 目录选择  | `file_picker` + Android 原生 `SAF`（通过 MethodChannel 桥接）                                |
 | 音视频           | `noise_meter`、`ffmpeg_kit_flutter_new`                                                      |
+| 蓝牙 BLE         | `flutter_blue_plus`                                                                          |
 | 图表             | `fl_chart`                                                                                   |
 | 权限             | `permission_handler`                                                                         |
 | 系统通知         | `flutter_local_notifications`、`timezone`                                                    |
@@ -129,7 +139,9 @@ ToolApp/
 │   │   ├── network_speed_page.dart
 │   │   ├── network_speed_history_page.dart
 │   │   ├── video_convert_page.dart
-│   │   └── convert_history_page.dart
+│   │   ├── convert_history_page.dart
+│   │   ├── heart_rate_page.dart          # 心率广播接收器主页面
+│   │   └── heart_rate_history_page.dart  # 心率历史记录页面
 │   ├── utils/                # 工具类与服务
 │   │   ├── app_info.dart              # App 元信息（版本号、构建号等）
 │   │   ├── app_logger.dart            # 统一日志门面
@@ -140,6 +152,9 @@ ToolApp/
 │   │   ├── convert_notification.dart  # 转换进度通知
 │   │   ├── convert_resume_state.dart  # 暂停恢复状态序列化
 │   │   ├── ffmpeg_service.dart        # FFmpeg 封装
+│   │   ├── heart_rate_ble.dart        # BLE 蓝牙低功耗心率接收
+│   │   ├── heart_rate_history.dart    # 心率历史记录持久化
+│   │   ├── heart_rate_udp.dart        # WiFi UDP 心率接收
 │   │   ├── m3u8_normalizer.dart       # M3U8 规范化
 │   │   ├── network_speed_*.dart       # 网速相关工具
 │   │   ├── saf_directory_helper.dart  # SAF 目录工具
@@ -149,6 +164,8 @@ ToolApp/
 │       ├── tool_card.dart
 │       ├── decibel_chart.dart
 │       ├── decibel_display.dart
+│       ├── heart_rate_chart.dart      # 心率折线图组件
+│       ├── heart_rate_display.dart    # 心率数字显示组件
 │       ├── network_speed_dial.dart
 │       └── network_speed_line_chart.dart
 ├── test/                     # 单元测试
@@ -226,6 +243,18 @@ adb install -r build/app/outputs/flutter-apk/app-release.apk
 
 | 版本          | 更新时间   | 开发者  | 主要变更                                                                 |
 | ------------- | ---------- | ------- | ------------------------------------------------------------------------ |
+| `1.7.9+96`    | 2026-06-09 | SuperYH | 心率历史记录功能 + 存储空间统计修复（7GB占用根因修复）。                |
+| `1.7.6+92`    | 2026-06-09 | SuperYH | BLE断开后心率显示归零，历史数据清空。                                    |
+| `1.7.5+91`    | 2026-06-09 | SuperYH | 修复BLE断开后自动重连Bug，修复连接监听器泄漏。                          |
+| `1.7.3+89`    | 2026-06-09 | SuperYH | 心率页面切换按钮改为下拉框，新增使用说明按钮。                          |
+| `1.7.2+88`    | 2026-06-09 | SuperYH | 新增BLE设备连接记忆功能，自动保存/恢复连接。                            |
+| `1.7.1+87`    | 2026-06-09 | SuperYH | 修复BLE连接权限、UI状态一致性、UDP内存泄漏等问题。                      |
+| `1.7.0+86`    | 2026-06-09 | SuperYH | 新增心率广播接收器页面，支持BLE和WiFi UDP两种连接方式。                 |
+| `1.6.58+85`   | 2026-06-08 | SuperYH | 批量转换多并行稳定性修复 + 安全加固。                                    |
+| `1.6.57+84`   | 2026-06-08 | SuperYH | 修复历史记录删除输出文件时SAF目录文件未被删除的bug。                    |
+| `1.6.56+83`   | 2026-06-08 | SuperYH | 质量预估优化 + 存储空间管理卡片。                                        |
+| `1.6.55+82`   | 2026-06-08 | SuperYH | 批量转换多选模式 + 转换进行时锁定设置 + 历史记录删除优化。              |
+| `1.6.36+63`   | 2026-06-07 | SuperYH | 修复续转卡在FFmpeg启动中、暂停按钮状态优化。                            |
 | `1.6.21+47`   | 2026-06-07 | SuperYH | 转换启停逻辑重做："暂停"与"取消"语义彻底分开，支持跨进程恢复。          |
 | `1.6.19+45`   | 2026-06-07 | SuperYH | 新增 `ConvertCoordinator`，修复"选择后台运行后转换直接结束"的 Bug。       |
 | `1.6.18+44`   | 2026-06-07 | SuperYH | 视频转换通知 + 自定义保存路径优化。                                       |
