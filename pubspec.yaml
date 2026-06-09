@@ -41,6 +41,8 @@ dependencies:
   fl_chart: ^0.68.0
   # 统一处理麦克风权限申请
   permission_handler: ^12.0.0
+  # BLE 蓝牙低功耗：心率广播接收器连接标准心率设备
+  flutter_reactive_ble: ^5.3.0
   # 本地持久化存储（用于保存应用设置：屏幕旋转/暗色模式等）
   shared_preferences: ^2.2.2
   # 网速测试：HTTP 客户端
