@@ -109,7 +109,7 @@ class _HeartRatePageState extends State<HeartRatePage> {
     }
 
     // 订阅心率数据流
-    _heartRateSubscription = _ble.heartRateStream.listen(
+    _heartRateSubscription = _ble.heartRateStream.stream.listen(
       _onHeartRateData,
       onError: _onHeartRateError,
     );
@@ -131,7 +131,7 @@ class _HeartRatePageState extends State<HeartRatePage> {
     _udp = HeartRateUdp(port: 8888);
 
     // 订阅心率数据流
-    _heartRateSubscription = _udp!.heartRateStream.listen(
+    _heartRateSubscription = _udp!.heartRateStream.stream.listen(
       _onHeartRateData,
       onError: _onHeartRateError,
     );

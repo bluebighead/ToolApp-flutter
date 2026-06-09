@@ -57,15 +57,8 @@ class HeartRateUdp {
       final message = String.fromCharCodes(data).trim();
       AppLogger.d('HeartRateUdp', '收到UDP数据: $message');
 
-      int? heartRate;
-
-      // 尝试解析纯数字格式
-      heartRate = int.tryParse(message);
-
-      // 如果纯数字解析失败，尝试JSON格式
-      if (heartRate == null) {
-        heartRate = _parseJson(message);
-      }
+      // 尝试解析纯数字格式，如果失败则尝试JSON格式
+      int? heartRate = int.tryParse(message) ?? _parseJson(message);
 
       if (heartRate != null && heartRate > 0 && heartRate < 300) {
         AppLogger.d('HeartRateUdp', '心率: $heartRate BPM');

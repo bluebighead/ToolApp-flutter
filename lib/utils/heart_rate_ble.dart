@@ -12,7 +12,6 @@ class HeartRateBle {
   StreamSubscription<ConnectionStateUpdate>? _connectionSubscription;
   StreamSubscription<List<int>>? _characteristicSubscription;
 
-  QualifiedCharacteristic? _heartRateCharacteristic;
   String? _connectedDeviceId;
   bool _isScanning = false;
   bool _isConnected = false;
@@ -131,7 +130,6 @@ class HeartRateBle {
       characteristicId: Uuid.parse('00002a37-0000-1000-8000-00805f9b34fb'),
       deviceId: _connectedDeviceId!,
     );
-    _heartRateCharacteristic = characteristic;
 
     try {
       _characteristicSubscription = _ble.subscribeToCharacteristic(characteristic).listen(
@@ -190,7 +188,6 @@ class HeartRateBle {
     _isScanning = false;
     _isConnected = false;
     _connectedDeviceId = null;
-    _heartRateCharacteristic = null;
   }
 
   /// 释放所有资源
