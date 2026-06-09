@@ -5,6 +5,27 @@ import 'dart:async';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import 'app_logger.dart';
 
+/// 扫描到的设备信息
+class ScannedDevice {
+  final String id;
+  final String name;
+  final int rssi;
+
+  ScannedDevice({
+    required this.id,
+    required this.name,
+    required this.rssi,
+  });
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ScannedDevice && runtimeType == other.runtimeType && id == other.id;
+
+  @override
+  int get hashCode => id.hashCode;
+}
+
 /// BLE 心率接收器
 class HeartRateBle {
   final FlutterReactiveBle _ble = FlutterReactiveBle();
@@ -16,21 +37,33 @@ class HeartRateBle {
   bool _isScanning = false;
   bool _isConnected = false;
 
+  /// 扫描到的设备列表
+  final Map<String, ScannedDevice> _scannedDevices = {};
+
+  /// 设备列表更新流
+  final StreamController<List<ScannedDevice>> devicesStream =
+      StreamController<List<ScannedDevice>>.broadcast();
+
   /// 是否正在扫描
   bool get isScanning => _isScanning;
 
   /// 是否已连接
   bool get isConnected => _isConnected;
 
+  /// 已连接的设备ID
+  String? get connectedDeviceId => _connectedDeviceId;
+
   /// 心率数据流控制器
   final StreamController<int> heartRateStream = StreamController<int>.broadcast();
 
-  /// 扫描并连接心率设备
-  /// [onStatus] 回调用于传递状态信息（扫描中、已连接等）
+  /// 开始扫描心率设备
+  /// 不会自动连接，而是将设备添加到扫描列表中
+  /// [onStatus] 回调用于传递状态信息
   Future<void> startScan({required Function(String status) onStatus}) async {
     if (_isScanning) return;
 
     AppLogger.i('HeartRateBle', '开始扫描BLE心率设备');
+    _scannedDevices.clear();
     _isScanning = true;
     onStatus('正在扫描设备...');
 
@@ -40,12 +73,20 @@ class HeartRateBle {
         withServices: [Uuid.parse('0000180d-0000-1000-8000-00805f9b34fb')],
         scanMode: ScanMode.lowLatency,
       ).listen(
-        (device) async {
-          AppLogger.d('HeartRateBle', '发现设备: ${device.name} (${device.id})');
-          // 发现设备后立即停止扫描并连接
-          await _stopScan();
-          onStatus('发现设备: ${device.name.isNotEmpty ? device.name : '未知设备'}');
-          await _connectToDevice(device, onStatus: onStatus);
+        (device) {
+          // 将设备添加到扫描列表（去重）
+          final scannedDevice = ScannedDevice(
+            id: device.id,
+            name: device.name.isNotEmpty ? device.name : '未知设备',
+            rssi: device.rssi,
+          );
+
+          if (!_scannedDevices.containsKey(device.id)) {
+            _scannedDevices[device.id] = scannedDevice;
+            AppLogger.d('HeartRateBle', '发现新设备: ${scannedDevice.name} (${scannedDevice.id}) RSSI: ${scannedDevice.rssi}');
+            // 通知设备列表更新
+            devicesStream.add(_scannedDevices.values.toList());
+          }
         },
         onError: (error) {
           AppLogger.e('HeartRateBle', '扫描错误', error);
@@ -61,7 +102,7 @@ class HeartRateBle {
   }
 
   /// 停止扫描
-  Future<void> _stopScan() async {
+  Future<void> stopScan() async {
     if (!_isScanning) return;
     AppLogger.i('HeartRateBle', '停止扫描');
     await _scanSubscription?.cancel();
@@ -70,16 +111,21 @@ class HeartRateBle {
   }
 
   /// 连接到指定设备
-  Future<void> _connectToDevice(
-    DiscoveredDevice device, {
+  /// [deviceId] 设备ID
+  /// [onStatus] 回调用于传递状态信息
+  Future<void> connectToDevice(
+    String deviceId, {
     required Function(String status) onStatus,
   }) async {
-    AppLogger.i('HeartRateBle', '连接设备: ${device.id}');
+    // 先停止扫描
+    await stopScan();
+
+    AppLogger.i('HeartRateBle', '连接设备: $deviceId');
     onStatus('正在连接...');
 
     try {
       _connectionSubscription = _ble.connectToDevice(
-        id: device.id,
+        id: deviceId,
         servicesWithCharacteristicsToDiscover: {
           Uuid.parse('0000180d-0000-1000-8000-00805f9b34fb'): [
             Uuid.parse('00002a37-0000-1000-8000-00805f9b34fb'),
@@ -92,7 +138,7 @@ class HeartRateBle {
 
           if (connectionState.connectionState == DeviceConnectionState.connected) {
             _isConnected = true;
-            _connectedDeviceId = device.id;
+            _connectedDeviceId = deviceId;
             onStatus('已连接');
             await _subscribeToHeartRate(onStatus: onStatus);
           } else if (connectionState.connectionState == DeviceConnectionState.disconnected) {
@@ -176,16 +222,13 @@ class HeartRateBle {
     }
   }
 
-  /// 断开连接并释放资源
+  /// 断开连接
   Future<void> disconnect() async {
     AppLogger.i('HeartRateBle', '断开BLE连接');
     await _characteristicSubscription?.cancel();
     await _connectionSubscription?.cancel();
-    await _scanSubscription?.cancel();
     _characteristicSubscription = null;
     _connectionSubscription = null;
-    _scanSubscription = null;
-    _isScanning = false;
     _isConnected = false;
     _connectedDeviceId = null;
   }
@@ -193,6 +236,8 @@ class HeartRateBle {
   /// 释放所有资源
   Future<void> dispose() async {
     await disconnect();
+    await stopScan();
     await heartRateStream.close();
+    await devicesStream.close();
   }
 }

@@ -46,6 +46,9 @@ class _HeartRatePageState extends State<HeartRatePage> {
   // 心率数据流订阅
   StreamSubscription<int>? _heartRateSubscription;
 
+  // 设备列表流订阅
+  StreamSubscription<List<ScannedDevice>>? _devicesSubscription;
+
   // 当前心率值
   int _heartRate = 0;
 
@@ -53,8 +56,14 @@ class _HeartRatePageState extends State<HeartRatePage> {
   final List<int> _history = [];
   static const int _maxPoints = 60;
 
-  // 是否正在接收数据
+  // 是否正在接收数据（已连接并接收心率）
   bool _isActive = false;
+
+  // 是否正在扫描设备
+  bool _isScanning = false;
+
+  // 扫描到的设备列表
+  List<ScannedDevice> _scannedDevices = [];
 
   // 状态信息
   String _status = '未连接';
@@ -63,8 +72,22 @@ class _HeartRatePageState extends State<HeartRatePage> {
   String? _errorMessage;
 
   @override
+  void initState() {
+    super.initState();
+    // 订阅设备列表更新
+    _devicesSubscription = _ble.devicesStream.stream.listen(
+      (devices) {
+        if (mounted) {
+          setState(() => _scannedDevices = devices);
+        }
+      },
+    );
+  }
+
+  @override
   void dispose() {
     _stopReceiving();
+    _devicesSubscription?.cancel();
     _ble.dispose();
     _udp?.dispose();
     super.dispose();
@@ -75,7 +98,7 @@ class _HeartRatePageState extends State<HeartRatePage> {
     AppLogger.i('HeartRatePage', '开始接收心率数据，模式: $_connectionMode');
     setState(() {
       _errorMessage = null;
-      _status = '正在连接...';
+      _status = '准备中...';
     });
 
     try {
@@ -89,6 +112,7 @@ class _HeartRatePageState extends State<HeartRatePage> {
       setState(() {
         _errorMessage = '启动失败: $e';
         _isActive = false;
+        _isScanning = false;
         _status = '未连接';
       });
     }
@@ -114,7 +138,7 @@ class _HeartRatePageState extends State<HeartRatePage> {
       onError: _onHeartRateError,
     );
 
-    // 开始扫描
+    // 开始扫描设备（不自动连接，等待用户选择）
     await _ble.startScan(
       onStatus: (status) {
         if (mounted) {
@@ -123,7 +147,10 @@ class _HeartRatePageState extends State<HeartRatePage> {
       },
     );
 
-    setState(() => _isActive = true);
+    setState(() {
+      _isScanning = true;
+      _status = '正在扫描设备...';
+    });
   }
 
   /// 启动UDP接收
@@ -159,6 +186,7 @@ class _HeartRatePageState extends State<HeartRatePage> {
 
     if (_connectionMode == ConnectionMode.ble) {
       await _ble.disconnect();
+      await _ble.stopScan();
     } else {
       await _udp?.stopListening();
     }
@@ -166,9 +194,165 @@ class _HeartRatePageState extends State<HeartRatePage> {
     if (mounted) {
       setState(() {
         _isActive = false;
+        _isScanning = false;
         _status = '未连接';
       });
     }
+  }
+
+  /// 显示扫描列表弹窗
+  Future<void> _showDeviceList() async {
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => _buildDeviceListSheet(),
+    );
+  }
+
+  /// 构建设备列表弹窗
+  Widget _buildDeviceListSheet() {
+    return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.6,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 标题栏
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Theme.of(context).primaryColor,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+            ),
+            child: Row(
+              children: [
+                const Text(
+                  '扫描到的设备',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+                const Spacer(),
+                // 刷新按钮
+                IconButton(
+                  icon: const Icon(Icons.refresh, color: Colors.white),
+                  onPressed: () {
+                    // 重新扫描
+                    _ble.stopScan().then((_) {
+                      setState(() => _scannedDevices.clear());
+                      _ble.startScan(
+                        onStatus: (status) {
+                          if (mounted) {
+                            setState(() => _status = status);
+                          }
+                        },
+                      );
+                    });
+                  },
+                ),
+                // 关闭按钮
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ],
+            ),
+          ),
+          // 设备列表
+          if (_scannedDevices.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(32),
+              child: Column(
+                children: [
+                  Icon(Icons.bluetooth_disabled, size: 48, color: Colors.grey),
+                  SizedBox(height: 16),
+                  Text(
+                    '暂无设备\n请确保心率设备已开启广播',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.grey, fontSize: 16),
+                  ),
+                ],
+              ),
+            )
+          else
+            Expanded(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: _scannedDevices.length,
+                itemBuilder: (context, index) {
+                  final device = _scannedDevices[index];
+                  final isConnected = _ble.connectedDeviceId == device.id;
+
+                  return ListTile(
+                    leading: Icon(
+                      isConnected ? Icons.bluetooth_connected : Icons.bluetooth,
+                      color: isConnected ? Colors.green : Colors.blue,
+                    ),
+                    title: Text(device.name),
+                    subtitle: Text(
+                      'ID: ${device.id}\n信号强度: ${device.rssi} dBm',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    trailing: isConnected
+                        ? OutlinedButton.icon(
+                            onPressed: () async {
+                              // 断开连接
+                              await _ble.disconnect();
+                              if (!mounted) return;
+                              setState(() {
+                                _isActive = false;
+                                _isScanning = true;
+                                _status = '已断开，继续扫描...';
+                              });
+                              // 断开后重新开始扫描
+                              _ble.startScan(
+                                onStatus: (status) {
+                                  if (mounted) {
+                                    setState(() => _status = status);
+                                  }
+                                },
+                              );
+                              // ignore: use_build_context_synchronously
+                              if (mounted) Navigator.of(context).pop();
+                            },
+                            icon: const Icon(Icons.cancel, size: 16),
+                            label: const Text('断开'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.red,
+                            ),
+                          )
+                        : ElevatedButton.icon(
+                            onPressed: () async {
+                              // 连接设备
+                              Navigator.pop(context);
+                              await _ble.connectToDevice(
+                                device.id,
+                                onStatus: (status) {
+                                  if (mounted) {
+                                    setState(() {
+                                      _status = status;
+                                      if (status == '已连接') {
+                                        _isActive = true;
+                                        _isScanning = false;
+                                      }
+                                    });
+                                  }
+                                },
+                              );
+                            },
+                            icon: const Icon(Icons.link, size: 16),
+                            label: const Text('连接'),
+                          ),
+                  );
+                },
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   /// 处理心率数据
@@ -190,13 +374,14 @@ class _HeartRatePageState extends State<HeartRatePage> {
     setState(() {
       _errorMessage = '接收错误: $error';
       _isActive = false;
+      _isScanning = false;
       _status = '错误';
     });
   }
 
   /// 切换连接方式
   void _toggleConnectionMode() {
-    if (_isActive) {
+    if (_isActive || _isScanning) {
       _stopReceiving().then((_) {
         setState(() {
           _connectionMode = _connectionMode == ConnectionMode.ble
@@ -204,6 +389,7 @@ class _HeartRatePageState extends State<HeartRatePage> {
               : ConnectionMode.ble;
           _history.clear();
           _heartRate = 0;
+          _scannedDevices.clear();
         });
       });
     } else {
@@ -213,6 +399,7 @@ class _HeartRatePageState extends State<HeartRatePage> {
             : ConnectionMode.ble;
         _history.clear();
         _heartRate = 0;
+        _scannedDevices.clear();
       });
     }
   }
@@ -299,7 +486,7 @@ class _HeartRatePageState extends State<HeartRatePage> {
                 _status,
                 style: TextStyle(
                   fontSize: 14,
-                  color: _isActive ? Colors.green : Colors.grey,
+                  color: _isActive ? Colors.green : (_isScanning ? Colors.orange : Colors.grey),
                 ),
               ),
               const SizedBox(height: 16),
@@ -331,27 +518,48 @@ class _HeartRatePageState extends State<HeartRatePage> {
               ),
               const SizedBox(height: 16),
               // 底部：控制按钮
-              SizedBox(
-                width: double.infinity,
-                height: 56,
-                child: ElevatedButton.icon(
-                  onPressed: _isActive ? _stopReceiving : _startReceiving,
-                  icon: Icon(_isActive ? Icons.stop : Icons.play_arrow),
-                  label: Text(
-                    _isActive ? '停止' : '开始接收',
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
+              Row(
+                children: [
+                  // 扫描列表按钮（仅BLE模式显示）
+                  if (_connectionMode == ConnectionMode.ble)
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _isScanning || _scannedDevices.isNotEmpty
+                            ? _showDeviceList
+                            : null,
+                        icon: const Icon(Icons.list),
+                        label: const Text('扫描列表'),
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size(0, 56),
+                        ),
+                      ),
+                    ),
+                  if (_connectionMode == ConnectionMode.ble)
+                    const SizedBox(width: 12),
+                  // 开始/停止按钮
+                  Expanded(
+                    flex: _connectionMode == ConnectionMode.ble ? 2 : 1,
+                    child: ElevatedButton.icon(
+                      onPressed: (_isActive || _isScanning) ? _stopReceiving : _startReceiving,
+                      icon: Icon(_isActive || _isScanning ? Icons.stop : Icons.play_arrow),
+                      label: Text(
+                        _isScanning && !_isActive ? '停止扫描' : (_isActive ? '停止' : '开始接收'),
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: (_isActive || _isScanning) ? Colors.red : Colors.green,
+                        foregroundColor: Colors.white,
+                        minimumSize: const Size(0, 56),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(28),
+                        ),
+                      ),
                     ),
                   ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _isActive ? Colors.red : Colors.green,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(28),
-                    ),
-                  ),
-                ),
+                ],
               ),
             ],
           ),
