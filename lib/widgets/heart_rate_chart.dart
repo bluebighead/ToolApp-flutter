@@ -107,9 +107,9 @@ class HeartRateChart extends StatelessWidget {
             bottom: BorderSide(color: Colors.grey.withValues(alpha: 0.3)),
           ),
         ),
-        // X 轴范围：固定窗口大小为 60 个点
-        minX: data.length > 60 ? (data.length - 60).toDouble() : 0,
-        maxX: data.length.toDouble() - 1,
+        // X 轴范围：数据已限制为最多60个点，直接使用索引范围
+        minX: 0,
+        maxX: data.length > 1 ? (data.length - 1).toDouble() : 1,
         // Y 轴范围：固定 30 ~ 200 BPM
         minY: 30,
         maxY: 200,

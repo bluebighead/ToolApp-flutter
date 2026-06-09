@@ -53,11 +53,45 @@ class AppInfo {
   //   - 修复通知栏"停止"按钮只停前台服务不取消FFmpeg
   //     修复：Kotlin端通过MethodChannel回调通知Dart端取消
   //   - 修复ffmpeg_service.dart中未使用的局部变量warning
-  static const String version = '1.6.58';
+  // v1.7.0+ 升级说明（新增心率广播接收器功能）：
+  //   - 新增心率广播接收器页面，支持BLE蓝牙低功耗和WiFi UDP两种连接方式
+  //   - 支持数字显示、折线图、组合三种显示模式
+  //   - BLE支持标准心率设备（Heart Rate Service UUID: 0x180D）
+  //   - UDP支持端口8888接收心率数据
+  // v1.7.1+ 升级说明（Bug修复）：
+  //   - 修复BLE连接缺少bluetoothConnect权限（Android 12+连接必失败）
+  //   - 修复BLE连接失败后UI状态不一致（_isScanning卡在true）
+  //   - 修复UDP模式重复启动时旧实例未释放导致内存泄漏
+  //   - 修复BLE扫描重复设备未更新RSSI
+  //   - 修复UDP socket监听订阅未保存
+  //   - 修复图表X轴滑动窗口冗余逻辑
+  // v1.7.2+ 升级说明（设备连接记忆功能）：
+  //   - 新增BLE设备连接记忆功能，首次连接成功后自动保存
+  //   - 下次打开页面自动扫描并连接记忆设备
+  //   - 设备未开机时持续扫描等待，设备出现后自动连接
+  //   - 用户手动选择其他设备时自动更新记忆
+  //   - 设备列表中标记"上次连接"的设备
+  // v1.7.3+ 升级说明（UI优化）：
+  //   - 心率页面顶部切换按钮改为下拉框形式，更加直观精准
+  //   - AppBar右上角新增使用说明按钮，引导用户使用工具
+  //   - 移除不再使用的切换按钮和冗余文字方法
+  // v1.7.5+ 升级说明（Bug修复）：
+  //   - 修复BLE断开连接后自动重连Bug（_isAutoConnecting标记+取消自动连接订阅）
+  //   - 修复disconnect()未取消_autoConnectSubscription导致监听器泄漏
+  //   - 修复connectToDevice()未终止自动连接流程导致重复触发
+  // v1.7.6+ 升级说明（体验优化）：
+  //   - 断开连接后心率显示归零，历史数据清空
+  // v1.7.9+ 升级说明（Bug修复 - 存储空间统计与清理）：
+  //   - 修复用户数据统计范围不完整，只统计了ToolApp/而非整个Documents/目录
+  //   - 修复缓存统计遗漏了cache/目录（M3U8临时文件主要存放位置）
+  //   - 修复清理用户数据时未清理Documents/下的断点续转状态文件
+  //   - 修复清理用户数据时未清理cache/下的M3U8临时目录（7GB+占用的根因）
+  //   - 修复心率历史记录多选模式下全选按钮不支持切换取消全选
+  static const String version = '1.7.9';
 
   // 当前构建号（整数，每次发版递增）
   // 每次发版时同步更新 pubspec.yaml 中 version 字段的 + 号后的数字
-  static const int buildNumber = 86;
+  static const int buildNumber = 96;
 
   // 开发者署名
   static const String developer = 'SuperYH';

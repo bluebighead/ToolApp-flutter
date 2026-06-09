@@ -7,6 +7,12 @@
 //   - data/     存放其它业务数据（如未来需要持久化的 JSON、缓存文件等）
 // 后续如果有新的数据需要落盘，应继续在此新增子目录，不要在业务页面里
 // 自行调用 path_provider。
+//
+// v1.7.8+ 修复：存储空间统计与系统设置对齐
+//   - 用户数据：统计整个 Documents/ 目录（与 Android 系统设置一致）
+//   - 缓存：同时统计临时目录和 cache 目录
+//   - M3U8 临时文件：统计 cache/ 下的 m3u8_norm_* 目录
+//   - 清理：增加对 Documents/ 下断点续转文件和 cache/ 下 M3U8 临时目录的清理
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -105,16 +111,30 @@ class AppStorage {
     return _calcDirSize(dir.path);
   }
 
-  /// 获取 App 数据总大小（字节）：ToolApp/ 下所有文件
+  /// v1.7.8+ 修复：获取 App 用户数据总大小（字节）
+  /// 统计整个 Documents/ 目录，与 Android 系统设置的"用户数据"一致
+  /// 包括：ToolApp/ 子目录 + Documents/ 下的断点续转文件等
   static Future<int> getTotalDataSize() async {
-    final root = await getRootPath();
-    return _calcDirSize(root);
+    final docs = await getApplicationDocumentsDirectory();
+    return _calcDirSize(docs.path);
   }
 
-  /// 获取缓存目录大小（字节）：系统临时目录
+  /// v1.7.8+ 修复：获取缓存目录大小（字节）
+  /// 同时统计临时目录（getTemporaryDirectory）和缓存目录（getApplicationCacheDirectory）
+  /// 与 Android 系统设置的"缓存"更接近
   static Future<int> getCacheDirSize() async {
+    int total = 0;
+    // 临时目录
     final tempDir = await getTemporaryDirectory();
-    return _calcDirSize(tempDir.path);
+    total += await _calcDirSize(tempDir.path);
+    // 缓存目录（M3U8 临时文件存放在此）
+    try {
+      final cacheDir = await getApplicationCacheDirectory();
+      total += await _calcDirSize(cacheDir.path);
+    } catch (_) {
+      // 某些平台可能不支持 getApplicationCacheDirectory
+    }
+    return total;
   }
 
   /// v1.6.58+ 新增：获取 App 本体大小（APK 大小，字节）
@@ -129,16 +149,19 @@ class AppStorage {
     }
   }
 
-  /// v1.6.58+ 新增：获取 M3U8 复制内容目录大小
-  /// M3U8 文件在转换前会被复制到 ToolApp/data/ 下的临时目录
+  /// v1.7.8+ 修复：获取 M3U8 临时文件大小
+  /// 注意：M3U8 临时文件分布在两个位置：
+  ///   1. cache/ 下的 m3u8_norm_* 目录（主要占用来源）—— 已被 getCacheDirSize() 统计
+  ///   2. ToolApp/data/ 下的旧版临时文件 —— 已被 getTotalDataSize() 统计
+  /// 本方法只统计第2项，避免与缓存重复计算
   static Future<int> getM3u8CopySize() async {
     final dataDir = await getDataDirectory();
     return _calcDirSize(dataDir.path);
   }
 
-  /// v1.6.58+ 新增：获取断点续转状态文件总大小
+  /// v1.7.8+ 修复：获取断点续转状态文件总大小
+  /// 统计 Documents/ 下所有 convert_resume_state.json 和 resume_state_* 文件
   static Future<int> getResumeStateSize() async {
-    // 断点续转状态文件存储在应用 Documents 目录下
     final docs = await getApplicationDocumentsDirectory();
     int total = 0;
     final dir = Directory(docs.path);
@@ -146,7 +169,9 @@ class AppStorage {
       await for (final entity in dir.list(followLinks: false)) {
         if (entity is File) {
           final name = entity.path.split('/').last;
-          if (name.startsWith('resume_state_')) {
+          // 新版断点续转状态文件
+          if (name == 'convert_resume_state.json' ||
+              name.startsWith('resume_state_')) {
             try {
               total += await entity.length();
             } catch (_) {}
@@ -180,15 +205,31 @@ class AppStorage {
     );
   }
 
-  /// 清理缓存目录（系统临时目录下的所有文件）
+  /// v1.7.8+ 修复：清理缓存目录
+  /// 同时清理临时目录和缓存目录（包括 M3U8 临时文件）
   /// 返回清理的字节数
   static Future<int> clearCache() async {
+    int cleaned = 0;
+    // 清理临时目录
     final tempDir = await getTemporaryDirectory();
-    return _clearDirectory(tempDir.path);
+    cleaned += await _clearDirectory(tempDir.path);
+    // 清理缓存目录（包括 M3U8 临时文件）
+    try {
+      final cacheDir = await getApplicationCacheDirectory();
+      cleaned += await _clearDirectory(cacheDir.path);
+    } catch (_) {}
+    return cleaned;
   }
 
-  /// 清理用户数据中无关紧要的文件（视频输出、日志、临时数据）
-  /// 但保留软件配置数据（SharedPreferences 中的设置不受影响）
+  /// v1.7.8+ 修复：清理用户数据
+  /// 清理范围：
+  ///   - ToolApp/videos/  视频输出文件
+  ///   - ToolApp/logs/    日志文件
+  ///   - ToolApp/data/    临时数据文件
+  ///   - Documents/ 下的断点续转状态文件（convert_resume_state.json, resume_state_*）
+  ///   - cache/ 下的 M3U8 临时目录（m3u8_norm_*）
+  ///   - 临时目录和缓存目录
+  /// 保留：SharedPreferences 中的软件配置
   /// 返回清理的字节数
   static Future<int> clearJunkData() async {
     int cleaned = 0;
@@ -204,8 +245,33 @@ class AppStorage {
     cleaned += await _clearDirectory(
       (await getDataDirectory()).path,
     );
-    // 清理缓存
+    // 清理 Documents/ 下的断点续转状态文件
+    cleaned += await _clearResumeStateFiles();
+    // 清理缓存（包括 M3U8 临时目录）
     cleaned += await clearCache();
+    return cleaned;
+  }
+
+  /// 清理 Documents/ 下的断点续转状态文件
+  /// 包括 convert_resume_state.json 和 resume_state_* 文件
+  /// 返回清理的字节数
+  static Future<int> _clearResumeStateFiles() async {
+    int cleaned = 0;
+    final docs = await getApplicationDocumentsDirectory();
+    final dir = Directory(docs.path);
+    if (!await dir.exists()) return 0;
+    await for (final entity in dir.list(followLinks: false)) {
+      if (entity is File) {
+        final name = entity.path.split('/').last;
+        if (name == 'convert_resume_state.json' ||
+            name.startsWith('resume_state_')) {
+          try {
+            cleaned += await entity.length();
+            await entity.delete();
+          } catch (_) {}
+        }
+      }
+    }
     return cleaned;
   }
 
@@ -245,11 +311,11 @@ class AppStorage {
 
 /// v1.6.58+ 新增：存储空间详细信息
 class StorageDetailInfo {
-  final int totalDataSize; // 用户数据总大小
-  final int cacheSize; // 缓存大小
+  final int totalDataSize; // 用户数据总大小（整个 Documents/ 目录）
+  final int cacheSize; // 缓存大小（临时目录 + 缓存目录）
   final int videosSize; // 视频输出文件大小
   final int logsSize; // 日志文件大小
-  final int m3u8CopySize; // M3U8 复制内容大小
+  final int m3u8CopySize; // M3U8 临时文件大小（cache/ 下 m3u8_norm_* + ToolApp/data/）
   final int resumeStateSize; // 断点续转状态文件大小
   final int apkSize; // App 本体（APK）大小
 

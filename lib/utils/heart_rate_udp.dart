@@ -9,6 +9,7 @@ import 'app_logger.dart';
 /// UDP 心率接收器
 class HeartRateUdp {
   RawDatagramSocket? _socket;
+  StreamSubscription<RawSocketEvent>? _socketSubscription;
   bool _isListening = false;
   final int _port;
 
@@ -33,7 +34,7 @@ class HeartRateUdp {
 
     try {
       _socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, _port);
-      _socket!.listen((RawSocketEvent event) {
+      _socketSubscription = _socket!.listen((RawSocketEvent event) {
         if (event == RawSocketEvent.read) {
           final datagram = _socket!.receive();
           if (datagram != null) {
@@ -92,6 +93,8 @@ class HeartRateUdp {
   /// 停止监听
   Future<void> stopListening() async {
     AppLogger.i('HeartRateUdp', '停止UDP监听');
+    await _socketSubscription?.cancel();
+    _socketSubscription = null;
     _socket?.close();
     _socket = null;
     _isListening = false;

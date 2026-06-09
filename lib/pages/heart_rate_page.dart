@@ -6,9 +6,11 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../utils/app_logger.dart';
 import '../utils/heart_rate_ble.dart';
+import '../utils/heart_rate_history.dart';
 import '../utils/heart_rate_udp.dart';
 import '../widgets/heart_rate_display.dart';
 import '../widgets/heart_rate_chart.dart';
+import 'heart_rate_history_page.dart';
 
 /// 显示模式枚举
 enum DisplayMode {
@@ -35,7 +37,7 @@ class _HeartRatePageState extends State<HeartRatePage> {
   ConnectionMode _connectionMode = ConnectionMode.ble;
 
   // 显示模式：数字/图表/组合
-  DisplayMode _displayMode = DisplayMode.combined;
+  DisplayMode _displayMode = DisplayMode.number;
 
   // BLE接收器
   final HeartRateBle _ble = HeartRateBle();
@@ -71,6 +73,15 @@ class _HeartRatePageState extends State<HeartRatePage> {
   // 错误信息
   String? _errorMessage;
 
+  // 记忆设备ID（缓存，用于UI标记"上次连接"的设备）
+  String? _memoryDeviceId;
+
+  // 会话数据收集：用于保存历史记录
+  // 当前会话的所有心率采样值
+  final List<int> _sessionData = [];
+  // 当前会话开始时间（毫秒），null 表示未开始
+  int? _sessionStartTimeMs;
+
   @override
   void initState() {
     super.initState();
@@ -86,10 +97,18 @@ class _HeartRatePageState extends State<HeartRatePage> {
 
   @override
   void dispose() {
-    _stopReceiving();
+    // 页面销毁时保存会话数据（如果正在接收中退出页面）
+    _saveSessionToHistory();
+    // 先取消页面层的订阅，防止BLE/UDP关闭stream后仍收到回调
+    _heartRateSubscription?.cancel();
+    _heartRateSubscription = null;
     _devicesSubscription?.cancel();
+    _devicesSubscription = null;
+    // 释放BLE和UDP资源（disconnect/stopScan是async但dispose中无法await，
+    // 在dispose中同步调用确保资源尽快释放）
     _ble.dispose();
     _udp?.dispose();
+    _udp = null;
     super.dispose();
   }
 
@@ -100,6 +119,10 @@ class _HeartRatePageState extends State<HeartRatePage> {
       _errorMessage = null;
       _status = '准备中...';
     });
+
+    // 重置会话数据收集
+    _sessionData.clear();
+    _sessionStartTimeMs = DateTime.now().millisecondsSinceEpoch;
 
     try {
       if (_connectionMode == ConnectionMode.ble) {
@@ -120,11 +143,12 @@ class _HeartRatePageState extends State<HeartRatePage> {
 
   /// 启动BLE接收
   Future<void> _startBle() async {
-    // 检查蓝牙和位置权限
-    final bleStatus = await Permission.bluetoothScan.request();
+    // 检查蓝牙和位置权限（Android 12+需要bluetoothScan和bluetoothConnect）
+    final scanStatus = await Permission.bluetoothScan.request();
+    final connectStatus = await Permission.bluetoothConnect.request();
     final locationStatus = await Permission.location.request();
 
-    if (!bleStatus.isGranted || !locationStatus.isGranted) {
+    if (!scanStatus.isGranted || !connectStatus.isGranted || !locationStatus.isGranted) {
       setState(() {
         _errorMessage = '需要蓝牙和位置权限';
         _status = '权限被拒绝';
@@ -138,23 +162,57 @@ class _HeartRatePageState extends State<HeartRatePage> {
       onError: _onHeartRateError,
     );
 
-    // 开始扫描设备（不自动连接，等待用户选择）
-    await _ble.startScan(
-      onStatus: (status) {
-        if (mounted) {
-          setState(() => _status = status);
-        }
-      },
-    );
+    // 检查是否有记忆设备，有则尝试自动连接
+    final memoryDevice = await _ble.getLastConnectedDevice();
 
-    setState(() {
-      _isScanning = true;
-      _status = '正在扫描设备...';
-    });
+    if (memoryDevice != null) {
+      // 有记忆设备，尝试自动连接
+      _memoryDeviceId = memoryDevice['id'];
+      await _ble.autoConnectLastDevice(
+        onStatus: (status) {
+          if (mounted) {
+            setState(() {
+              _status = status;
+              // 自动连接成功时，更新扫描和激活状态
+              if (status == '已连接') {
+                _isScanning = false;
+                _isActive = true;
+              }
+            });
+          }
+        },
+        onDeviceFound: () {
+          if (mounted) {
+            setState(() {
+              _status = '找到记忆设备，正在连接...';
+            });
+          }
+        },
+      );
+      setState(() {
+        _isScanning = true;
+      });
+    } else {
+      // 无记忆设备，保持原有行为（扫描等待用户选择）
+      await _ble.startScan(
+        onStatus: (status) {
+          if (mounted) {
+            setState(() => _status = status);
+          }
+        },
+      );
+      setState(() {
+        _isScanning = true;
+      });
+    }
   }
 
   /// 启动UDP接收
   Future<void> _startUdp() async {
+    // 释放旧的UDP实例，避免内存泄漏
+    await _udp?.dispose();
+    _udp = null;
+
     _udp = HeartRateUdp(port: 8888);
 
     // 订阅心率数据流
@@ -181,6 +239,10 @@ class _HeartRatePageState extends State<HeartRatePage> {
   /// 停止接收
   Future<void> _stopReceiving() async {
     AppLogger.i('HeartRatePage', '停止接收心率数据');
+
+    // 保存会话数据到历史记录（至少有1个采样点才保存）
+    _saveSessionToHistory();
+
     await _heartRateSubscription?.cancel();
     _heartRateSubscription = null;
 
@@ -188,16 +250,51 @@ class _HeartRatePageState extends State<HeartRatePage> {
       await _ble.disconnect();
       await _ble.stopScan();
     } else {
-      await _udp?.stopListening();
+      await _udp?.dispose();
+      _udp = null;
     }
 
     if (mounted) {
       setState(() {
         _isActive = false;
         _isScanning = false;
+        _memoryDeviceId = null;
+        _heartRate = 0; // 断开连接后心率归零
+        _history.clear(); // 清空历史数据
+        _scannedDevices.clear(); // 清空扫描设备列表
         _status = '未连接';
       });
     }
+  }
+
+  /// 保存当前会话数据到历史记录
+  void _saveSessionToHistory() {
+    if (_sessionData.isEmpty || _sessionStartTimeMs == null) return;
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final maxBpm = _sessionData.reduce((a, b) => a > b ? a : b);
+    final minBpm = _sessionData.reduce((a, b) => a < b ? a : b);
+    final avgBpm = (_sessionData.reduce((a, b) => a + b) / _sessionData.length).round();
+
+    final record = HeartRateRecord(
+      id: _sessionStartTimeMs!,
+      startTimeMs: _sessionStartTimeMs!,
+      endTimeMs: now,
+      maxBpm: maxBpm,
+      minBpm: minBpm,
+      avgBpm: avgBpm,
+      samples: _sessionData.length,
+      connectionMode: _connectionMode == ConnectionMode.ble
+          ? HeartRateConnectionMode.ble
+          : HeartRateConnectionMode.udp,
+    );
+
+    HeartRateHistory.add(record);
+    AppLogger.i('HeartRatePage', '保存心率历史记录: avg=$avgBpm, samples=${_sessionData.length}');
+
+    // 清空会话数据
+    _sessionData.clear();
+    _sessionStartTimeMs = null;
   }
 
   /// 显示扫描列表弹窗
@@ -292,13 +389,36 @@ class _HeartRatePageState extends State<HeartRatePage> {
                       color: isConnected ? Colors.green : Colors.blue,
                     ),
                     title: Text(device.name),
-                    subtitle: Text(
-                      'ID: ${device.id}\n信号强度: ${device.rssi} dBm',
-                      style: const TextStyle(fontSize: 12),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'ID: ${device.id}\n信号强度: ${device.rssi} dBm',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                        // 标记上次连接的设备
+                        if (_ble.connectedDeviceId != device.id &&
+                            _memoryDeviceId != null &&
+                            device.id == _memoryDeviceId)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Text(
+                              '上次连接',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.orange.shade700,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                     trailing: isConnected
                         ? OutlinedButton.icon(
                             onPressed: () async {
+                              // 断开连接时取消心率数据流订阅，避免收到残留数据
+                              await _heartRateSubscription?.cancel();
+                              _heartRateSubscription = null;
                               // 断开连接
                               await _ble.disconnect();
                               if (!mounted) return;
@@ -307,7 +427,11 @@ class _HeartRatePageState extends State<HeartRatePage> {
                                 _isScanning = true;
                                 _status = '已断开，继续扫描...';
                               });
-                              // 断开后重新开始扫描
+                              // 断开后重新订阅心率数据流并开始扫描
+                              _heartRateSubscription = _ble.heartRateStream.stream.listen(
+                                _onHeartRateData,
+                                onError: _onHeartRateError,
+                              );
                               _ble.startScan(
                                 onStatus: (status) {
                                   if (mounted) {
@@ -328,20 +452,33 @@ class _HeartRatePageState extends State<HeartRatePage> {
                             onPressed: () async {
                               // 连接设备
                               Navigator.pop(context);
-                              await _ble.connectToDevice(
-                                device.id,
-                                onStatus: (status) {
-                                  if (mounted) {
-                                    setState(() {
-                                      _status = status;
-                                      if (status == '已连接') {
-                                        _isActive = true;
-                                        _isScanning = false;
-                                      }
-                                    });
-                                  }
-                                },
-                              );
+                              try {
+                                await _ble.connectToDevice(
+                                  device.id,
+                                  onStatus: (status) {
+                                    if (mounted) {
+                                      setState(() {
+                                        _status = status;
+                                        if (status == '已连接') {
+                                          _isActive = true;
+                                          _isScanning = false;
+                                        }
+                                      });
+                                    }
+                                  },
+                                );
+                              } catch (e) {
+                                // 连接失败时重置UI状态，避免卡在"停止扫描"
+                                AppLogger.e('HeartRatePage', '连接设备失败', e);
+                                if (mounted) {
+                                  setState(() {
+                                    _isActive = false;
+                                    _isScanning = false;
+                                    _status = '连接失败: $e';
+                                    _errorMessage = '连接失败: $e';
+                                  });
+                                }
+                              }
                             },
                             icon: const Icon(Icons.link, size: 16),
                             label: const Text('连接'),
@@ -358,6 +495,8 @@ class _HeartRatePageState extends State<HeartRatePage> {
   /// 处理心率数据
   void _onHeartRateData(int bpm) {
     if (!mounted) return;
+    // 收集会话数据用于历史记录
+    _sessionData.add(bpm);
     setState(() {
       _heartRate = bpm;
       _history.add(bpm);
@@ -379,14 +518,13 @@ class _HeartRatePageState extends State<HeartRatePage> {
     });
   }
 
-  /// 切换连接方式
-  void _toggleConnectionMode() {
+  /// 切换连接方式（下拉框回调）
+  void _onConnectionModeChanged(ConnectionMode? mode) {
+    if (mode == null || mode == _connectionMode) return;
     if (_isActive || _isScanning) {
       _stopReceiving().then((_) {
         setState(() {
-          _connectionMode = _connectionMode == ConnectionMode.ble
-              ? ConnectionMode.udp
-              : ConnectionMode.ble;
+          _connectionMode = mode;
           _history.clear();
           _heartRate = 0;
           _scannedDevices.clear();
@@ -394,9 +532,7 @@ class _HeartRatePageState extends State<HeartRatePage> {
       });
     } else {
       setState(() {
-        _connectionMode = _connectionMode == ConnectionMode.ble
-            ? ConnectionMode.udp
-            : ConnectionMode.ble;
+        _connectionMode = mode;
         _history.clear();
         _heartRate = 0;
         _scannedDevices.clear();
@@ -404,43 +540,108 @@ class _HeartRatePageState extends State<HeartRatePage> {
     }
   }
 
-  /// 切换显示模式
-  void _toggleDisplayMode() {
+  /// 切换显示模式（下拉框回调）
+  void _onDisplayModeChanged(DisplayMode? mode) {
+    if (mode == null) return;
     setState(() {
-      switch (_displayMode) {
-        case DisplayMode.number:
-          _displayMode = DisplayMode.chart;
-          break;
-        case DisplayMode.chart:
-          _displayMode = DisplayMode.combined;
-          break;
-        case DisplayMode.combined:
-          _displayMode = DisplayMode.number;
-          break;
-      }
+      _displayMode = mode;
     });
   }
 
-  /// 获取显示模式文字
-  String _getDisplayModeText() {
-    switch (_displayMode) {
-      case DisplayMode.number:
-        return '数字';
-      case DisplayMode.chart:
-        return '图表';
-      case DisplayMode.combined:
-        return '组合';
-    }
+  /// 显示使用说明对话框
+  void _showUsageDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.help_outline),
+            SizedBox(width: 8),
+            Text('使用说明'),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildUsageSection(
+                'BLE蓝牙连接',
+                [
+                  '1. 点击"开始接收"，系统会自动扫描附近的BLE心率设备',
+                  '2. 如果之前连接过设备，会自动尝试连接记忆设备',
+                  '3. 在弹出的设备列表中选择要连接的心率设备',
+                  '4. 连接成功后即可实时接收心率数据',
+                ],
+              ),
+              const Divider(),
+              _buildUsageSection(
+                'WiFi UDP接收',
+                [
+                  '1. 切换到"WiFi UDP"连接方式',
+                  '2. 点击"开始接收"，监听UDP端口8888',
+                  '3. 确保心率设备在同一WiFi网络下发送数据',
+                ],
+              ),
+              const Divider(),
+              _buildUsageSection(
+                '显示模式',
+                [
+                  '• 组合：同时显示数字和折线图（推荐）',
+                  '• 数字：仅显示当前心率数值',
+                  '• 图表：仅显示心率变化折线图',
+                ],
+              ),
+              const Divider(),
+              _buildUsageSection(
+                '设备记忆功能',
+                [
+                  '• 首次连接成功后会自动记住设备',
+                  '• 下次使用时自动扫描并连接记忆设备',
+                  '• 设备未开机时会持续等待，开机后自动连接',
+                  '• 手动选择其他设备会自动更新记忆',
+                ],
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('我知道了'),
+          ),
+        ],
+      ),
+    );
   }
 
-  /// 获取连接方式文字
-  String _getConnectionModeText() {
-    switch (_connectionMode) {
-      case ConnectionMode.ble:
-        return 'BLE';
-      case ConnectionMode.udp:
-        return 'WiFi UDP';
-    }
+  /// 构建使用说明段落
+  Widget _buildUsageSection(String title, List<String> lines) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 4),
+          ...lines.map(
+            (line) => Padding(
+              padding: const EdgeInsets.only(bottom: 2),
+              child: Text(
+                line,
+                style: const TextStyle(fontSize: 13),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -448,34 +649,129 @@ class _HeartRatePageState extends State<HeartRatePage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('心率广播接收器'),
+        actions: [
+          // 历史记录按钮
+          IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: '历史记录',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const HeartRateHistoryPage()),
+              );
+            },
+          ),
+          // 使用说明按钮
+          IconButton(
+            icon: const Icon(Icons.help_outline),
+            tooltip: '使用说明',
+            onPressed: _showUsageDialog,
+          ),
+        ],
       ),
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16.0),
           child: Column(
             children: [
-              // 顶部：连接方式切换 + 显示模式切换
+              // 顶部：连接方式下拉框 + 显示模式下拉框
               Row(
                 children: [
-                  // 连接方式切换按钮
+                  // 连接方式下拉框
                   Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _toggleConnectionMode,
-                      icon: Icon(
-                        _connectionMode == ConnectionMode.ble
-                            ? Icons.bluetooth
-                            : Icons.wifi,
-                      ),
-                      label: Text(_getConnectionModeText()),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '连接方式',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        DropdownButton<ConnectionMode>(
+                          isExpanded: true,
+                          value: _connectionMode,
+                          items: const [
+                            DropdownMenuItem(
+                              value: ConnectionMode.ble,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.bluetooth, size: 18),
+                                  SizedBox(width: 8),
+                                  Text('BLE蓝牙'),
+                                ],
+                              ),
+                            ),
+                            DropdownMenuItem(
+                              value: ConnectionMode.udp,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.wifi, size: 18),
+                                  SizedBox(width: 8),
+                                  Text('WiFi UDP'),
+                                ],
+                              ),
+                            ),
+                          ],
+                          onChanged: _onConnectionModeChanged,
+                        ),
+                      ],
                     ),
                   ),
                   const SizedBox(width: 12),
-                  // 显示模式切换按钮
+                  // 显示模式下拉框
                   Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _toggleDisplayMode,
-                      icon: const Icon(Icons.visibility),
-                      label: Text(_getDisplayModeText()),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '显示模式',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        DropdownButton<DisplayMode>(
+                          isExpanded: true,
+                          value: _displayMode,
+                          items: const [
+                            DropdownMenuItem(
+                              value: DisplayMode.combined,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.dashboard, size: 18),
+                                  SizedBox(width: 8),
+                                  Text('组合'),
+                                ],
+                              ),
+                            ),
+                            DropdownMenuItem(
+                              value: DisplayMode.number,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.numbers, size: 18),
+                                  SizedBox(width: 8),
+                                  Text('数字'),
+                                ],
+                              ),
+                            ),
+                            DropdownMenuItem(
+                              value: DisplayMode.chart,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.show_chart, size: 18),
+                                  SizedBox(width: 8),
+                                  Text('图表'),
+                                ],
+                              ),
+                            ),
+                          ],
+                          onChanged: _onDisplayModeChanged,
+                        ),
+                      ],
                     ),
                   ),
                 ],

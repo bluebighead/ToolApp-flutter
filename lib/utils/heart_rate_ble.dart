@@ -3,6 +3,7 @@
 // 订阅心率测量特征值（0x2A37）并解析BPM值
 import 'dart:async';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'app_logger.dart';
 
 /// 扫描到的设备信息
@@ -74,17 +75,26 @@ class HeartRateBle {
         scanMode: ScanMode.lowLatency,
       ).listen(
         (device) {
-          // 将设备添加到扫描列表（去重）
+          // 将设备添加到扫描列表（去重，更新RSSI）
           final scannedDevice = ScannedDevice(
             id: device.id,
             name: device.name.isNotEmpty ? device.name : '未知设备',
             rssi: device.rssi,
           );
 
-          if (!_scannedDevices.containsKey(device.id)) {
-            _scannedDevices[device.id] = scannedDevice;
+          final isNew = !_scannedDevices.containsKey(device.id);
+          final rssiChanged = !isNew && _scannedDevices[device.id]!.rssi != device.rssi;
+
+          _scannedDevices[device.id] = scannedDevice;
+
+          if (isNew) {
             AppLogger.d('HeartRateBle', '发现新设备: ${scannedDevice.name} (${scannedDevice.id}) RSSI: ${scannedDevice.rssi}');
-            // 通知设备列表更新
+          } else if (rssiChanged) {
+            AppLogger.d('HeartRateBle', '设备RSSI更新: ${scannedDevice.name} RSSI: ${_scannedDevices[device.id]!.rssi} -> ${device.rssi}');
+          }
+
+          // 新设备或RSSI变化时通知列表更新
+          if (isNew || rssiChanged) {
             devicesStream.add(_scannedDevices.values.toList());
           }
         },
@@ -120,21 +130,27 @@ class HeartRateBle {
     // 先停止扫描
     await stopScan();
 
+    // 取消自动连接订阅（如果是手动连接，需要终止自动连接流程）
+    await _autoConnectSubscription?.cancel();
+    _autoConnectSubscription = null;
+    _isAutoConnecting = false;
+
     // 取消之前的连接订阅（如果有）
     await _connectionSubscription?.cancel();
     _connectionSubscription = null;
+    
+    // 重置连接状态
+    _isConnected = false;
 
     AppLogger.i('HeartRateBle', '连接设备: $deviceId');
     onStatus('正在连接...');
 
+    // 使用 Completer 等待连接成功
+    final completer = Completer<void>();
+
     try {
       _connectionSubscription = _ble.connectToDevice(
         id: deviceId,
-        servicesWithCharacteristicsToDiscover: {
-          Uuid.parse('0000180d-0000-1000-8000-00805f9b34fb'): [
-            Uuid.parse('00002a37-0000-1000-8000-00805f9b34fb'),
-          ],
-        },
         connectionTimeout: const Duration(seconds: 15),
       ).listen(
         (connectionState) async {
@@ -144,35 +160,60 @@ class HeartRateBle {
             AppLogger.i('HeartRateBle', '设备已连接: $deviceId');
             _isConnected = true;
             _connectedDeviceId = deviceId;
+            // 保存记忆设备（从扫描列表中获取设备名称）
+            final deviceName = _scannedDevices[deviceId]?.name ?? '未知设备';
+            await _saveLastConnectedDevice(deviceId, deviceName);
             onStatus('已连接');
+            // 完成 completer
+            if (!completer.isCompleted) {
+              completer.complete();
+            }
             // 延迟一下再订阅，确保服务发现完成
             await Future.delayed(const Duration(milliseconds: 500));
             await _subscribeToHeartRate(onStatus: onStatus);
           } else if (connectionState.connectionState == DeviceConnectionState.disconnected) {
             AppLogger.w('HeartRateBle', '设备已断开: $deviceId, 之前已连接: $_isConnected');
-            // 只在之前已连接的情况下才通知断开
-            if (_isConnected) {
+            // 重置自动连接标记，避免意外断开后无法再次自动连接
+            _isAutoConnecting = false;
+            // 如果还没连接成功就断开了，报错
+            if (!_isConnected && !completer.isCompleted) {
+              completer.completeError('设备连接失败：已断开');
+            } else if (_isConnected) {
               _isConnected = false;
               _connectedDeviceId = null;
               onStatus('已断开');
             }
           } else if (connectionState.connectionState == DeviceConnectionState.connecting) {
             AppLogger.d('HeartRateBle', '正在连接中...');
-            onStatus('正在连接...');
           }
         },
         onError: (error) {
           AppLogger.e('HeartRateBle', '连接错误', error);
           _isConnected = false;
           _connectedDeviceId = null;
+          if (!completer.isCompleted) {
+            completer.completeError(error);
+          }
           onStatus('连接失败: $error');
         },
       );
+
+      // 等待连接完成或超时
+      await completer.future.timeout(
+        const Duration(seconds: 20),
+        onTimeout: () => throw TimeoutException('连接超时'),
+      );
+      AppLogger.i('HeartRateBle', '连接流程完成');
     } catch (e) {
       AppLogger.e('HeartRateBle', '连接设备失败', e);
+      // 连接超时或失败后，取消连接订阅，防止后续状态回调导致状态不一致
+      await _connectionSubscription?.cancel();
+      _connectionSubscription = null;
       _isConnected = false;
       _connectedDeviceId = null;
+      _isAutoConnecting = false;
       onStatus('连接失败: $e');
+      rethrow;
     }
   }
 
@@ -252,16 +293,126 @@ class HeartRateBle {
   /// 断开连接
   Future<void> disconnect() async {
     AppLogger.i('HeartRateBle', '断开BLE连接');
+    await _autoConnectSubscription?.cancel();
+    _autoConnectSubscription = null;
     await _characteristicSubscription?.cancel();
     await _connectionSubscription?.cancel();
     _characteristicSubscription = null;
     _connectionSubscription = null;
     _isConnected = false;
     _connectedDeviceId = null;
+    _isAutoConnecting = false;
   }
+
+  /// 保存最后连接的设备信息到本地存储
+  Future<void> _saveLastConnectedDevice(String deviceId, String deviceName) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('last_connected_ble_device_id', deviceId);
+      await prefs.setString('last_connected_ble_device_name', deviceName);
+      AppLogger.i('HeartRateBle', '已保存记忆设备: $deviceName ($deviceId)');
+    } catch (e) {
+      AppLogger.e('HeartRateBle', '保存记忆设备失败', e);
+    }
+  }
+
+  /// 获取最后连接的设备信息
+  Future<Map<String, String>?> _getLastConnectedDevice() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final deviceId = prefs.getString('last_connected_ble_device_id');
+      final deviceName = prefs.getString('last_connected_ble_device_name');
+      if (deviceId != null && deviceName != null) {
+        return {'id': deviceId, 'name': deviceName};
+      }
+      return null;
+    } catch (e) {
+      AppLogger.e('HeartRateBle', '读取记忆设备失败', e);
+      return null;
+    }
+  }
+
+  /// 获取记忆设备信息（public版本，供页面层使用）
+  Future<Map<String, String>?> getLastConnectedDevice() => _getLastConnectedDevice();
+
+  /// 自动连接记忆设备
+  /// 开始扫描，当扫描到记忆设备时自动连接
+  /// 如果设备未开机，持续扫描等待
+  /// [onStatus] 回调用于传递状态信息
+  /// [onDeviceFound] 回调用于通知页面层记忆设备已找到
+  Future<void> autoConnectLastDevice({
+    required Function(String status) onStatus,
+    Function()? onDeviceFound,
+  }) async {
+    final lastDevice = await _getLastConnectedDevice();
+    if (lastDevice == null) {
+      AppLogger.i('HeartRateBle', '无记忆设备，跳过自动连接');
+      return;
+    }
+
+    // 如果已经处于自动连接流程中，避免重复触发
+    if (_isAutoConnecting) {
+      AppLogger.i('HeartRateBle', '自动连接流程已在运行中，跳过');
+      return;
+    }
+
+    AppLogger.i('HeartRateBle', '开始自动连接记忆设备: ${lastDevice['name']} (${lastDevice['id']})');
+    _isAutoConnecting = true;
+    onStatus('正在寻找上次连接的设备...');
+
+    // 开始扫描
+    await startScan(
+      onStatus: (status) {
+        if (!status.contains('正在寻找')) {
+          onStatus(status);
+        }
+      },
+    );
+
+    // 监听设备列表，当记忆设备出现时自动连接
+    final autoConnectSubscription = devicesStream.stream.listen(
+      (devices) {
+        final targetDevice = devices.firstWhere(
+          (d) => d.id == lastDevice['id'],
+          orElse: () => ScannedDevice(id: '', name: '', rssi: 0),
+        );
+
+        if (targetDevice.id.isNotEmpty && !_isConnected && _isAutoConnecting) {
+          AppLogger.i('HeartRateBle', '找到记忆设备: ${targetDevice.name}');
+          onDeviceFound?.call();
+          // 停止扫描并自动连接
+          stopScan().then((_) {
+            connectToDevice(
+              targetDevice.id,
+              onStatus: onStatus,
+            ).then((_) {
+              // 自动连接成功，重置标记
+              _isAutoConnecting = false;
+            }).catchError((e) {
+              AppLogger.w('HeartRateBle', '自动连接失败', e);
+              // 连接失败后重置自动连接标记，不再自动重启扫描
+              _isAutoConnecting = false;
+              onStatus('自动连接失败: $e');
+            });
+          });
+        }
+      },
+    );
+
+    // 保存订阅引用，用于后续取消（防止泄漏）
+    _autoConnectSubscription = autoConnectSubscription;
+  }
+
+  // 自动连接订阅（用于管理生命周期）
+  StreamSubscription<List<ScannedDevice>>? _autoConnectSubscription;
+
+  // 自动连接流程标记（防止重复触发）
+  bool _isAutoConnecting = false;
 
   /// 释放所有资源
   Future<void> dispose() async {
+    await _autoConnectSubscription?.cancel();
+    _autoConnectSubscription = null;
     await disconnect();
     await stopScan();
     await heartRateStream.close();
