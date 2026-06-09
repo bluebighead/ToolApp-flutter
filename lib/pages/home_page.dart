@@ -12,6 +12,7 @@ import 'decibel_page.dart';
 import 'network_speed_page.dart';
 import 'settings_page.dart';
 import 'video_convert_page.dart';
+import 'heart_rate_page.dart';
 
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
@@ -40,6 +41,12 @@ class HomePage extends StatelessWidget {
       //   标 Beta 提示用户该功能尚未完全稳定
       isBeta: true,
       pageBuilder: (_) => const VideoConvertPage(),
+    ),
+    ToolItem(
+      name: '心率广播接收器',
+      icon: Icons.favorite,
+      color: Colors.red,
+      pageBuilder: (_) => const HeartRatePage(),
     ),
   ];
 
