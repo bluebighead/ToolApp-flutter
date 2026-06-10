@@ -115,6 +115,32 @@ class _PeriodRecordTabState extends State<PeriodRecordTab> {
                         fontSize: 14, fontWeight: FontWeight.w500),
                   ),
                   const SizedBox(width: 8),
+                  // 模式标签
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: record.mode == 'precise'
+                          ? Colors.green.shade50
+                          : Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(
+                        color: record.mode == 'precise'
+                            ? Colors.green.shade300
+                            : Colors.orange.shade300,
+                      ),
+                    ),
+                    child: Text(
+                      record.mode == 'precise' ? '精确' : '模糊',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: record.mode == 'precise'
+                            ? Colors.green.shade700
+                            : Colors.orange.shade700,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
                   if (record.endDate == null)
                     Container(
                       padding: const EdgeInsets.symmetric(
