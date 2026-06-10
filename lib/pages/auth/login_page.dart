@@ -48,7 +48,7 @@ class _LoginPageState extends State<LoginPage> {
     _loadAccountHistory();
   }
 
-  // 加载保存的账号密码
+  // 加载保存的账号密码，并迁移旧数据到历史记录
   Future<void> _loadSavedCredentials() async {
     final rememberMe = await AuthService.instance.isRememberMe();
     if (rememberMe) {
@@ -60,6 +60,10 @@ class _LoginPageState extends State<LoginPage> {
           if (email != null) _emailController.text = email;
           if (password != null) _passwordController.text = password;
         });
+      }
+      // 将旧的记住账号数据迁移到历史记录中
+      if (email != null && email.isNotEmpty) {
+        await AuthService.instance.saveCredentials(email, password ?? '');
       }
     }
   }
@@ -305,9 +309,8 @@ class _LoginPageState extends State<LoginPage> {
                         labelText: '邮箱',
                         hintText: '请输入邮箱地址',
                         prefixIcon: const Icon(Icons.email_outlined),
-                        // 右侧下拉箭头按钮
-                        suffixIcon: _accountHistory.isNotEmpty
-                            ? IconButton(
+                        // 右侧下拉箭头按钮（始终显示）
+                        suffixIcon: IconButton(
                                 icon: Icon(
                                   _isDropdownOpen
                                       ? Icons.arrow_drop_up
@@ -321,8 +324,7 @@ class _LoginPageState extends State<LoginPage> {
                                   });
                                 },
                                 tooltip: '选择历史账号',
-                              )
-                            : null,
+                              ),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
                         ),
@@ -341,7 +343,7 @@ class _LoginPageState extends State<LoginPage> {
                       },
                     ),
                     // 账号下拉选择列表
-                    if (_isDropdownOpen && _accountHistory.isNotEmpty)
+                    if (_isDropdownOpen)
                       Container(
                         margin: const EdgeInsets.only(top: 4),
                         decoration: BoxDecoration(
@@ -358,91 +360,104 @@ class _LoginPageState extends State<LoginPage> {
                         ),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(12),
-                          child: ConstrainedBox(
-                            constraints: BoxConstraints(
-                              maxHeight: _accountHistory.length > 5
-                                  ? 250
-                                  : _accountHistory.length * 50.0,
-                            ),
-                            child: ListView.builder(
-                              shrinkWrap: true,
-                              padding: EdgeInsets.zero,
-                              itemCount: _accountHistory.length,
-                              itemBuilder: (context, index) {
-                                final account = _accountHistory[index];
-                                final email = account['email'] ?? '';
-                                final hasPassword =
-                                    (account['password'] ?? '').isNotEmpty;
-                                return InkWell(
-                                  onTap: () => _onSelectAccount(account),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 12,
+                          child: _accountHistory.isEmpty
+                              ? Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 20,
+                                  ),
+                                  child: Center(
+                                    child: Text(
+                                      '暂无历史账号，登录后将自动记住',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: Colors.grey.shade500,
+                                      ),
                                     ),
-                                    child: Row(
-                                      children: [
-                                        // 用户头像图标
-                                        CircleAvatar(
-                                          radius: 14,
-                                          backgroundColor:
-                                              theme.colorScheme.primaryContainer,
-                                          child: Text(
-                                            email.isNotEmpty
-                                                ? email[0].toUpperCase()
-                                                : '?',
-                                            style: TextStyle(
-                                              fontSize: 13,
-                                              color: theme
-                                                  .colorScheme.onPrimaryContainer,
-                                            ),
+                                  ),
+                                )
+                              : ConstrainedBox(
+                                  constraints: BoxConstraints(
+                                    maxHeight: _accountHistory.length > 5
+                                        ? 250
+                                        : _accountHistory.length * 50.0,
+                                  ),
+                                  child: ListView.builder(
+                                    shrinkWrap: true,
+                                    padding: EdgeInsets.zero,
+                                    itemCount: _accountHistory.length,
+                                    itemBuilder: (context, index) {
+                                      final account = _accountHistory[index];
+                                      final email = account['email'] ?? '';
+                                      final hasPassword =
+                                          (account['password'] ?? '').isNotEmpty;
+                                      return InkWell(
+                                        onTap: () => _onSelectAccount(account),
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 16,
+                                            vertical: 12,
                                           ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        // 邮箱地址
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
+                                          child: Row(
                                             children: [
-                                              Text(
-                                                email,
-                                                style: const TextStyle(
-                                                  fontSize: 14,
-                                                  fontWeight: FontWeight.w500,
-                                                ),
-                                              ),
-                                              if (hasPassword)
-                                                Text(
-                                                  '已记住密码',
+                                              CircleAvatar(
+                                                radius: 14,
+                                                backgroundColor:
+                                                    theme.colorScheme.primaryContainer,
+                                                child: Text(
+                                                  email.isNotEmpty
+                                                      ? email[0].toUpperCase()
+                                                      : '?',
                                                   style: TextStyle(
-                                                    fontSize: 11,
-                                                    color:
-                                                        Colors.green.shade600,
+                                                    fontSize: 13,
+                                                    color: theme
+                                                        .colorScheme.onPrimaryContainer,
                                                   ),
                                                 ),
+                                              ),
+                                              const SizedBox(width: 12),
+                                              Expanded(
+                                                child: Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(
+                                                      email,
+                                                      style: const TextStyle(
+                                                        fontSize: 14,
+                                                        fontWeight: FontWeight.w500,
+                                                      ),
+                                                    ),
+                                                    if (hasPassword)
+                                                      Text(
+                                                        '已记住密码',
+                                                        style: TextStyle(
+                                                          fontSize: 11,
+                                                          color:
+                                                              Colors.green.shade600,
+                                                        ),
+                                                      ),
+                                                  ],
+                                                ),
+                                              ),
+                                              IconButton(
+                                                icon: Icon(
+                                                  Icons.close,
+                                                  size: 16,
+                                                  color: Colors.grey.shade400,
+                                                ),
+                                                onPressed: () =>
+                                                    _onDeleteAccount(email),
+                                                tooltip: '删除此账号',
+                                                visualDensity: VisualDensity.compact,
+                                              ),
                                             ],
                                           ),
                                         ),
-                                        // 删除按钮
-                                        IconButton(
-                                          icon: Icon(
-                                            Icons.close,
-                                            size: 16,
-                                            color: Colors.grey.shade400,
-                                          ),
-                                          onPressed: () =>
-                                              _onDeleteAccount(email),
-                                          tooltip: '删除此账号',
-                                          visualDensity: VisualDensity.compact,
-                                        ),
-                                      ],
-                                    ),
+                                      );
+                                    },
                                   ),
-                                );
-                              },
-                            ),
-                          ),
+                                ),
                         ),
                       ),
                   ],
