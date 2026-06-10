@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.7.9+96
+version: 1.22.0+138
 
 environment:
   sdk: ^3.11.1
@@ -30,6 +30,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # 中文locale支持（经期宝日历组件需要）
+  flutter_localizations:
+    sdk: flutter
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -39,6 +42,8 @@ dependencies:
   noise_meter: ^5.1.0
   # 折线图绘制
   fl_chart: ^0.68.0
+  # 日历组件：经期宝日历视图
+  table_calendar: ^3.1.2
   # 统一处理麦克风权限申请
   permission_handler: ^12.0.0
   # BLE 蓝牙低功耗：心率广播接收器连接标准心率设备
@@ -76,6 +81,8 @@ dependencies:
   flutter_local_notifications: ^17.2.4
   # 通知初始化需要的时区数据（flutter_local_notifications 18+ 强制要求）
   timezone: ^0.9.4
+  # 经期宝数据导出：DOCX 格式生成
+  docs_gee: ^1.3.2
 
 dev_dependencies:
   flutter_test:
@@ -129,3 +136,4 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
