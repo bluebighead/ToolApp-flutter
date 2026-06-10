@@ -27,6 +27,7 @@ class AuthService extends ChangeNotifier {
   static const String _kRememberMe = 'auth_remember_me';
   static const String _kSavedEmail = 'auth_saved_email';
   static const String _kSavedPassword = 'auth_saved_password';
+  static const String _kAccountHistory = 'auth_account_history'; // 多账号历史记录
 
   // 当前登录用户信息（内存缓存）
   String? _token;
@@ -270,7 +271,100 @@ class AuthService extends ChangeNotifier {
     await prefs.setBool(_kRememberMe, true);
     await prefs.setString(_kSavedEmail, email);
     await prefs.setString(_kSavedPassword, base64Encode(utf8.encode(password)));
+    // 同时保存到账号历史记录
+    await _addToAccountHistory(email, password);
     AppLogger.i('AuthService', '已保存登录凭证');
+  }
+
+  // ==================== 多账号历史记录 ====================
+
+  /// 获取所有历史登录账号列表
+  /// 返回 List<Map>，每个元素包含 email 和 password（已解码，如果记住了密码）
+  Future<List<Map<String, String>>> getAccountHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final json = prefs.getString(_kAccountHistory);
+    if (json == null) return [];
+    try {
+      final List<dynamic> list = jsonDecode(json);
+      return list.map((item) {
+        final map = item as Map<String, dynamic>;
+        String? password;
+        final encoded = map['password'] as String?;
+        if (encoded != null && encoded.isNotEmpty) {
+          try {
+            password = utf8.decode(base64Decode(encoded));
+          } catch (_) {
+            password = null;
+          }
+        }
+        return {
+          'email': map['email'] as String? ?? '',
+          'password': password ?? '',
+        };
+      }).toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// 添加账号到历史记录（登录成功时调用）
+  Future<void> _addToAccountHistory(String email, String password) async {
+    final history = await getAccountHistory();
+    // 移除已存在的同名账号
+    history.removeWhere((item) => item['email'] == email);
+    // 插入到最前面
+    history.insert(0, {
+      'email': email,
+      'password': base64Encode(utf8.encode(password)),
+    });
+    // 最多保留 10 个账号
+    if (history.length > 10) {
+      history.removeRange(10, history.length);
+    }
+    final prefs = await SharedPreferences.getInstance();
+    // 保存时密码保持 base64 编码
+    final jsonList = history.map((item) => {
+      'email': item['email'],
+      'password': item['password'],
+    }).toList();
+    await prefs.setString(_kAccountHistory, jsonEncode(jsonList));
+    AppLogger.i('AuthService', '已更新账号历史记录，共 ${history.length} 个账号');
+  }
+
+  /// 仅记住账号（不记住密码）时添加到历史
+  Future<void> addEmailToHistory(String email) async {
+    final history = await getAccountHistory();
+    // 检查是否已存在
+    final existingIndex = history.indexWhere((item) => item['email'] == email);
+    if (existingIndex >= 0) {
+      // 已存在，移到最前面
+      final item = history.removeAt(existingIndex);
+      history.insert(0, item);
+    } else {
+      // 不存在，添加到最前面（无密码）
+      history.insert(0, {'email': email, 'password': ''});
+      if (history.length > 10) {
+        history.removeRange(10, history.length);
+      }
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final jsonList = history.map((item) => {
+      'email': item['email'],
+      'password': item['password'],
+    }).toList();
+    await prefs.setString(_kAccountHistory, jsonEncode(jsonList));
+  }
+
+  /// 从历史记录中删除指定账号
+  Future<void> removeAccountFromHistory(String email) async {
+    final history = await getAccountHistory();
+    history.removeWhere((item) => item['email'] == email);
+    final prefs = await SharedPreferences.getInstance();
+    final jsonList = history.map((item) => {
+      'email': item['email'],
+      'password': item['password'],
+    }).toList();
+    await prefs.setString(_kAccountHistory, jsonEncode(jsonList));
   }
 
   /// 清除保存的账号密码（取消记住密码时调用）

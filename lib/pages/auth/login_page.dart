@@ -1,5 +1,6 @@
 // 登录页面
 // 邮箱+密码登录，底部提供"注册新账号"和"游客模式"入口
+// 支持账号历史记录下拉选择，记住账号密码功能
 // 登录成功后 AuthWrapper 自动切换到首页
 import 'package:flutter/material.dart';
 
@@ -19,6 +20,8 @@ class _LoginPageState extends State<LoginPage> {
   // 邮箱和密码输入控制器
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  // 邮箱输入框的焦点节点
+  final _emailFocusNode = FocusNode();
 
   // 是否正在登录中（防止重复点击）
   bool _isLoading = false;
@@ -33,10 +36,16 @@ class _LoginPageState extends State<LoginPage> {
   bool _isScanning = false;
   String _scanStatus = '';
 
+  // 账号历史记录
+  List<Map<String, String>> _accountHistory = [];
+  // 下拉框是否展开
+  bool _isDropdownOpen = false;
+
   @override
   void initState() {
     super.initState();
     _loadSavedCredentials();
+    _loadAccountHistory();
   }
 
   // 加载保存的账号密码
@@ -55,10 +64,21 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
+  // 加载账号历史记录
+  Future<void> _loadAccountHistory() async {
+    final history = await AuthService.instance.getAccountHistory();
+    if (mounted) {
+      setState(() {
+        _accountHistory = history;
+      });
+    }
+  }
+
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _emailFocusNode.dispose();
     super.dispose();
   }
 
@@ -91,10 +111,36 @@ class _LoginPageState extends State<LoginPage> {
       if (_rememberMe) {
         await AuthService.instance.saveCredentials(email, password);
       } else {
+        // 即使不记住密码，也记住账号到历史记录
+        await AuthService.instance.addEmailToHistory(email);
         await AuthService.instance.clearCredentials();
       }
     }
     // 登录成功时 AuthWrapper 会自动切换页面，无需手动跳转
+  }
+
+  // 选择历史账号
+  void _onSelectAccount(Map<String, String> account) {
+    setState(() {
+      _emailController.text = account['email'] ?? '';
+      // 如果该账号有保存密码，自动填充
+      final savedPassword = account['password'] ?? '';
+      if (savedPassword.isNotEmpty) {
+        _passwordController.text = savedPassword;
+        _rememberMe = true;
+      } else {
+        _passwordController.text = '';
+        _rememberMe = false;
+      }
+      _isDropdownOpen = false;
+    });
+  }
+
+  // 删除历史账号
+  Future<void> _onDeleteAccount(String email) async {
+    await AuthService.instance.removeAccountFromHistory(email);
+    await _loadAccountHistory();
+    _showSnackBar('已删除账号 $email');
   }
 
   // 跳转注册页面
@@ -109,7 +155,6 @@ class _LoginPageState extends State<LoginPage> {
   Future<void> _onGuestMode() async {
     await AuthService.instance.enterGuestMode();
     if (!mounted) return;
-    // AuthWrapper 会自动检测状态切换页面
   }
 
   void _showSnackBar(String message) {
@@ -186,7 +231,6 @@ class _LoginPageState extends State<LoginPage> {
     if (!mounted) return;
 
     if (found != null) {
-      // 自动更新服务器地址
       await appSettings.setServerUrl(found);
       setState(() {
         _isScanning = false;
@@ -249,19 +293,159 @@ class _LoginPageState extends State<LoginPage> {
                 ),
                 const SizedBox(height: 40),
 
-                // 邮箱输入框
-                TextField(
-                  controller: _emailController,
-                  keyboardType: TextInputType.emailAddress,
-                  autofillHints: const [AutofillHints.email],
-                  decoration: InputDecoration(
-                    labelText: '邮箱',
-                    hintText: '请输入邮箱地址',
-                    prefixIcon: const Icon(Icons.email_outlined),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
+                // 邮箱输入框 + 下拉选择箭头
+                Column(
+                  children: [
+                    TextField(
+                      controller: _emailController,
+                      focusNode: _emailFocusNode,
+                      keyboardType: TextInputType.emailAddress,
+                      autofillHints: const [AutofillHints.email],
+                      decoration: InputDecoration(
+                        labelText: '邮箱',
+                        hintText: '请输入邮箱地址',
+                        prefixIcon: const Icon(Icons.email_outlined),
+                        // 右侧下拉箭头按钮
+                        suffixIcon: _accountHistory.isNotEmpty
+                            ? IconButton(
+                                icon: Icon(
+                                  _isDropdownOpen
+                                      ? Icons.arrow_drop_up
+                                      : Icons.arrow_drop_down,
+                                  size: 28,
+                                  color: theme.colorScheme.primary,
+                                ),
+                                onPressed: () {
+                                  setState(() {
+                                    _isDropdownOpen = !_isDropdownOpen;
+                                  });
+                                },
+                                tooltip: '选择历史账号',
+                              )
+                            : null,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onChanged: (_) {
+                        // 输入时关闭下拉
+                        if (_isDropdownOpen) {
+                          setState(() => _isDropdownOpen = false);
+                        }
+                      },
+                      onSubmitted: (_) {
+                        // 按回车时关闭下拉，焦点移到密码框
+                        if (_isDropdownOpen) {
+                          setState(() => _isDropdownOpen = false);
+                        }
+                      },
                     ),
-                  ),
+                    // 账号下拉选择列表
+                    if (_isDropdownOpen && _accountHistory.isNotEmpty)
+                      Container(
+                        margin: const EdgeInsets.only(top: 4),
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.surface,
+                          border: Border.all(color: Colors.grey.shade300),
+                          borderRadius: BorderRadius.circular(12),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.1),
+                              blurRadius: 8,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxHeight: _accountHistory.length > 5
+                                  ? 250
+                                  : _accountHistory.length * 50.0,
+                            ),
+                            child: ListView.builder(
+                              shrinkWrap: true,
+                              padding: EdgeInsets.zero,
+                              itemCount: _accountHistory.length,
+                              itemBuilder: (context, index) {
+                                final account = _accountHistory[index];
+                                final email = account['email'] ?? '';
+                                final hasPassword =
+                                    (account['password'] ?? '').isNotEmpty;
+                                return InkWell(
+                                  onTap: () => _onSelectAccount(account),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 12,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        // 用户头像图标
+                                        CircleAvatar(
+                                          radius: 14,
+                                          backgroundColor:
+                                              theme.colorScheme.primaryContainer,
+                                          child: Text(
+                                            email.isNotEmpty
+                                                ? email[0].toUpperCase()
+                                                : '?',
+                                            style: TextStyle(
+                                              fontSize: 13,
+                                              color: theme
+                                                  .colorScheme.onPrimaryContainer,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        // 邮箱地址
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                email,
+                                                style: const TextStyle(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.w500,
+                                                ),
+                                              ),
+                                              if (hasPassword)
+                                                Text(
+                                                  '已记住密码',
+                                                  style: TextStyle(
+                                                    fontSize: 11,
+                                                    color:
+                                                        Colors.green.shade600,
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        ),
+                                        // 删除按钮
+                                        IconButton(
+                                          icon: Icon(
+                                            Icons.close,
+                                            size: 16,
+                                            color: Colors.grey.shade400,
+                                          ),
+                                          onPressed: () =>
+                                              _onDeleteAccount(email),
+                                          tooltip: '删除此账号',
+                                          visualDensity: VisualDensity.compact,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
                 const SizedBox(height: 16),
 
