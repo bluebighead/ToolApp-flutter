@@ -8,10 +8,75 @@ console.error = (...args) => {
   process.stderr.write(args.join(' ') + '\n');
 };
 
+// 远程 API 请求通用方法
+function remoteGet(apiPath) {
+  return new Promise((resolve, reject) => {
+    if (!remoteUrl) return reject(new Error('未连接远程服务器'));
+    const http = require('http');
+    const apiUrl = new URL(apiPath, remoteUrl);
+    const req = http.request(apiUrl, {
+      method: 'GET',
+      headers: { 'x-admin-password': remotePassword },
+      timeout: 10000,
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch(e) {
+          reject(new Error('服务器响应格式错误'));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('连接超时')); });
+    req.end();
+  });
+}
+
+// 远程 API POST 请求通用方法
+function remotePost(apiPath, body) {
+  return new Promise((resolve, reject) => {
+    if (!remoteUrl) return reject(new Error('未连接远程服务器'));
+    const http = require('http');
+    const apiUrl = new URL(apiPath, remoteUrl);
+    const postData = JSON.stringify(body || {});
+    const req = http.request(apiUrl, {
+      method: 'POST',
+      headers: {
+        'x-admin-password': remotePassword,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+      },
+      timeout: 10000,
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch(e) {
+          reject(new Error('服务器响应格式错误'));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('连接超时')); });
+    req.write(postData);
+    req.end();
+  });
+}
+
 // ============ 数据库状态 ============
 let db = null;
 let dbPath = null;
 let Database = null;
+
+// 远程连接状态
+let remoteMode = false;
+let remoteUrl = '';
+let remotePassword = '';
 
 try {
   Database = require('better-sqlite3');
@@ -111,11 +176,14 @@ async function handleMessage(msg) {
       case 'connectLocal':
         result = await connectLocal(params?.dbPath);
         break;
+      case 'connectRemote':
+        result = await connectRemote(params?.serverUrl, params?.password);
+        break;
       case 'testConnection':
         result = testConnection();
         break;
       case 'getMode':
-        result = db ? 'local' : 'none';
+        result = remoteMode ? 'remote' : (db ? 'local' : 'none');
         break;
       case 'getLocalDbPath':
         result = dbPath;
@@ -144,13 +212,34 @@ async function handleMessage(msg) {
       case 'backupDatabase':
         result = await backupDatabase(params?.outputPath);
         break;
+      case 'changePassword':
+        result = await changePassword(params?.newPassword);
+        break;
       case 'disconnect':
         if (db) {
           try { db.close(); } catch(e) {}
           db = null;
           dbPath = null;
         }
+        remoteMode = false;
+        remoteUrl = '';
+        remotePassword = '';
         result = { success: true };
+        break;
+      case 'getOnlineStatus':
+        result = getOnlineStatus();
+        break;
+      case 'getUserSessions':
+        result = getUserSessions(params?.userId, params || {});
+        break;
+      case 'getUserActivity':
+        result = getUserActivity(params?.userId, params || {});
+        break;
+      case 'getSystemInfo':
+        result = getSystemInfo();
+        break;
+      case 'getLocalDatabaseInfo':
+        result = getLocalDatabaseInfo();
         break;
       default:
         sendError(id, 'UNKNOWN_METHOD', '未知方法: ' + method);
@@ -259,6 +348,60 @@ async function connectLocal(newDbPath) {
   }
 }
 
+// 连接远程服务器
+async function connectRemote(url, password) {
+  try {
+    // 关闭本地数据库连接
+    if (db) {
+      try { db.close(); } catch(e) {}
+      db = null;
+      dbPath = null;
+    }
+
+    // 测试远程连接
+    const http = require('http');
+    const testUrl = new URL('/api/admin/system-info', url);
+
+    const info = await new Promise((resolve, reject) => {
+      const req = http.request(testUrl, {
+        method: 'GET',
+        headers: { 'x-admin-password': password || '' },
+        timeout: 10000,
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const json = JSON.parse(data);
+            if (json.error) {
+              reject(new Error(json.error));
+            } else {
+              resolve(json);
+            }
+          } catch(e) {
+            reject(new Error('服务器响应格式错误'));
+          }
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('连接超时')); });
+      req.end();
+    });
+
+    // 连接成功，保存远程状态
+    remoteMode = true;
+    remoteUrl = url;
+    remotePassword = password || '';
+
+    return { success: true, info };
+  } catch (err) {
+    remoteMode = false;
+    remoteUrl = '';
+    remotePassword = '';
+    return { success: false, error: err.message };
+  }
+}
+
 function testConnection() {
   if (!db) return { success: false, error: '未连接' };
   try {
@@ -269,7 +412,16 @@ function testConnection() {
   }
 }
 
-function getStats() {
+async function getStats() {
+  // 远程模式：从服务器 API 获取
+  if (remoteMode && remoteUrl) {
+    try {
+      return await remoteGet('/api/admin/stats');
+    } catch (err) {
+      return { users: 0, error: err.message };
+    }
+  }
+
   if (!db) return { users: 0, error: '未连接' };
   const stats = {};
   const tableMap = {
@@ -289,7 +441,20 @@ function getStats() {
   return stats;
 }
 
-function getUsers(params) {
+async function getUsers(params) {
+  // 远程模式：从服务器 API 获取
+  if (remoteMode && remoteUrl) {
+    try {
+      const query = new URLSearchParams();
+      if (params?.page) query.set('page', params.page);
+      if (params?.pageSize) query.set('pageSize', params.pageSize);
+      if (params?.search) query.set('search', params.search);
+      return await remoteGet('/api/admin/users?' + query.toString());
+    } catch (err) {
+      return { rows: [], total: 0, error: err.message };
+    }
+  }
+
   if (!db) return { rows: [], total: 0, error: '未连接' };
   const { page = 1, pageSize = 20, search = '' } = params;
   const offset = (page - 1) * pageSize;
@@ -299,10 +464,10 @@ function getUsers(params) {
     let rows;
     if (search) {
       total = db.prepare('SELECT COUNT(*) as count FROM users WHERE email LIKE ?').get('%' + search + '%').count;
-      rows = db.prepare('SELECT id, email, created_at FROM users WHERE email LIKE ? ORDER BY id LIMIT ? OFFSET ?').all('%' + search + '%', pageSize, offset);
+      rows = db.prepare('SELECT id, email, password_hash, created_at FROM users WHERE email LIKE ? ORDER BY id LIMIT ? OFFSET ?').all('%' + search + '%', pageSize, offset);
     } else {
       total = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-      rows = db.prepare('SELECT id, email, created_at FROM users ORDER BY id LIMIT ? OFFSET ?').all(pageSize, offset);
+      rows = db.prepare('SELECT id, email, password_hash, created_at FROM users ORDER BY id LIMIT ? OFFSET ?').all(pageSize, offset);
     }
     
     const usersWithData = rows.map(user => {
@@ -442,6 +607,340 @@ async function backupDatabase(outputPath) {
   } catch (err) {
     return { success: false, error: err.message };
   }
+}
+
+// ============ 在线状态 & 会话监控 ============
+function tableExists(tableName) {
+  if (!db) return false;
+  try {
+    const row = db.prepare("SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name=?").get(tableName);
+    return row.count > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function getOnlineStatus() {
+  // 远程模式：从服务器 API 获取
+  if (remoteMode && remoteUrl) {
+    try {
+      return await remoteGet('/api/admin/users/online-status');
+    } catch (err) {
+      return { users: [], onlineCount: 0, totalCount: 0, timestamp: Date.now(), error: err.message };
+    }
+  }
+
+  if (!db) return { users: [], onlineCount: 0, totalCount: 0, timestamp: Date.now() };
+
+  try {
+    // 获取所有用户
+    const users = db.prepare('SELECT id, email, created_at FROM users ORDER BY id').all();
+
+    const hasSessionsTable = tableExists('user_sessions');
+    const hasActivityTable = tableExists('user_activity_logs');
+    const now = Date.now();
+
+    const result = users.map(user => {
+      let isOnline = false;
+      let lastSeen = null;
+      let currentSessionStart = null;
+      let todayUsageSeconds = 0;
+      let totalUsageSeconds = 0;
+      let sessionCount = 0;
+      let deviceInfo = null;
+      let ipAddress = null;
+
+      if (hasSessionsTable) {
+        try {
+          // 获取用户最新的会话
+          const latestSession = db.prepare(`
+            SELECT * FROM user_sessions
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+          `).get(user.id);
+
+          if (latestSession) {
+            const heartbeatTime = latestSession.last_heartbeat
+              ? new Date(latestSession.last_heartbeat).getTime()
+              : 0;
+            // 判断在线：is_online=1 且心跳时间在5分钟内
+            // 只有同时满足这两个条件才视为在线，避免用户退出后仍显示在线
+            const ONLINE_THRESHOLD = 5 * 60 * 1000;
+            isOnline = latestSession.is_online === 1
+              && latestSession.last_heartbeat
+              && (now - heartbeatTime) < ONLINE_THRESHOLD;
+            lastSeen = latestSession.last_heartbeat || latestSession.session_start;
+            currentSessionStart = latestSession.session_start;
+            deviceInfo = latestSession.device_info;
+            ipAddress = latestSession.ip_address;
+          }
+
+          // 统计今日使用时长
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          const todayStr = today.toISOString().slice(0, 10);
+
+          const todayStats = db.prepare(`
+            SELECT COALESCE(SUM(
+              CASE
+                WHEN session_end IS NOT NULL THEN duration_seconds
+                ELSE CAST((julianday('now') - julianday(session_start)) * 86400 AS INTEGER)
+              END
+            ), 0) as total_seconds
+            FROM user_sessions
+            WHERE user_id = ? AND date(session_start) >= ?
+          `).get(user.id, todayStr);
+          todayUsageSeconds = todayStats.total_seconds || 0;
+
+          // 统计总使用时长
+          const totalStats = db.prepare(`
+            SELECT COALESCE(SUM(
+              CASE
+                WHEN session_end IS NOT NULL THEN duration_seconds
+                ELSE CAST((julianday('now') - julianday(session_start)) * 86400 AS INTEGER)
+              END
+            ), 0) as total_seconds
+            FROM user_sessions
+            WHERE user_id = ?
+          `).get(user.id);
+          totalUsageSeconds = totalStats.total_seconds || 0;
+
+          // 统计会话次数
+          const countRow = db.prepare('SELECT COUNT(*) as count FROM user_sessions WHERE user_id = ?').get(user.id);
+          sessionCount = countRow.count;
+        } catch (e) {
+          // 表可能不存在或字段不匹配
+        }
+      }
+
+      return {
+        ...user,
+        isOnline,
+        lastSeen,
+        currentSessionStart,
+        todayUsageSeconds,
+        totalUsageSeconds,
+        sessionCount,
+        deviceInfo,
+        ipAddress,
+      };
+    });
+
+    // 按在线状态排序（在线用户在前）
+    result.sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
+
+    const onlineCount = result.filter(u => u.isOnline).length;
+
+    return {
+      users: result,
+      onlineCount,
+      totalCount: result.length,
+      timestamp: new Date().toISOString(),
+    };
+  } catch (err) {
+    return { users: [], onlineCount: 0, totalCount: 0, error: err.message };
+  }
+}
+
+function getUserSessions(userId, params) {
+  if (!db) return { rows: [], total: 0, error: '未连接' };
+  if (!tableExists('user_sessions')) return { rows: [], total: 0, error: '会话表不存在' };
+
+  const { page = 1, pageSize = 20 } = params;
+  const offset = (page - 1) * pageSize;
+
+  try {
+    const total = db.prepare('SELECT COUNT(*) as count FROM user_sessions WHERE user_id = ?').get(userId).count;
+    const sessions = db.prepare(`
+      SELECT * FROM user_sessions
+      WHERE user_id = ?
+      ORDER BY id DESC
+      LIMIT ? OFFSET ?
+    `).all(userId, pageSize, offset);
+
+    return { rows: sessions, total, page, pageSize };
+  } catch (err) {
+    return { rows: [], total: 0, error: err.message };
+  }
+}
+
+function getUserActivity(userId, params) {
+  if (!db) return { rows: [], total: 0, error: '未连接' };
+  if (!tableExists('user_activity_logs')) return { rows: [], total: 0, error: '活动日志表不存在' };
+
+  const { page = 1, pageSize = 50 } = params;
+  const offset = (page - 1) * pageSize;
+
+  try {
+    const total = db.prepare('SELECT COUNT(*) as count FROM user_activity_logs WHERE user_id = ?').get(userId).count;
+    const logs = db.prepare(`
+      SELECT * FROM user_activity_logs
+      WHERE user_id = ?
+      ORDER BY id DESC
+      LIMIT ? OFFSET ?
+    `).all(userId, pageSize, offset);
+
+    return { rows: logs, total, page, pageSize };
+  } catch (err) {
+    return { rows: [], total: 0, error: err.message };
+  }
+}
+
+// ============ 系统信息 ============
+async function getSystemInfo() {
+  // 远程模式：从服务器 API 获取
+  if (remoteMode && remoteUrl) {
+    try {
+      const http = require('http');
+      const apiUrl = new URL('/api/admin/system-info', remoteUrl);
+
+      return await new Promise((resolve, reject) => {
+        const req = http.request(apiUrl, {
+          method: 'GET',
+          headers: { 'x-admin-password': remotePassword },
+          timeout: 10000,
+        }, (res) => {
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(data);
+              if (json.error) {
+                resolve({ error: json.error });
+              } else {
+                resolve(json);
+              }
+            } catch(e) {
+              resolve({ error: '服务器响应格式错误' });
+            }
+          });
+        });
+        req.on('error', (e) => resolve({ error: e.message }));
+        req.on('timeout', () => { req.destroy(); resolve({ error: '连接超时' }); });
+        req.end();
+      });
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+
+  // 本地模式：直接读取数据库
+  if (!db) return { error: '未连接' };
+
+  try {
+    const os = require('os');
+    const tableInfo = {};
+    const tables = [
+      { name: 'users', key: 'users' },
+      { name: 'heart_rate_sessions', key: 'heart_rate_sessions' },
+      { name: 'network_speed_records', key: 'network_speed_records' },
+      { name: 'convert_history', key: 'convert_history' },
+      { name: 'dice_records', key: 'dice_records' },
+      { name: 'period_records', key: 'period_records' },
+      { name: 'user_sessions', key: 'user_sessions' },
+      { name: 'user_activity_logs', key: 'user_activity_logs' },
+    ];
+
+    for (const { name, key } of tables) {
+      if (tableExists(name)) {
+        const row = db.prepare('SELECT COUNT(*) as count FROM ' + name).get();
+        tableInfo[key] = row.count;
+      } else {
+        tableInfo[key] = 0;
+      }
+    }
+
+    return {
+      server: {
+        platform: os.platform(),
+        hostname: os.hostname(),
+        uptime: process.uptime(),
+        memory: {
+          total: os.totalmem(),
+          free: os.freemem(),
+        },
+        nodeVersion: process.version,
+      },
+      database: {
+        path: dbPath,
+        size: (() => {
+          let s = 0;
+          if (dbPath && fs.existsSync(dbPath)) {
+            s += fs.statSync(dbPath).size;
+            if (fs.existsSync(dbPath + '-wal')) s += fs.statSync(dbPath + '-wal').size;
+            if (fs.existsSync(dbPath + '-shm')) s += fs.statSync(dbPath + '-shm').size;
+          }
+          return s;
+        })(),
+        tables: tableInfo,
+      },
+    };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+function getLocalDatabaseInfo() {
+  if (!db) return { error: '未连接' };
+
+  try {
+    const tableInfo = {};
+    const tables = [
+      { name: 'users', key: 'users' },
+      { name: 'heart_rate_sessions', key: 'heart_rate_sessions' },
+      { name: 'network_speed_records', key: 'network_speed_records' },
+      { name: 'convert_history', key: 'convert_history' },
+      { name: 'dice_records', key: 'dice_records' },
+      { name: 'period_records', key: 'period_records' },
+      { name: 'user_sessions', key: 'user_sessions' },
+      { name: 'user_activity_logs', key: 'user_activity_logs' },
+    ];
+
+    for (const { name, key } of tables) {
+      if (tableExists(name)) {
+        const row = db.prepare('SELECT COUNT(*) as count FROM ' + name).get();
+        tableInfo[key] = row.count;
+      } else {
+        tableInfo[key] = 0;
+      }
+    }
+
+    // 计算数据库总大小（包括 WAL 和 SHM 文件）
+    let totalSize = 0;
+    if (dbPath && fs.existsSync(dbPath)) {
+      totalSize += fs.statSync(dbPath).size;
+      const walPath = dbPath + '-wal';
+      const shmPath = dbPath + '-shm';
+      if (fs.existsSync(walPath)) totalSize += fs.statSync(walPath).size;
+      if (fs.existsSync(shmPath)) totalSize += fs.statSync(shmPath).size;
+    }
+
+    return {
+      path: dbPath,
+      size: totalSize,
+      tables: tableInfo,
+    };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+// 修改管理员密码（仅远程模式）
+async function changePassword(newPassword) {
+  if (remoteMode && remoteUrl) {
+    try {
+      const result = await remotePost('/api/admin/change-password', { newPassword });
+      if (result.success) {
+        // 更新本地保存的密码
+        remotePassword = newPassword;
+      }
+      return result;
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+  return { error: '仅远程模式支持修改密码' };
 }
 
 // 发送就绪信号

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../models/tool_item.dart';
 import '../services/auth_service.dart';
+import '../services/session_tracker.dart';
 import '../utils/app_logger.dart';
 import '../widgets/tool_card.dart';
 import 'about_page.dart';
@@ -301,6 +302,8 @@ class HomePage extends StatelessWidget {
               onTap: () {
                 // 点击工具卡片：跳转到对应页面
                 AppLogger.i('HomePage', '点击工具：${tool.name}');
+                // 记录页面访问活动
+                SessionTracker.instance.logPageView(tool.name);
                 Navigator.push(
                   context,
                   MaterialPageRoute(builder: tool.pageBuilder),

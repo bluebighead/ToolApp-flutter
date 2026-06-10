@@ -6,7 +6,7 @@
 ![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)
 ![Dart](https://img.shields.io/badge/Dart-3.11-0175C2?logo=dart)
 ![License](https://img.shields.io/badge/license-Private-lightgrey)
-![Version](https://img.shields.io/badge/version-1.22.0%2B138-blue)
+![Version](https://img.shields.io/badge/version-1.27.0%2B143-blue)
 
 ---
 
@@ -33,7 +33,7 @@
 - 完全离线 / 端侧能力：不依赖任何后端服务，所有计算 / 转码均在手机上完成。
 - 工程化约束：源码全部中文注释，遵循统一的日志规范和发版规则（详见 [PROJECT_RULES.md](./PROJECT_RULES.md)）。
 
-> 当前最新版本：**1.22.0+138** （2026-06-10）
+> 当前最新版本：**1.27.0+143** （2026-06-11）
 
 ---
 
@@ -89,7 +89,17 @@
 - **筛选查找**：支持按日期范围和记录模式筛选历史记录。
 - **数据持久化**：SharedPreferences + 文件备份双重存储，防止版本更新时数据丢失。
 
-### 6. 设置 / 关于 / 日志
+### 6. 在线功能（账号同步）
+- **用户注册 / 登录**：支持邮箱注册和登录，JWT 令牌认证。
+- **数据同步**：心率、网速、转换记录等数据自动同步到服务器（默认 5 分钟间隔）。
+- **会话管理**：自动跟踪用户在线状态和会话时长。
+- **访客模式**：无需注册也可使用基础功能。
+
+### 7. 骰子
+- 支持自定义骰子面数和数量。
+- 掷骰动画和结果展示。
+
+### 8. 设置 / 关于 / 日志
 - **设置页**：屏幕旋转、暗色模式、视频保存目录。
 - **关于页**：展示 App 信息（版本号、构建号、最后更新时间等）。
 - **日志页**：查看 / 清空 / 复制 / 导出最近 500 条内存日志。
@@ -126,6 +136,27 @@
 | 文件分享 / 打开  | `share_plus`、`open_filex`                                                                   |
 | 测试             | `flutter_test`（`test/` 目录已包含分贝、网速相关的若干单元测试）                             |
 
+### 服务端（toolapp-server）
+
+| 分类             | 选型                                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| 运行时           | [Node.js](https://nodejs.org/)                                                               |
+| Web 框架         | [Express](https://expressjs.com/)                                                            |
+| 数据库           | [SQLite](https://www.sqlite.org/)（better-sqlite3，WAL 模式）                                |
+| 认证             | JWT（jsonwebtoken）+ 管理员密码认证                                                          |
+| 部署             | `start-server.bat` 一键启动，支持端口冲突检测                                                |
+
+### 管理软件（toolapp-admin）
+
+| 分类             | 选型                                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| 桌面框架         | [Electron](https://www.electronjs.org/)                                                      |
+| 前端框架         | [Vue 3](https://vuejs.org/) + [Element Plus](https://element-plus.org/)                      |
+| 状态管理         | [Pinia](https://pinia.vuejs.org/)                                                            |
+| 数据库访问       | better-sqlite3（本地模式）/ HTTP API（远程模式）                                             |
+| 连接模式         | 本地模式（直接读 SQLite）/ 远程模式（HTTP API）/ 自动检测                                    |
+| 管理员密码       | 默认 `666666`，支持通过远程模式修改                                                          |
+
 ---
 
 ## 目录结构
@@ -147,19 +178,26 @@ ToolApp/
 │   │   ├── logs_page.dart
 │   │   ├── decibel_page.dart
 │   │   ├── network_speed_page.dart
-│   │   ├── network_speed_history_page.dart
 │   │   ├── video_convert_page.dart
 │   │   ├── convert_history_page.dart
 │   │   ├── heart_rate_page.dart          # 心率广播接收器主页面
 │   │   ├── heart_rate_history_page.dart  # 心率历史记录页面
 │   │   ├── period_page.dart              # 经期宝主页面（三Tab容器）
-│   │   ├── period_calendar_tab.dart      # 经期宝日历Tab
-│   │   ├── period_record_tab.dart        # 经期宝记录Tab
-│   │   └── period_stats_tab.dart         # 经期宝统计Tab
+│   │   ├── online/                       # 在线功能相关页面
+│   │   │   ├── login_page.dart           # 登录页
+│   │   │   ├── register_page.dart        # 注册页
+│   │   │   ├── online_lobby_page.dart    # 在线大厅
+│   │   │   └── guest_join_page.dart      # 访客加入页
+│   │   ├── batch_convert_page.dart       # 批量转换页
+│   │   └── dice_page.dart                # 骰子页面
+│   ├── services/             # 服务层
+│   │   ├── auth_service.dart            # 认证服务（注册/登录/登出）
+│   │   ├── sync_service.dart            # 数据同步服务
+│   │   └── session_tracker.dart         # 会话跟踪服务（心跳/在线状态）
 │   ├── utils/                # 工具类与服务
 │   │   ├── app_info.dart              # App 元信息（版本号、构建号等）
 │   │   ├── app_logger.dart            # 统一日志门面
-│   │   ├── app_settings.dart          # 全局设置（屏幕旋转 / 暗色模式等）
+│   │   ├── app_settings.dart          # 全局设置（屏幕旋转 / 暗色模式 / 同步间隔等）
 │   │   ├── app_storage.dart           # App 私有目录管理
 │   │   ├── convert_coordinator.dart   # 转换任务全局协调器（单例）
 │   │   ├── convert_history.dart       # 转换历史持久化
@@ -184,6 +222,23 @@ ToolApp/
 │       ├── heart_rate_display.dart    # 心率数字显示组件
 │       ├── network_speed_dial.dart
 │       └── network_speed_line_chart.dart
+├── toolapp-server/           # 后端服务器
+│   ├── server.js             # Express 服务器主文件
+│   ├── package.json          # Node.js 依赖
+│   ├── start-server.bat      # Windows 一键启动脚本
+│   └── data/                 # 数据库文件目录
+│       └── toolapp.db        # SQLite 数据库（运行时生成）
+├── toolapp-admin/            # 桌面管理软件
+│   ├── electron/             # Electron 主进程
+│   │   ├── main.js           # 主进程入口
+│   │   ├── preload.js        # IPC 桥接
+│   │   └── db_worker.js      # 数据库工作进程
+│   ├── src/                  # Vue 3 前端源码
+│   │   ├── views/            # 页面组件
+│   │   ├── stores/           # Pinia 状态管理
+│   │   ├── components/       # 通用组件
+│   │   └── utils/            # 工具函数
+│   └── package.json          # Node.js 依赖
 ├── test/                     # 单元测试
 ├── docs/                     # 计划 / 调试 / 截图
 ├── pubspec.yaml              # Flutter 工程配置
@@ -259,6 +314,8 @@ adb install -r build/app/outputs/flutter-apk/app-release.apk
 
 | 版本          | 更新时间   | 开发者  | 主要变更                                                                 |
 | ------------- | ---------- | ------- | ------------------------------------------------------------------------ |
+| `1.27.0+143`  | 2026-06-11 | SuperYH | 管理软件设置页增强：连接模式切换、远程密码修改、内网穿透预留、使用说明。  |
+| `1.26.0+142`  | 2026-06-11 | SuperYH | 修复在线状态误报、同步失败提示、数据库大小计算、启动脚本等问题。          |
 | `1.22.0+138`  | 2026-06-10 | SuperYH | 经期宝记录模式（精确/模糊）+ 筛选功能 + 导出增加模式列。                |
 | `1.21.0+137`  | 2026-06-10 | SuperYH | 经期宝导出优化：XLS格式居中对齐+自适应列宽。                            |
 | `1.20.0+136`  | 2026-06-10 | SuperYH | 经期宝数据导出（CSV/TXT/DOCX）+ 数据持久化加固。                        |

@@ -1667,7 +1667,61 @@ class _SettingsPageState extends State<SettingsPage> {
                   : '请先登录后再同步数据',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
+            // 自动同步间隔设置
+            if (isLoggedIn) ...[
+              Row(
+                children: [
+                  Icon(Icons.schedule, size: 18, color: Colors.grey.shade600),
+                  const SizedBox(width: 8),
+                  Text(
+                    '自动同步',
+                    style: TextStyle(fontSize: 14, color: Colors.grey.shade800),
+                  ),
+                  const Spacer(),
+                  SizedBox(
+                    width: 140,
+                    child: DropdownButtonFormField<int>(
+                      value: appSettings.autoSyncInterval,
+                      isDense: true,
+                      decoration: InputDecoration(
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      items: AppSettings.autoSyncIntervalOptions.map((minutes) {
+                        return DropdownMenuItem<int>(
+                          value: minutes,
+                          child: Text(
+                            minutes == 0 ? '关闭' : '$minutes 分钟',
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (value) async {
+                        if (value == null) return;
+                        await appSettings.setAutoSyncInterval(value);
+                        if (value > 0) {
+                          SyncService.instance.startAutoSync(value);
+                        } else {
+                          SyncService.instance.stopAutoSync();
+                        }
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(value > 0
+                                ? '已开启自动同步，每 $value 分钟同步一次'
+                                : '已关闭自动同步'),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+            ],
             SizedBox(
               width: double.infinity,
               child: FilledButton.tonalIcon(

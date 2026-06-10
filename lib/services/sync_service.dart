@@ -3,6 +3,7 @@
 // 登录后自动同步各模块的历史数据
 // 采用"全量覆盖"策略：每次同步将本地所有数据上传，覆盖服务端数据
 // 适用于小范围使用场景，简单可靠
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -25,6 +26,13 @@ class SyncService {
   bool _isSyncing = false;
   bool get isSyncing => _isSyncing;
 
+  // 自动同步定时器
+  Timer? _autoSyncTimer;
+
+  // 上次自动同步时间
+  DateTime? _lastAutoSyncTime;
+  DateTime? get lastAutoSyncTime => _lastAutoSyncTime;
+
   // 服务器基础 URL
   String get _baseUrl => appSettings.serverUrl;
 
@@ -33,6 +41,39 @@ class SyncService {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer ${AuthService.instance.token}',
       };
+
+  // 启动/重启自动同步定时器
+  // intervalMinutes: 同步间隔（分钟），0 表示关闭自动同步
+  void startAutoSync([int? intervalMinutes]) {
+    _autoSyncTimer?.cancel();
+    _autoSyncTimer = null;
+
+    final minutes = intervalMinutes ?? appSettings.autoSyncInterval;
+    if (minutes <= 0) {
+      AppLogger.i('SyncService', '自动同步已关闭');
+      return;
+    }
+
+    AppLogger.i('SyncService', '启动自动同步，间隔: $minutes 分钟');
+    _autoSyncTimer = Timer.periodic(Duration(minutes: minutes), (_) async {
+      if (!AuthService.instance.isLoggedIn || _isSyncing) return;
+      AppLogger.i('SyncService', '自动同步触发');
+      final result = await syncAll();
+      _lastAutoSyncTime = DateTime.now();
+      if (result.isSuccess) {
+        AppLogger.i('SyncService', '自动同步成功: ${result.summary}');
+      } else {
+        AppLogger.w('SyncService', '自动同步失败: ${result.summary}');
+      }
+    });
+  }
+
+  // 停止自动同步定时器
+  void stopAutoSync() {
+    _autoSyncTimer?.cancel();
+    _autoSyncTimer = null;
+    AppLogger.i('SyncService', '自动同步已停止');
+  }
 
   /// 同步所有本地数据到服务器
   /// 返回同步结果摘要
@@ -59,31 +100,46 @@ class SyncService {
       final hrResult = await _syncHeartRate();
       uploaded += hrResult.uploaded;
       failed += hrResult.failed;
-      if (hrResult.error != null) errors.add('心率: ${hrResult.error}');
+      if (hrResult.error != null) {
+        errors.add('心率: ${hrResult.error}');
+        AppLogger.e('SyncService', '心率同步错误: ${hrResult.error}');
+      }
 
       // 2. 同步网速历史
       final nsResult = await _syncNetworkSpeed();
       uploaded += nsResult.uploaded;
       failed += nsResult.failed;
-      if (nsResult.error != null) errors.add('网速: ${nsResult.error}');
+      if (nsResult.error != null) {
+        errors.add('网速: ${nsResult.error}');
+        AppLogger.e('SyncService', '网速同步错误: ${nsResult.error}');
+      }
 
       // 3. 同步转换历史
       final cvResult = await _syncConvertHistory();
       uploaded += cvResult.uploaded;
       failed += cvResult.failed;
-      if (cvResult.error != null) errors.add('转换: ${cvResult.error}');
+      if (cvResult.error != null) {
+        errors.add('转换: ${cvResult.error}');
+        AppLogger.e('SyncService', '转换同步错误: ${cvResult.error}');
+      }
 
       // 4. 同步骰子历史
       final dcResult = await _syncDiceHistory();
       uploaded += dcResult.uploaded;
       failed += dcResult.failed;
-      if (dcResult.error != null) errors.add('骰子: ${dcResult.error}');
+      if (dcResult.error != null) {
+        errors.add('骰子: ${dcResult.error}');
+        AppLogger.e('SyncService', '骰子同步错误: ${dcResult.error}');
+      }
 
       // 5. 同步经期记录
       final pdResult = await _syncPeriodRecords();
       uploaded += pdResult.uploaded;
       failed += pdResult.failed;
-      if (pdResult.error != null) errors.add('经期: ${pdResult.error}');
+      if (pdResult.error != null) {
+        errors.add('经期: ${pdResult.error}');
+        AppLogger.e('SyncService', '经期同步错误: ${pdResult.error}');
+      }
 
       AppLogger.i('SyncService', '同步完成 - 上传: $uploaded, 失败: $failed');
       return SyncResult(
@@ -106,17 +162,25 @@ class SyncService {
         Uri.parse('$_baseUrl/api/sync/$table'),
         headers: _authHeaders,
         body: jsonEncode({'rows': rows}),
-      );
+      ).timeout(const Duration(seconds: 30));
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         return _TableSyncResult(uploaded: data['uploaded'] as int? ?? 0);
       }
 
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
-      return _TableSyncResult(failed: 1, error: data['error'] as String? ?? '同步失败');
+      // 解析错误信息
+      String errorMsg;
+      try {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        errorMsg = data['error'] as String? ?? 'HTTP ${response.statusCode}';
+      } catch (_) {
+        errorMsg = 'HTTP ${response.statusCode}: ${response.body.substring(0, (response.body.length > 200 ? 200 : response.body.length))}';
+      }
+      AppLogger.e('SyncService', '$table 同步失败: $errorMsg');
+      return _TableSyncResult(failed: 1, error: errorMsg);
     } catch (e) {
-      AppLogger.e('SyncService', '$table 同步失败: $e');
+      AppLogger.e('SyncService', '$table 同步异常: $e');
       return _TableSyncResult(failed: 1, error: e.toString());
     }
   }
@@ -264,11 +328,13 @@ class SyncResult {
     this.skipped = false,
   });
 
-  bool get isSuccess => error == null && !skipped;
+  bool get isSuccess => error == null && !skipped && failed == 0;
   String get summary {
     if (skipped) return '同步被跳过';
     if (error != null) return '同步失败: $error';
-    return '同步完成: 上传 $uploaded 条${failed > 0 ? ", 失败 $failed 项" : ""}';
+    if (uploaded == 0 && failed == 0) return '同步完成: 暂无新数据需要上传';
+    if (failed > 0) return '同步完成: 上传 $uploaded 条, 失败 $failed 项\n${errors.join("; ")}';
+    return '同步完成: 上传 $uploaded 条';
   }
 }
 

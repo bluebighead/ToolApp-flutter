@@ -20,6 +20,16 @@ contextBridge.exposeInMainWorld('api', {
   deleteRecord: (table, id) => ipcRenderer.invoke('db:deleteRecord', table, id),
   deleteUser: (userId) => ipcRenderer.invoke('db:deleteUser', userId),
 
+  // 在线状态 & 会话监控
+  getOnlineStatus: () => ipcRenderer.invoke('db:getOnlineStatus'),
+  getUserSessions: (userId, params) => ipcRenderer.invoke('db:getUserSessions', { userId, ...params }),
+  getUserActivity: (userId, params) => ipcRenderer.invoke('db:getUserActivity', { userId, ...params }),
+
+  // 系统信息
+  getSystemInfo: () => ipcRenderer.invoke('db:getSystemInfo'),
+  getLocalDatabaseInfo: () => ipcRenderer.invoke('db:getLocalDatabaseInfo'),
+  changePassword: (newPassword) => ipcRenderer.invoke('db:changePassword', newPassword),
+
   // 导出备份
   exportTable: (table, format) => ipcRenderer.invoke('db:exportTable', table, format),
   backupDatabase: () => ipcRenderer.invoke('db:backupDatabase'),

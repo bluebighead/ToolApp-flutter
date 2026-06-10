@@ -22,31 +22,22 @@
           <el-icon><User /></el-icon>
           <template #title>用户管理</template>
         </el-menu-item>
-        <el-divider v-if="!isCollapsed" content-position="left">数据管理</el-divider>
-        <el-menu-item index="/heart-rate">
-          <el-icon><Monitor /></el-icon>
-          <template #title>心率数据</template>
-        </el-menu-item>
-        <el-menu-item index="/network-speed">
-          <el-icon><Connection /></el-icon>
-          <template #title>网速数据</template>
-        </el-menu-item>
-        <el-menu-item index="/convert-history">
-          <el-icon><VideoCamera /></el-icon>
-          <template #title>转换历史</template>
-        </el-menu-item>
-        <el-menu-item index="/dice-records">
+        <el-menu-item index="/data-center">
           <el-icon><Coin /></el-icon>
-          <template #title>骰子记录</template>
+          <template #title>数据中心</template>
         </el-menu-item>
-        <el-menu-item index="/period-records">
-          <el-icon><Calendar /></el-icon>
-          <template #title>经期记录</template>
+        <el-menu-item index="/online-monitor">
+          <el-icon><Monitor /></el-icon>
+          <template #title>在线监控</template>
         </el-menu-item>
         <el-divider v-if="!isCollapsed" content-position="left">系统工具</el-divider>
         <el-menu-item index="/backup">
           <el-icon><FolderOpened /></el-icon>
           <template #title>数据备份</template>
+        </el-menu-item>
+        <el-menu-item index="/settings">
+          <el-icon><Setting /></el-icon>
+          <template #title>系统设置</template>
         </el-menu-item>
       </el-menu>
     </el-aside>

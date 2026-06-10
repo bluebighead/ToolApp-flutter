@@ -13,6 +13,7 @@ class AppSettings extends ChangeNotifier {
   static const String _kAllowRotation = 'settings_allow_rotation';
   static const String _kDarkMode = 'settings_dark_mode';
   static const String _kServerUrl = 'settings_server_url';
+  static const String _kAutoSyncInterval = 'settings_auto_sync_interval';
 
   // 默认服务器地址（自建轻量服务器，局域网 IP）
   static const String defaultServerUrl = 'http://192.168.31.13:3000';
@@ -33,6 +34,13 @@ class AppSettings extends ChangeNotifier {
   String _serverUrl = _defaultServerUrl;
   String get serverUrl => _serverUrl;
 
+  // 自动同步间隔（分钟），0 表示关闭自动同步，默认 5 分钟
+  int _autoSyncInterval = 5;
+  int get autoSyncInterval => _autoSyncInterval;
+
+  // 可选的自动同步间隔列表（分钟）
+  static const List<int> autoSyncIntervalOptions = [0, 5, 10, 15, 20, 30, 45, 60];
+
   // 初始化设置：从 SharedPreferences 读取已保存的偏好
   // 必须在 runApp 之前调用一次以加载历史数据
   Future<void> load() async {
@@ -41,6 +49,7 @@ class AppSettings extends ChangeNotifier {
       _allowRotation = _prefs?.getBool(_kAllowRotation) ?? false;
       _darkMode = _prefs?.getBool(_kDarkMode) ?? false;
       _serverUrl = _prefs?.getString(_kServerUrl) ?? _defaultServerUrl;
+      _autoSyncInterval = _prefs?.getInt(_kAutoSyncInterval) ?? 5;
       AppLogger.i(
         'AppSettings',
         '设置已加载 - 屏幕旋转: $_allowRotation, 暗色模式: $_darkMode, 服务器: $_serverUrl',
@@ -87,6 +96,15 @@ class AppSettings extends ChangeNotifier {
     _serverUrl = value;
     AppLogger.i('AppSettings', '服务器地址 -> $value');
     await _prefs?.setString(_kServerUrl, value);
+    notifyListeners();
+  }
+
+  // 设置自动同步间隔（分钟），0 表示关闭
+  Future<void> setAutoSyncInterval(int value) async {
+    if (_autoSyncInterval == value) return;
+    _autoSyncInterval = value;
+    AppLogger.i('AppSettings', '自动同步间隔 -> $value 分钟');
+    await _prefs?.setInt(_kAutoSyncInterval, value);
     notifyListeners();
   }
 

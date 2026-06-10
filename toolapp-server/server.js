@@ -102,6 +102,31 @@ db.exec(`
     notes TEXT,
     local_id TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  -- 用户会话表 - 记录用户在线状态和使用时长
+  CREATE TABLE IF NOT EXISTS user_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    session_start TEXT,
+    session_end TEXT,
+    duration_seconds INTEGER DEFAULT 0,
+    device_info TEXT,
+    ip_address TEXT,
+    last_heartbeat TEXT,
+    is_online INTEGER DEFAULT 0,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  -- 用户活动日志表 - 记录用户在App中的操作
+  CREATE TABLE IF NOT EXISTS user_activity_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    activity_type TEXT,
+    page_name TEXT,
+    details TEXT,
+    timestamp TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id)
   )
 `);
 
@@ -216,6 +241,92 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
 // GET /api/sync/:table - 下载全量数据
 const SYNC_TABLES = ['heart_rate_sessions', 'network_speed_records', 'convert_history', 'dice_records', 'period_records'];
 
+// ============================================================
+// 用户会话与活动API - 在线状态上报和使用时长统计
+// ============================================================
+
+// 开始新会话（App启动时调用）
+app.post('/api/session/start', authMiddleware, (req, res) => {
+  const userId = req.userId;
+  const { deviceInfo } = req.body || {};
+  const ipAddress = req.headers['x-forwarded-for'] || req.ip || '';
+  const now = new Date().toISOString();
+
+  try {
+    // 先将该用户之前的在线会话标记为离线
+    db.prepare('UPDATE user_sessions SET is_online = 0, session_end = ? WHERE user_id = ? AND is_online = 1').run(now, userId);
+
+    // 创建新会话
+    const result = db.prepare(`
+      INSERT INTO user_sessions (user_id, session_start, device_info, ip_address, last_heartbeat, is_online)
+      VALUES (?, ?, ?, ?, ?, 1)
+    `).run(userId, now, deviceInfo || '', ipAddress, now);
+
+    res.json({ sessionId: result.lastInsertRowid, startTime: now });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 心跳上报（App定期调用，表明用户仍在线）
+app.post('/api/session/heartbeat', authMiddleware, (req, res) => {
+  const userId = req.userId;
+  const { sessionId } = req.body || {};
+  const now = new Date().toISOString();
+
+  try {
+    if (sessionId) {
+      // 更新指定会话的心跳时间
+      db.prepare('UPDATE user_sessions SET last_heartbeat = ?, is_online = 1 WHERE id = ? AND user_id = ?').run(now, sessionId, userId);
+    } else {
+      // 更新用户最新的在线会话
+      db.prepare('UPDATE user_sessions SET last_heartbeat = ?, is_online = 1 WHERE user_id = ? AND is_online = 1').run(now, userId);
+    }
+    res.json({ received: true, timestamp: now });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 结束会话（App退出时调用）
+app.post('/api/session/end', authMiddleware, (req, res) => {
+  const userId = req.userId;
+  const now = new Date().toISOString();
+
+  try {
+    // 计算会话时长并标记为离线
+    const sessions = db.prepare('SELECT id, session_start FROM user_sessions WHERE user_id = ? AND is_online = 1').all(userId);
+
+    for (const session of sessions) {
+      const start = new Date(session.session_start).getTime();
+      const end = new Date(now).getTime();
+      const duration = Math.floor((end - start) / 1000);
+      db.prepare('UPDATE user_sessions SET session_end = ?, duration_seconds = ?, is_online = 0 WHERE id = ?').run(now, duration, session.id);
+    }
+
+    res.json({ ended: true, endTime: now });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 上报用户活动
+app.post('/api/activity/log', authMiddleware, (req, res) => {
+  const userId = req.userId;
+  const { activityType, pageName, details } = req.body || {};
+  const now = new Date().toISOString();
+
+  try {
+    db.prepare(`
+      INSERT INTO user_activity_logs (user_id, activity_type, page_name, details, timestamp)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(userId, activityType || '', pageName || '', details || '', now);
+    res.json({ logged: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 上传同步数据
 app.post('/api/sync/:table', authMiddleware, (req, res) => {
   const { table } = req.params;
@@ -292,16 +403,222 @@ app.get('/api/sync/:table', authMiddleware, (req, res) => {
 // ============================================================
 // 管理员 API（供 ToolApp Admin 桌面端使用）
 // ============================================================
-const ADMIN_PASSWORD = 'toolapp-admin-2026'; // 管理员密码，生产环境请修改
+// 管理员密码（默认 666666，可通过 API 修改）
+let adminPassword = process.env.ADMIN_PASSWORD || '666666';
 
 // 管理员认证中间件
 function adminMiddleware(req, res, next) {
   const password = req.headers['x-admin-password'];
-  if (!password || password !== ADMIN_PASSWORD) {
+  if (!password || password !== adminPassword) {
     return res.status(403).json({ error: '管理员密码错误' });
   }
   next();
 }
+
+// 修改管理员密码
+app.post('/api/admin/change-password', adminMiddleware, (req, res) => {
+  const { newPassword } = req.body || {};
+  if (!newPassword || newPassword.length < 4) {
+    return res.status(400).json({ error: '密码长度至少4位' });
+  }
+  adminPassword = newPassword;
+  res.json({ success: true, message: '密码修改成功' });
+});
+
+// 获取用户在线状态（用于在线监控页面）
+app.get('/api/admin/users/online-status', adminMiddleware, (req, res) => {
+  const now = Date.now();
+  const ONLINE_THRESHOLD = 5 * 60 * 1000; // 5分钟内心跳视为在线
+
+  try {
+    // 获取所有用户及其最新会话信息
+    const users = db.prepare('SELECT id, email, created_at FROM users ORDER BY id').all();
+
+    const result = users.map(user => {
+      // 获取用户最新会话
+      const latestSession = db.prepare(`
+        SELECT * FROM user_sessions
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(user.id);
+
+      // 计算用户今日使用时长
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayStart = today.toISOString();
+
+      const todayStats = db.prepare(`
+        SELECT COALESCE(SUM(
+          CASE
+            WHEN session_end IS NOT NULL THEN duration_seconds
+            ELSE CAST((julianday('now') - julianday(session_start)) * 86400 AS INTEGER)
+          END
+        ), 0) as total_seconds
+        FROM user_sessions
+        WHERE user_id = ? AND session_start >= ?
+      `).get(user.id, todayStart);
+
+      // 计算总使用时长
+      const totalStats = db.prepare(`
+        SELECT COALESCE(SUM(
+          CASE
+            WHEN session_end IS NOT NULL THEN duration_seconds
+            ELSE CAST((julianday('now') - julianday(session_start)) * 86400 AS INTEGER)
+          END
+        ), 0) as total_seconds
+        FROM user_sessions
+        WHERE user_id = ?
+      `).get(user.id);
+
+      // 计算会话次数
+      const sessionCount = db.prepare('SELECT COUNT(*) as count FROM user_sessions WHERE user_id = ?').get(user.id).count;
+
+      // 判断是否在线
+      let isOnline = false;
+      let lastSeen = null;
+      let currentSessionStart = null;
+
+      if (latestSession) {
+        const lastHeartbeat = latestSession.last_heartbeat ? new Date(latestSession.last_heartbeat).getTime() : 0;
+        // 判断在线：is_online=1 且有有效心跳且心跳在5分钟内
+        isOnline = latestSession.is_online === 1
+          && latestSession.last_heartbeat
+          && (now - lastHeartbeat) < ONLINE_THRESHOLD;
+        lastSeen = latestSession.last_heartbeat;
+        currentSessionStart = latestSession.session_start;
+      }
+
+      return {
+        ...user,
+        isOnline,
+        lastSeen,
+        currentSessionStart,
+        todayUsageSeconds: todayStats.total_seconds,
+        totalUsageSeconds: totalStats.total_seconds,
+        sessionCount,
+        deviceInfo: latestSession ? latestSession.device_info : null,
+        ipAddress: latestSession ? latestSession.ip_address : null,
+      };
+    });
+
+    // 按在线状态排序（在线用户在前）
+    result.sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
+
+    const onlineCount = result.filter(u => u.isOnline).length;
+    const totalCount = result.length;
+
+    res.json({
+      users: result,
+      onlineCount,
+      totalCount,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取用户会话历史
+app.get('/api/admin/users/:id/sessions', adminMiddleware, (req, res) => {
+  const userId = Number(req.params.id);
+  const { page = 1, pageSize = 20 } = req.query;
+  const offset = (page - 1) * pageSize;
+
+  try {
+    const total = db.prepare('SELECT COUNT(*) as count FROM user_sessions WHERE user_id = ?').get(userId).count;
+    const sessions = db.prepare(`
+      SELECT * FROM user_sessions
+      WHERE user_id = ?
+      ORDER BY id DESC
+      LIMIT ? OFFSET ?
+    `).all(userId, Number(pageSize), Number(offset));
+
+    res.json({ rows: sessions, total, page: Number(page), pageSize: Number(pageSize) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取用户活动日志
+app.get('/api/admin/users/:id/activity', adminMiddleware, (req, res) => {
+  const userId = Number(req.params.id);
+  const { page = 1, pageSize = 50 } = req.query;
+  const offset = (page - 1) * pageSize;
+
+  try {
+    const total = db.prepare('SELECT COUNT(*) as count FROM user_activity_logs WHERE user_id = ?').get(userId).count;
+    const logs = db.prepare(`
+      SELECT * FROM user_activity_logs
+      WHERE user_id = ?
+      ORDER BY id DESC
+      LIMIT ? OFFSET ?
+    `).all(userId, Number(pageSize), Number(offset));
+
+    res.json({ rows: logs, total, page: Number(page), pageSize: Number(pageSize) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取系统信息（用于设置页面）
+app.get('/api/admin/system-info', adminMiddleware, (req, res) => {
+  const os = require('os');
+  const path = require('path');
+
+  try {
+    const q = (sql) => db.prepare(sql).get().count;
+    const ips = [];
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          ips.push(iface.address);
+        }
+      }
+    }
+
+    res.json({
+      server: {
+        port: PORT,
+        uptime: process.uptime(),
+        platform: os.platform(),
+        hostname: os.hostname(),
+        ips,
+        memory: {
+          total: os.totalmem(),
+          free: os.freemem(),
+        },
+        nodeVersion: process.version,
+      },
+      database: {
+        path: DB_PATH,
+        size: (() => {
+          let s = 0;
+          if (fs.existsSync(DB_PATH)) {
+            s += fs.statSync(DB_PATH).size;
+            if (fs.existsSync(DB_PATH + '-wal')) s += fs.statSync(DB_PATH + '-wal').size;
+            if (fs.existsSync(DB_PATH + '-shm')) s += fs.statSync(DB_PATH + '-shm').size;
+          }
+          return s;
+        })(),
+        tables: {
+          users: q('SELECT COUNT(*) as count FROM users'),
+          heart_rate_sessions: q('SELECT COUNT(*) as count FROM heart_rate_sessions'),
+          network_speed_records: q('SELECT COUNT(*) as count FROM network_speed_records'),
+          convert_history: q('SELECT COUNT(*) as count FROM convert_history'),
+          dice_records: q('SELECT COUNT(*) as count FROM dice_records'),
+          period_records: q('SELECT COUNT(*) as count FROM period_records'),
+          user_sessions: q('SELECT COUNT(*) as count FROM user_sessions'),
+          user_activity_logs: q('SELECT COUNT(*) as count FROM user_activity_logs'),
+        },
+      },
+      adminPassword: adminPassword,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // 全局统计
 app.get('/api/admin/stats', adminMiddleware, (req, res) => {
@@ -334,7 +651,7 @@ app.get('/api/admin/users', adminMiddleware, (req, res) => {
 
   try {
     const total = db.prepare(`SELECT COUNT(*) as count FROM users ${where}`).get(...sp).count;
-    const rows = db.prepare(`SELECT id, email, created_at FROM users ${where} ORDER BY id LIMIT ? OFFSET ?`).all(...sp, Number(pageSize), Number(offset));
+    const rows = db.prepare(`SELECT id, email, password_hash, created_at FROM users ${where} ORDER BY id LIMIT ? OFFSET ?`).all(...sp, Number(pageSize), Number(offset));
 
     const usersWithData = rows.map(user => {
       const c = (table) => db.prepare(`SELECT COUNT(*) as count FROM ${table} WHERE user_id = ?`).get(user.id).count;
@@ -476,4 +793,24 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`========================================`);
   console.log(`  请在 App 中设置服务器地址为上面的局域网地址`);
   console.log(`========================================`);
+
+  // 定期清理过期会话：每分钟检查一次，将超过10分钟没有心跳的会话标记为离线
+  setInterval(() => {
+    try {
+      const result = db.prepare(`
+        UPDATE user_sessions
+        SET is_online = 0,
+            session_end = datetime('now'),
+            duration_seconds = CAST((julianday('now') - julianday(session_start)) * 86400 AS INTEGER)
+        WHERE is_online = 1
+          AND last_heartbeat IS NOT NULL
+          AND julianday('now') - julianday(last_heartbeat) > 0.007
+      `).run();
+      if (result.changes > 0) {
+        console.log(`[会话清理] 已将 ${result.changes} 个过期会话标记为离线`);
+      }
+    } catch (err) {
+      // 忽略清理错误
+    }
+  }, 60 * 1000);
 });

@@ -5,16 +5,43 @@ import { ref } from 'vue';
 import { api } from '@/utils/api';
 
 export const useConnectionStore = defineStore('connection', () => {
+  // 从 localStorage 恢复连接状态
+  function loadPersistedState() {
+    try {
+      const saved = localStorage.getItem('toolapp-admin-connection');
+      if (saved) {
+        const data = JSON.parse(saved);
+        return data;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  const persisted = loadPersistedState();
+
   // 是否已连接
-  const connected = ref(false);
+  const connected = ref(persisted?.connected || false);
   // 连接模式：'local' | 'remote' | null
-  const mode = ref(null);
+  const mode = ref(persisted?.mode || null);
   // 本地数据库路径
-  const dbPath = ref('');
+  const dbPath = ref(persisted?.dbPath || '');
   // 远程服务器地址
-  const serverUrl = ref('');
+  const serverUrl = ref(persisted?.serverUrl || '');
   // 数据库信息（各表数据量）
-  const dbInfo = ref(null);
+  const dbInfo = ref(persisted?.dbInfo || null);
+
+  // 持久化连接状态
+  function persistState() {
+    try {
+      localStorage.setItem('toolapp-admin-connection', JSON.stringify({
+        connected: connected.value,
+        mode: mode.value,
+        dbPath: dbPath.value,
+        serverUrl: serverUrl.value,
+        dbInfo: dbInfo.value,
+      }));
+    } catch (e) {}
+  }
 
   // 自动扫描并连接数据库
   async function autoScanAndConnect() {
@@ -52,6 +79,7 @@ export const useConnectionStore = defineStore('connection', () => {
       mode.value = 'local';
       dbPath.value = path;
       dbInfo.value = result.info || null;
+      persistState();
     }
     return result;
   }
@@ -64,6 +92,7 @@ export const useConnectionStore = defineStore('connection', () => {
       mode.value = 'remote';
       serverUrl.value = url;
       dbInfo.value = null;
+      persistState();
     }
     return result;
   }
@@ -76,6 +105,7 @@ export const useConnectionStore = defineStore('connection', () => {
     dbPath.value = '';
     serverUrl.value = '';
     dbInfo.value = null;
+    persistState();
   }
 
   return {

@@ -1,6 +1,6 @@
 {
   "name": "toolapp-admin",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "ToolApp 数据库管理桌面端",
   "main": "electron/main.js",
   "scripts": {

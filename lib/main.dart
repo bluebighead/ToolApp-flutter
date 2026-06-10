@@ -12,6 +12,7 @@ import 'pages/home_page.dart';
 import 'pages/settings_page.dart';
 import 'services/auth_service.dart';
 import 'services/online_overlay_manager.dart';
+import 'services/session_tracker.dart';
 import 'services/sync_service.dart';
 import 'utils/app_info.dart';
 import 'utils/app_logger.dart';
@@ -66,8 +67,47 @@ void main() async {
   runApp(const ToolApp());
 }
 
-class ToolApp extends StatelessWidget {
+class ToolApp extends StatefulWidget {
   const ToolApp({super.key});
+
+  @override
+  State<ToolApp> createState() => _ToolAppState();
+}
+
+class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  // 应用前后台切换回调
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    switch (state) {
+      case AppLifecycleState.paused:
+        // 应用进入后台
+        SessionTracker.instance.onAppPaused();
+        break;
+      case AppLifecycleState.resumed:
+        // 应用恢复前台
+        SessionTracker.instance.onAppResumed();
+        break;
+      case AppLifecycleState.detached:
+        // 应用被分离
+        SessionTracker.instance.endSession();
+        break;
+      default:
+        break;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -190,6 +230,22 @@ class _AuthWrapperState extends State<AuthWrapper> {
           AppLogger.i('AuthWrapper', '自动同步完成: ${result.summary}');
         });
       });
+    }
+
+    // 登录成功时启动会话跟踪
+    if (isNowLoggedIn && !SessionTracker.instance.isTracking) {
+      SessionTracker.instance.startSession();
+      // 启动自动同步（如果已设置间隔）
+      if (appSettings.autoSyncInterval > 0) {
+        SyncService.instance.startAutoSync();
+      }
+    }
+
+    // 登出时结束会话跟踪
+    if (!isNowLoggedIn && SessionTracker.instance.isTracking) {
+      SessionTracker.instance.endSession();
+      // 停止自动同步
+      SyncService.instance.stopAutoSync();
     }
 
     setState(() {});

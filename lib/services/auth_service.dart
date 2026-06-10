@@ -12,6 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/app_logger.dart';
 import '../utils/app_settings.dart';
 import '../utils/user_data_manager.dart';
+import 'session_tracker.dart';
 
 class AuthService extends ChangeNotifier {
   // 全局单例
@@ -224,6 +225,12 @@ class AuthService extends ChangeNotifier {
   Future<void> signOut() async {
     try {
       AppLogger.i('AuthService', '登出请求');
+
+      // 先结束会话（需要有效的 token 才能通知服务器）
+      if (SessionTracker.instance.isTracking) {
+        await SessionTracker.instance.endSession();
+      }
+
       _token = null;
       _userId = null;
       _userEmail = null;

@@ -219,6 +219,7 @@ async function handleIpc(event, method, params) {
 ipcMain.handle('db:autoScanDatabase', () => sendToWorker('autoScanDatabase'));
 ipcMain.handle('db:scanDatabase', (event, dir) => sendToWorker('scanDatabase', { dir }));
 ipcMain.handle('db:connectLocal', (event, dbPath) => sendToWorker('connectLocal', { dbPath }));
+ipcMain.handle('db:connectRemote', (event, serverUrl, password) => sendToWorker('connectRemote', { serverUrl, password }));
 ipcMain.handle('db:testConnection', () => sendToWorker('testConnection'));
 ipcMain.handle('db:getMode', () => sendToWorker('getMode'));
 ipcMain.handle('db:getLocalDbPath', () => sendToWorker('getLocalDbPath'));
@@ -228,6 +229,16 @@ ipcMain.handle('db:disconnect', () => sendToWorker('disconnect'));
 ipcMain.handle('db:getStats', () => sendToWorker('getStats'));
 ipcMain.handle('db:getUsers', (event, params) => sendToWorker('getUsers', params));
 ipcMain.handle('db:getTableData', (event, table, params) => sendToWorker('getTableData', { table, ...params }));
+
+// 在线状态 & 会话监控
+ipcMain.handle('db:getOnlineStatus', () => sendToWorker('getOnlineStatus'));
+ipcMain.handle('db:getUserSessions', (event, params) => sendToWorker('getUserSessions', params));
+ipcMain.handle('db:getUserActivity', (event, params) => sendToWorker('getUserActivity', params));
+
+// 系统信息
+ipcMain.handle('db:getSystemInfo', () => sendToWorker('getSystemInfo'));
+ipcMain.handle('db:getLocalDatabaseInfo', () => sendToWorker('getLocalDatabaseInfo'));
+ipcMain.handle('db:changePassword', (event, newPassword) => sendToWorker('changePassword', { newPassword }));
 
 // 数据修改相关
 ipcMain.handle('db:updateRecord', (event, table, id, data) => sendToWorker('updateRecord', { table, id, data }));
