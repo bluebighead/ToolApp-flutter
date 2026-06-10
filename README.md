@@ -6,7 +6,7 @@
 ![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)
 ![Dart](https://img.shields.io/badge/Dart-3.11-0175C2?logo=dart)
 ![License](https://img.shields.io/badge/license-Private-lightgrey)
-![Version](https://img.shields.io/badge/version-1.7.9%2B96-blue)
+![Version](https://img.shields.io/badge/version-1.22.0%2B138-blue)
 
 ---
 
@@ -33,7 +33,7 @@
 - 完全离线 / 端侧能力：不依赖任何后端服务，所有计算 / 转码均在手机上完成。
 - 工程化约束：源码全部中文注释，遵循统一的日志规范和发版规则（详见 [PROJECT_RULES.md](./PROJECT_RULES.md)）。
 
-> 当前最新版本：**1.7.9+96** （2026-06-09）
+> 当前最新版本：**1.22.0+138** （2026-06-10）
 
 ---
 
@@ -79,7 +79,17 @@
 - **历史记录**：每次测量会话自动保存，支持查看详情（最高/最低/平均心率、测量时间段）。
 - **多选操作**：支持批量删除历史记录，全选/取消全选一键切换。
 
-### 5. 设置 / 关于 / 日志
+### 5. 经期宝
+- **经期记录**：支持精确记录模式（记录开始和结束日期）和模糊记录模式（仅记录开始日期）。
+- **排卵日标记**：支持手动标记排卵日并添加备注。
+- **智能预测**：基于历史记录自动计算平均周期天数、平均经期天数，预测下次经期和易孕期。
+- **日历视图**：在日历上直观展示经期、预测期、易孕期。
+- **统计面板**：周期天数、经期天数、下次经期、易孕期等关键指标一目了然。
+- **数据导出**：支持 CSV、XLS（居中对齐）、TXT、DOCX 四种格式导出，方便备份和分享。
+- **筛选查找**：支持按日期范围和记录模式筛选历史记录。
+- **数据持久化**：SharedPreferences + 文件备份双重存储，防止版本更新时数据丢失。
+
+### 6. 设置 / 关于 / 日志
 - **设置页**：屏幕旋转、暗色模式、视频保存目录。
 - **关于页**：展示 App 信息（版本号、构建号、最后更新时间等）。
 - **日志页**：查看 / 清空 / 复制 / 导出最近 500 条内存日志。
@@ -141,7 +151,11 @@ ToolApp/
 │   │   ├── video_convert_page.dart
 │   │   ├── convert_history_page.dart
 │   │   ├── heart_rate_page.dart          # 心率广播接收器主页面
-│   │   └── heart_rate_history_page.dart  # 心率历史记录页面
+│   │   ├── heart_rate_history_page.dart  # 心率历史记录页面
+│   │   ├── period_page.dart              # 经期宝主页面（三Tab容器）
+│   │   ├── period_calendar_tab.dart      # 经期宝日历Tab
+│   │   ├── period_record_tab.dart        # 经期宝记录Tab
+│   │   └── period_stats_tab.dart         # 经期宝统计Tab
 │   ├── utils/                # 工具类与服务
 │   │   ├── app_info.dart              # App 元信息（版本号、构建号等）
 │   │   ├── app_logger.dart            # 统一日志门面
@@ -160,6 +174,8 @@ ToolApp/
 │   │   ├── saf_directory_helper.dart  # SAF 目录工具
 │   │   ├── saf_helper.dart            # SAF 桥接工具
 │   │   └── video_save_settings.dart   # 视频保存设置
+│   │   ├── period_model.dart          # 经期宝数据模型、存储和预测算法
+│   │   └── period_export.dart         # 经期宝数据导出工具（CSV/XLS/TXT/DOCX）
 │   └── widgets/              # 通用组件
 │       ├── tool_card.dart
 │       ├── decibel_chart.dart
@@ -243,6 +259,10 @@ adb install -r build/app/outputs/flutter-apk/app-release.apk
 
 | 版本          | 更新时间   | 开发者  | 主要变更                                                                 |
 | ------------- | ---------- | ------- | ------------------------------------------------------------------------ |
+| `1.22.0+138`  | 2026-06-10 | SuperYH | 经期宝记录模式（精确/模糊）+ 筛选功能 + 导出增加模式列。                |
+| `1.21.0+137`  | 2026-06-10 | SuperYH | 经期宝导出优化：XLS格式居中对齐+自适应列宽。                            |
+| `1.20.0+136`  | 2026-06-10 | SuperYH | 经期宝数据导出（CSV/TXT/DOCX）+ 数据持久化加固。                        |
+| `1.19.0+135`  | 2026-06-10 | SuperYH | 经期宝功能完整实现（记录/日历/统计/排卵日标记/智能预测）。              |
 | `1.7.9+96`    | 2026-06-09 | SuperYH | 心率历史记录功能 + 存储空间统计修复（7GB占用根因修复）。                |
 | `1.7.6+92`    | 2026-06-09 | SuperYH | BLE断开后心率显示归零，历史数据清空。                                    |
 | `1.7.5+91`    | 2026-06-09 | SuperYH | 修复BLE断开后自动重连Bug，修复连接监听器泄漏。                          |
