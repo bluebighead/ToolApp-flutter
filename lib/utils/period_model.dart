@@ -9,6 +9,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_logger.dart';
+import 'user_data_manager.dart';
+import '../services/auth_service.dart';
+import '../services/sync_service.dart';
 
 // ============================================================
 // 数据模型
@@ -513,12 +516,17 @@ class PeriodStats {
 /// 经期宝存储工具
 /// 使用 SharedPreferences 作为主存储，同时自动备份到文件防止数据丢失
 class PeriodStorage {
-  static const String _kRecordsKey = 'period_records';
-  static const String _kOvulationMarksKey = 'period_ovulation_marks';
-  static const String _kSettingsKey = 'period_settings';
+  static const String _kBaseRecordsKey = 'period_records';
+  static const String _kBaseOvulationMarksKey = 'period_ovulation_marks';
+  static const String _kBaseSettingsKey = 'period_settings';
 
   // 文件备份路径
   static const String _kBackupFileName = 'period_backup.json';
+
+  /// 获取当前用户的 SharedPreferences key
+  static String get _kRecordsKey => UserDataManager.instance.prefsKey(_kBaseRecordsKey);
+  static String get _kOvulationMarksKey => UserDataManager.instance.prefsKey(_kBaseOvulationMarksKey);
+  static String get _kSettingsKey => UserDataManager.instance.prefsKey(_kBaseSettingsKey);
 
   /// 获取备份文件目录
   static Future<Directory> _getBackupDir() async {
@@ -643,6 +651,8 @@ class PeriodStorage {
     // 按开始日期排序
     records.sort((a, b) => a.startDate.compareTo(b.startDate));
     await saveRecords(records);
+    // 后台同步到服务器
+    _triggerSync();
   }
 
   /// 更新经期记录
@@ -653,6 +663,8 @@ class PeriodStorage {
       records[index] = record;
       records.sort((a, b) => a.startDate.compareTo(b.startDate));
       await saveRecords(records);
+      // 后台同步到服务器
+      _triggerSync();
     }
   }
 
@@ -780,6 +792,17 @@ class PeriodStorage {
     // 同步文件备份
     _writeBackup(settings: settings);
   }
+}
+
+/// 后台同步辅助：登录状态下触发全量数据同步（fire-and-forget）
+void _triggerSync() {
+  Future.microtask(() async {
+    try {
+      if (AuthService.instance.isLoggedIn && !SyncService.instance.isSyncing) {
+        await SyncService.instance.syncAll();
+      }
+    } catch (_) {}
+  });
 }
 
 /// 预置症状标签

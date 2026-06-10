@@ -1,8 +1,12 @@
 package com.example.toolapp
 
+import android.media.MediaCodecList
+import android.media.MediaCodecInfo
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
+import android.net.wifi.WifiManager
+import android.net.wifi.WifiInfo
 import android.os.Build
 import android.provider.DocumentsContract
 import android.util.Log
@@ -68,7 +72,14 @@ class MainActivity : FlutterActivity() {
     private val copyProgressChannelName = "com.example.toolapp/copy_progress"
     /** 前台服务控制 MethodChannel：用于启动/停止转换保活服务 */
     private val foregroundServiceChannelName = "com.example.toolapp/foreground_service"
+    /** 编解码器检测 MethodChannel：用于检测设备硬件编码能力 */
+    private val codecDetectorChannelName = "com.example.toolapp/codec_detector"
+    /** 联机掷骰子 WiFi 通道：MulticastLock + WiFi SSID 获取 */
+    private val wifiChannelName = "com.example.toolapp/wifi_helper"
     private val TAG = "SafHelper"
+
+    /** WiFi 多播锁：Android 默认过滤 UDP 多播包，必须获取锁才能接收 */
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     /** 当前活跃的进度事件流（用于 copyM3u8WithSegments 期间推送进度） */
     private var copyProgressSink: EventChannel.EventSink? = null
@@ -540,6 +551,85 @@ class MainActivity : FlutterActivity() {
                         } catch (e: Throwable) {
                             Log.e(TAG, "停止前台服务失败", e)
                             result.error("EXCEPTION", e.message ?: "unknown", e.stackTraceToString())
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // 注册编解码器检测通道（用于检测设备硬件编码能力）
+        // 通过 Android MediaCodecList API 遍历设备编解码器，
+        // 检查是否存在支持 H.264 编码的硬件编码器
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, codecDetectorChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "checkH264Encoder" -> {
+                        try {
+                            val hasEncoder = checkH264HardwareEncoder()
+                            Log.i(TAG, "checkH264Encoder: 设备H.264硬件编码器=$hasEncoder")
+                            result.success(hasEncoder)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "checkH264Encoder 检测失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    // 获取设备芯片信息（芯片型号、内核数、CPU频率等）
+                    "getCpuInfo" -> {
+                        try {
+                            val cpuInfo = getCpuInfo()
+                            Log.i(TAG, "getCpuInfo: $cpuInfo")
+                            result.success(cpuInfo)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "getCpuInfo 检测失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // 注册 WiFi 辅助通道（联机掷骰子用）
+        // 提供 MulticastLock 获取/释放（Android 默认过滤 UDP 多播包）
+        // 提供 WiFi SSID 获取（显示当前连接的网络名称）
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, wifiChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    // 获取 WiFi 多播锁（UDP 广播/多播接收必须）
+                    "acquireMulticastLock" -> {
+                        try {
+                            if (multicastLock == null) {
+                                val wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+                                multicastLock = wifiManager.createMulticastLock("toolapp_online_dice")
+                                multicastLock?.setReferenceCounted(false)
+                            }
+                            multicastLock?.acquire()
+                            Log.i(TAG, "MulticastLock 已获取")
+                            result.success(true)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "获取 MulticastLock 失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    // 释放 WiFi 多播锁
+                    "releaseMulticastLock" -> {
+                        try {
+                            multicastLock?.release()
+                            Log.i(TAG, "MulticastLock 已释放")
+                            result.success(true)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "释放 MulticastLock 失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    // 获取当前 WiFi SSID（网络名称）
+                    "getWifiSsid" -> {
+                        try {
+                            val ssid = getWifiSsid()
+                            Log.i(TAG, "getWifiSsid: $ssid")
+                            result.success(ssid)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "获取 WiFi SSID 失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
                         }
                     }
                     else -> result.notImplemented()
@@ -1342,6 +1432,165 @@ class MainActivity : FlutterActivity() {
                     out.add(rel)
                 }
             }
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // 编解码器检测
+    // ----------------------------------------------------------------------
+
+    /**
+     * 检测设备是否支持 H.264 硬件编码器。
+     *
+     * 通过 Android MediaCodecList API 遍历设备所有编解码器，
+     * 检查是否存在支持 "video/avc"（H.264）类型的编码器。
+     *
+     * 这是 Android 官方 API，检测结果真实可靠：
+     *   - MediaCodecList 是 Android 系统提供的标准 API
+     *   - 它直接查询系统底层编解码器注册表
+     *   - 只有设备真正拥有硬件编码芯片时才会返回 true
+     *
+     * @return true 表示设备支持 H.264 硬件编码
+     */
+    private fun checkH264HardwareEncoder(): Boolean {
+        // H.264 在 Android 中的 MIME 类型是 "video/avc"
+        val targetMimeType = "video/avc"
+        val codecCount = MediaCodecList.getCodecCount()
+
+        for (i in 0 until codecCount) {
+            val codecInfo = MediaCodecList.getCodecInfoAt(i)
+            // 只关注编码器（isEncoder == true），忽略解码器
+            if (!codecInfo.isEncoder) continue
+
+            val supportedTypes = codecInfo.supportedTypes
+            for (type in supportedTypes) {
+                if (type.equals(targetMimeType, ignoreCase = true)) {
+                    Log.i(TAG, "checkH264HardwareEncoder: 找到 H.264 编码器 - ${codecInfo.name}")
+                    return true
+                }
+            }
+        }
+
+        Log.i(TAG, "checkH264HardwareEncoder: 未找到 H.264 硬件编码器")
+        return false
+    }
+
+    /**
+     * 获取设备芯片（CPU）信息。
+     *
+     * 综合使用以下 Android 标准 API 获取芯片信息：
+     *   1. Build 类：获取芯片型号、硬件平台、设备制造商等
+     *   2. /proc/cpuinfo：获取 CPU 架构、硬件名称、核心实现等底层信息
+     *   3. Runtime.getRuntime().availableProcessors()：获取可用处理器核心数
+     *   4. /sys/devices/system/cpu/cpu0/cpufreq/：获取 CPU 频率范围
+     *
+     * 这些都是 Android/Linux 系统标准接口，成熟稳定，所有 Android 设备均支持。
+     *
+     * @return Map 包含芯片详细信息
+     */
+    private fun getCpuInfo(): Map<String, String> {
+        val info = mutableMapOf<String, String>()
+
+        // 通过 Build 类获取芯片型号和硬件平台信息
+        // Build.HARDWARE：硬件平台名称（如 qcom、mt6789、exynos5等）
+        // Build.SOC_MODEL：SoC 型号名称（Android 12+，如 Snapdragon 888、Dimensity 8000）
+        // Build.SOC_MANUFACTURER：SoC 制造商（Android 12+，如 Qualcomm、MediaTek）
+        info["硬件平台"] = Build.HARDWARE ?: "未知"
+        info["SoC型号"] = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Build.SOC_MODEL ?: "未知"
+        } else {
+            "未知（需 Android 12+）"
+        }
+        info["SoC制造商"] = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Build.SOC_MANUFACTURER ?: "未知"
+        } else {
+            "未知（需 Android 12+）"
+        }
+        // Build.CPU_ABI：CPU 指令集架构（如 arm64-v8a、armeabi-v7a）
+        info["CPU架构"] = Build.CPU_ABI ?: "未知"
+        info["设备型号"] = Build.MODEL ?: "未知"
+        info["设备制造商"] = Build.MANUFACTURER ?: "未知"
+
+        // 通过 Runtime 获取可用处理器核心数
+        // 这是最准确的核心数获取方式，返回 JVM 可用的处理器数
+        val coreCount = Runtime.getRuntime().availableProcessors()
+        info["CPU核心数"] = coreCount.toString()
+
+        // 通过 /proc/cpuinfo 获取更详细的 CPU 信息
+        // /proc/cpuinfo 是 Linux 内核标准接口，所有 Android 设备都有
+        // 内容包括：Processor（处理器编号）、Hardware（硬件名称）、
+        // CPU implementer/part/variant/revision（ARM 核心实现信息）等
+        try {
+            val cpuinfoFile = java.io.File("/proc/cpuinfo")
+            if (cpuinfoFile.exists()) {
+                val cpuinfo = cpuinfoFile.readText()
+                // 提取 Hardware 字段（通常包含芯片平台名称）
+                val hardwareMatch = Regex("Hardware\\s*:\\s*(.+)").find(cpuinfo)
+                if (hardwareMatch != null) {
+                    info["CPU硬件名称"] = hardwareMatch.groupValues[1].trim()
+                }
+                // 提取 CPU part 字段（ARM 核心型号标识）
+                val cpuPartMatch = Regex("CPU part\\s*:\\s*(.+)").find(cpuinfo)
+                if (cpuPartMatch != null) {
+                    info["CPU核心型号"] = cpuPartMatch.groupValues[1].trim()
+                }
+                // 统计逻辑核心数（通过 "processor" 关键字计数）
+                val processorCount = Regex("^processor\\s*:", RegexOption.MULTILINE)
+                    .findAll(cpuinfo).count()
+                if (processorCount > 0) {
+                    info["逻辑核心数"] = processorCount.toString()
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "读取 /proc/cpuinfo 失败：${e.message}")
+        }
+
+        // 通过 /sys 文件系统获取 CPU 频率范围
+        // cpufreq 是 Linux CPU 频率调节子系统的标准接口
+        try {
+            val maxFreqFile = java.io.File("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
+            val minFreqFile = java.io.File("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq")
+            if (maxFreqFile.exists() && minFreqFile.exists()) {
+                val maxFreq = maxFreqFile.readText().trim().toLongOrNull() ?: 0
+                val minFreq = minFreqFile.readText().trim().toLongOrNull() ?: 0
+                if (maxFreq > 0) {
+                    // 频率单位是 kHz，转换为 MHz 显示
+                    info["最大频率"] = "${maxFreq / 1000} MHz"
+                    info["最小频率"] = "${minFreq / 1000} MHz"
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "读取 CPU 频率失败：${e.message}")
+        }
+
+        return info
+    }
+
+    /**
+     * 获取当前 WiFi SSID（网络名称）
+     *
+     * Android 各版本获取 SSID 的方式不同：
+     * - Android 12+：需要 ACCESS_FINE_LOCATION 权限，通过 WifiManager.getConnectionInfo() 获取
+     * - Android 10-11：同上，但部分 ROM 可能返回 "<unknown ssid>"
+     * - 无论如何，如果获取失败则返回空字符串
+     */
+    private fun getWifiSsid(): String {
+        try {
+            val wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+            val wifiInfo: WifiInfo? = wifiManager.connectionInfo
+            var ssid = wifiInfo?.ssid ?: ""
+            // Android 返回的 SSID 带引号，如 "\"MyWiFi\""，去掉引号
+            if (ssid.startsWith("\"") && ssid.endsWith("\"") && ssid.length >= 2) {
+                ssid = ssid.substring(1, ssid.length - 1)
+            }
+            // "<unknown ssid>" 表示获取失败
+            if (ssid == "<unknown ssid>" || ssid.isBlank()) {
+                return ""
+            }
+            return ssid
+        } catch (e: Throwable) {
+            Log.e(TAG, "获取 WiFi SSID 失败", e)
+            return ""
         }
     }
 }

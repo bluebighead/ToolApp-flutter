@@ -11,6 +11,9 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_logger.dart';
+import 'user_data_manager.dart';
+import '../services/auth_service.dart';
+import '../services/sync_service.dart';
 
 /// 连接方式（与 heart_rate_page.dart 中的 ConnectionMode 对应）
 enum HeartRateConnectionMode {
@@ -117,11 +120,17 @@ class HeartRateRecord {
 /// 心率历史记录存储 / 读取服务
 class HeartRateHistory {
   static const String _logTag = 'HeartRateHistory';
-  static const String _prefsKey = 'heart_rate_history_v1';
+  static const String _basePrefsKey = 'heart_rate_history_v1';
   static const int maxEntries = 100; // 容量上限
+
+  /// 获取当前用户的 SharedPreferences key
+  static String get _prefsKey => UserDataManager.instance.prefsKey(_basePrefsKey);
 
   /// 内存缓存
   static List<HeartRateRecord>? _cache;
+
+  /// 清除内存缓存（用户切换时调用）
+  static void clearCache() => _cache = null;
 
   /// 加载所有历史（按时间倒序）
   static Future<List<HeartRateRecord>> loadAll() async {
@@ -161,6 +170,8 @@ class HeartRateHistory {
       _logTag,
       '添加心率历史：avg=${record.avgBpm} samples=${record.samples} duration=${record.durationText}',
     );
+    // 后台同步到服务器（不阻塞本地操作）
+    _triggerSync();
   }
 
   /// 清空所有历史
@@ -199,4 +210,15 @@ class HeartRateHistory {
       AppLogger.e(_logTag, '持久化心率历史失败', e, st);
     }
   }
+}
+
+/// 后台同步辅助：登录状态下触发全量数据同步（fire-and-forget）
+void _triggerSync() {
+  Future.microtask(() async {
+    try {
+      if (AuthService.instance.isLoggedIn && !SyncService.instance.isSyncing) {
+        await SyncService.instance.syncAll();
+      }
+    } catch (_) {}
+  });
 }

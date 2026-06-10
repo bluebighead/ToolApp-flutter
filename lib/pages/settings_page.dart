@@ -7,10 +7,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/auth_service.dart';
+import '../services/sync_service.dart';
 import '../utils/app_logger.dart';
 import '../utils/app_settings.dart';
 import '../utils/app_storage.dart';
 import '../utils/batch_convert_coordinator.dart';
+import '../utils/codec_detector.dart';
 import '../utils/convert_speed_settings.dart';
 import '../utils/saf_directory_helper.dart';
 import '../utils/video_save_settings.dart';
@@ -35,11 +38,28 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _isCalculating = false;
   bool _userDataExpanded = false; // 用户数据详情展开状态
 
+  // 编解码器检测结果（null 表示尚未检测）
+  CodecCapability? _codecCapability;
+  bool _isDetecting = false; // 是否正在检测中
+
   @override
   void initState() {
     super.initState();
     _reloadVideoSave();
     _loadStorageInfo();
+    _loadCachedCodecCapability();
+  }
+
+  /// 加载缓存的编解码器检测结果
+  Future<void> _loadCachedCodecCapability() async {
+    final cached = await ConvertSpeedSettings.loadCodecCapability();
+    if (!mounted) return;
+    if (cached != null) {
+      setState(() {
+        _codecCapability = cached;
+      });
+      AppLogger.i('SettingsPage', '已加载缓存的编解码器检测结果');
+    }
   }
 
   /// 从 SharedPreferences 加载视频保存设置
@@ -344,6 +364,12 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _buildConvertSpeedCard(BuildContext context) {
     final theme = Theme.of(context);
     final locked = _isConverting;
+    // 根据检测结果判断各选项是否可选
+    // 未检测前，硬件编码和 ultrafast 均不可选；检测通过后才开放
+    final hasDetected = _codecCapability != null;
+    final hwSupported = _codecCapability?.supportsHardwareEncoding ?? false;
+    final ultrafastSupported = _codecCapability?.supportsUltrafast ?? false;
+
     return Card(
       elevation: 1,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -377,11 +403,129 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                   ),
                 ),
+                // 检测按钮
+                SizedBox(
+                  height: 32,
+                  child: OutlinedButton.icon(
+                    onPressed: locked || _isDetecting ? null : _runCodecDetection,
+                    icon: _isDetecting
+                        ? SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: theme.colorScheme.primary,
+                            ),
+                          )
+                        : Icon(
+                            Icons.search,
+                            size: 16,
+                            color: hasDetected
+                                ? (hwSupported && ultrafastSupported
+                                    ? Colors.green
+                                    : Colors.orange)
+                                : null,
+                          ),
+                    label: Text(
+                      _isDetecting
+                          ? '检测中'
+                          : (hasDetected ? '已检测' : '检测'),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      minimumSize: Size.zero,
+                    ),
+                  ),
+                ),
               ],
             ),
             if (locked) ...[
               const SizedBox(height: 8),
               _buildLockedBanner(),
+            ],
+            // 未检测时的提示
+            if (!hasDetected && !locked) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.blue.withValues(alpha: 0.2)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, size: 16, color: Colors.blue),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        '请先点击"检测"按钮，检测设备支持的加速模式',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.blue.shade700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            // 检测结果提示：硬件编码不支持
+            if (hasDetected && !hwSupported) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber, size: 16, color: Colors.orange),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _codecCapability!.ffmpegHasMediacodec
+                            ? 'FFmpeg 支持硬件编码，但当前设备无 H.264 硬件编码器'
+                            : '当前设备不支持硬件编码',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.orange.shade800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            // 检测结果提示：ultrafast 不支持
+            if (hasDetected && !ultrafastSupported) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber, size: 16, color: Colors.orange),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        '当前 FFmpeg 未编译 libx264，不支持 ultrafast',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.orange.shade800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ],
             const SizedBox(height: 10),
             FutureBuilder<ConvertSpeedMode>(
@@ -390,13 +534,59 @@ class _SettingsPageState extends State<SettingsPage> {
                 final mode = snapshot.data ?? ConvertSpeedMode.off;
                 return Column(
                   children: ConvertSpeedMode.values.map((m) {
+                    // 判断该选项是否可选
+                    // 核心逻辑：硬件编码和 ultrafast 必须检测通过才可选
+                    bool isDisabled = locked;
+                    String? disabledHint;
+                    if (!locked) {
+                      if (m == ConvertSpeedMode.hardware) {
+                        if (!hasDetected) {
+                          isDisabled = true;
+                          disabledHint = '未检测';
+                        } else if (!hwSupported) {
+                          isDisabled = true;
+                          disabledHint = '设备不支持';
+                        }
+                      }
+                      if (m == ConvertSpeedMode.ultrafast) {
+                        if (!hasDetected) {
+                          isDisabled = true;
+                          disabledHint = '未检测';
+                        } else if (!ultrafastSupported) {
+                          isDisabled = true;
+                          disabledHint = 'FFmpeg 不支持';
+                        }
+                      }
+                    }
                     return RadioListTile<ConvertSpeedMode>(
-                      title: Text(_speedModeLabel(m)),
+                      title: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(_speedModeLabel(m)),
+                          if (disabledHint != null) ...[
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: Colors.red.withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                disabledHint,
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.red,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
                       subtitle: Text(_speedModeDesc(m)),
                       value: m,
                       groupValue: mode,
-                      // v1.6.55+ 修复：转换进行中禁止修改加速模式
-                      onChanged: locked
+                      onChanged: isDisabled
                           ? null
                           : (v) {
                               if (v != null) {
@@ -411,6 +601,234 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// 执行编解码器能力检测
+  Future<void> _runCodecDetection() async {
+    setState(() => _isDetecting = true);
+    try {
+      final capability = await CodecDetector.detect();
+      if (!mounted) return;
+      setState(() {
+        _codecCapability = capability;
+        _isDetecting = false;
+      });
+
+      // 缓存检测结果到 SharedPreferences，下次打开设置页无需重新检测
+      await ConvertSpeedSettings.saveCodecCapability(capability);
+
+      // 如果当前选中的模式不再支持，自动回退到"关闭"
+      if (capability != null) {
+        final currentMode = await ConvertSpeedSettings.load();
+        bool needFallback = false;
+        if (currentMode == ConvertSpeedMode.hardware &&
+            !capability.supportsHardwareEncoding) {
+          needFallback = true;
+        }
+        if (currentMode == ConvertSpeedMode.ultrafast &&
+            !capability.supportsUltrafast) {
+          needFallback = true;
+        }
+        if (needFallback && mounted) {
+          await ConvertSpeedSettings.save(ConvertSpeedMode.off);
+          setState(() {});
+        }
+      }
+
+      // 检测完成后弹出结果提示框
+      if (mounted && capability != null) {
+        _showDetectionResultDialog(capability);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isDetecting = false);
+      AppLogger.e('SettingsPage', '编解码器检测失败：$e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('检测失败：$e')),
+        );
+      }
+    }
+  }
+
+  /// 显示检测结果提示框
+  void _showDetectionResultDialog(CodecCapability capability) {
+    // 构建检测结果内容
+    final List<Widget> items = [];
+
+    // 硬件编码检测结果
+    items.add(_buildDetectionItem(
+      icon: Icons.memory,
+      title: '硬件编码（h264_mediacodec）',
+      supported: capability.supportsHardwareEncoding,
+      detail: capability.supportsHardwareEncoding
+          ? '设备支持 H.264 硬件编码，可使用硬件加速模式'
+          : (capability.ffmpegHasMediacodec
+              ? 'FFmpeg 已编译 mediacodec，但设备无 H.264 硬件编码器'
+              : '当前设备不支持硬件编码'),
+    ));
+
+    // ultrafast 检测结果
+    items.add(_buildDetectionItem(
+      icon: Icons.bolt,
+      title: 'Ultrafast 预设（libx264）',
+      supported: capability.supportsUltrafast,
+      detail: capability.supportsUltrafast
+          ? 'FFmpeg 已编译 libx264，可使用 ultrafast 预设'
+          : '当前 FFmpeg 未编译 libx264，不支持 ultrafast',
+    ));
+
+    // 芯片信息区域
+    if (capability.cpuInfo.isNotEmpty) {
+      items.add(const Divider(height: 24, thickness: 0.5));
+      items.add(Row(
+        children: [
+          const Icon(Icons.developer_board, size: 18, color: Colors.grey),
+          const SizedBox(width: 6),
+          Text('芯片信息', style: TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
+            color: Colors.grey.shade700,
+          )),
+        ],
+      ));
+      items.add(const SizedBox(height: 6));
+      // 按优先级排序显示芯片信息
+      final orderedKeys = [
+        'SoC制造商', 'SoC型号', '设备制造商', '设备型号',
+        'CPU架构', 'CPU核心数', '逻辑核心数',
+        'CPU硬件名称', 'CPU核心型号',
+        '最大频率', '最小频率', '硬件平台',
+      ];
+      for (final key in orderedKeys) {
+        final value = capability.cpuInfo[key];
+        if (value != null && value != '未知' && value.isNotEmpty) {
+          items.add(_buildCpuInfoRow(key, value));
+        }
+      }
+      // 显示剩余未在排序列表中的信息
+      for (final entry in capability.cpuInfo.entries) {
+        if (!orderedKeys.contains(entry.key) &&
+            entry.value != '未知' &&
+            entry.value.isNotEmpty) {
+          items.add(_buildCpuInfoRow(entry.key, entry.value));
+        }
+      }
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(
+              capability.supportsHardwareEncoding &&
+                      capability.supportsUltrafast
+                  ? Icons.check_circle
+                  : Icons.info,
+              color: capability.supportsHardwareEncoding &&
+                      capability.supportsUltrafast
+                  ? Colors.green
+                  : Colors.orange,
+              size: 24,
+            ),
+            const SizedBox(width: 8),
+            const Text('检测结果', style: TextStyle(fontSize: 18)),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: items,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 构建芯片信息行
+  Widget _buildCpuInfoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 80,
+            child: Text(label, style: TextStyle(
+              fontSize: 12,
+              color: Colors.grey.shade500,
+            )),
+          ),
+          Expanded(
+            child: Text(value, style: TextStyle(
+              fontSize: 12,
+              color: Colors.grey.shade800,
+              fontWeight: FontWeight.w500,
+            )),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 构建单个检测项
+  Widget _buildDetectionItem({
+    required IconData icon,
+    required String title,
+    required bool supported,
+    required String detail,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 20,
+              color: supported ? Colors.green : Colors.orange),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(title, style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14)),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: supported
+                            ? Colors.green.withValues(alpha: 0.1)
+                            : Colors.orange.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        supported ? '可用' : '不可用',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: supported ? Colors.green : Colors.orange,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(detail, style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1056,6 +1474,489 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  // ============================================================
+  // v1.23.0+ 新增：账号与同步相关卡片
+  // ============================================================
+
+  /// 服务器地址设置卡片
+  Widget _buildServerUrlCard(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      elevation: 1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primary.withValues(alpha: 0.12),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.dns_outlined,
+                    color: theme.colorScheme.primary,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    '服务器地址',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest
+                    .withValues(alpha: 0.4),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.link, size: 16, color: Colors.grey.shade700),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      appSettings.serverUrl,
+                      style: TextStyle(fontSize: 13, color: Colors.grey.shade800),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '修改后需重启 App 生效',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.tonalIcon(
+                    onPressed: () => _showEditServerUrlDialog(context),
+                    icon: const Icon(Icons.edit_outlined, size: 18),
+                    label: const Text('修改服务器地址'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                // 重置为默认地址按钮
+                FilledButton.tonalIcon(
+                  onPressed: () async {
+                    await appSettings.setServerUrl(AppSettings.defaultServerUrl);
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('已重置为默认地址: ${AppSettings.defaultServerUrl}')),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.restore, size: 18),
+                  label: const Text('重置'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 同步数据卡片
+  Widget _buildSyncCard(BuildContext context) {
+    final theme = Theme.of(context);
+    final isLoggedIn = AuthService.instance.isLoggedIn;
+    final isGuest = AuthService.instance.isGuestMode;
+    final isSyncing = SyncService.instance.isSyncing;
+
+    // 游客模式下显示提示
+    if (isGuest) {
+      return Card(
+        elevation: 1,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: Colors.orange.withValues(alpha: 0.12),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.cloud_off_outlined, color: Colors.orange),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      '数据同步',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                '游客模式下数据仅保存在本地，登录账号后可同步到服务器',
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  onPressed: () => _onGuestLogin(),
+                  icon: const Icon(Icons.login, size: 18),
+                  label: const Text('登录账号'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      elevation: 1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primary.withValues(alpha: 0.12),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.cloud_sync_outlined,
+                    color: isLoggedIn
+                        ? theme.colorScheme.primary
+                        : Colors.grey,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    '数据同步',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              isLoggedIn
+                  ? '将本地数据上传到服务器（全量覆盖）'
+                  : '请先登录后再同步数据',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.tonalIcon(
+                onPressed: (!isLoggedIn || isSyncing)
+                    ? null
+                    : () => _onSyncData(),
+                icon: isSyncing
+                    ? SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: theme.colorScheme.primary,
+                        ),
+                      )
+                    : const Icon(Icons.upload_outlined, size: 18),
+                label: Text(isSyncing ? '同步中...' : '立即同步'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 登出按钮卡片
+  Widget _buildLogoutCard(BuildContext context) {
+    final theme = Theme.of(context);
+    final isLoggedIn = AuthService.instance.isLoggedIn;
+    final isGuest = AuthService.instance.isGuestMode;
+
+    // 游客模式下显示登录入口
+    if (isGuest) {
+      return Card(
+        elevation: 1,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: Colors.orange.withValues(alpha: 0.12),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.person_outline, color: Colors.orange),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          '游客模式',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                        ),
+                        Text(
+                          '数据仅保存在本地，登录后可同步到服务器',
+                          style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: () => _onGuestLogin(),
+                  icon: const Icon(Icons.login, size: 18),
+                  label: const Text('登录账号'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (!isLoggedIn) {
+      return Card(
+        elevation: 1,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: Colors.grey.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.person_off_outlined, color: Colors.grey),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '未登录',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                    ),
+                    Text(
+                      '登录后可同步数据到服务器',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      elevation: 1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primary.withValues(alpha: 0.12),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.person_outline,
+                    color: theme.colorScheme.primary,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        AuthService.instance.userEmail ?? '已登录',
+                        style: const TextStyle(
+                            fontSize: 14, fontWeight: FontWeight.w500),
+                      ),
+                      Text(
+                        '登录状态：已登录',
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () => _onLogout(),
+                icon: const Icon(Icons.logout, size: 18),
+                label: const Text('退出登录'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.red,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 修改服务器地址弹窗
+  void _showEditServerUrlDialog(BuildContext context) {
+    final controller = TextEditingController(text: appSettings.serverUrl);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('修改服务器地址'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.url,
+          decoration: const InputDecoration(
+            labelText: '服务器 URL',
+            hintText: 'http://192.168.x.x:8000',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              final url = controller.text.trim();
+              if (url.isNotEmpty) {
+                await appSettings.setServerUrl(url);
+                if (ctx.mounted) Navigator.pop(ctx);
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('服务器地址已更新，请重启 App 生效')),
+                  );
+                }
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 执行同步
+  Future<void> _onSyncData() async {
+    final result = await SyncService.instance.syncAll();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(result.summary)),
+    );
+  }
+
+  /// 执行登出
+  Future<void> _onLogout() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('确认退出登录'),
+        content: const Text('退出后本地数据仍保留，但无法同步到服务器。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('退出登录'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await AuthService.instance.signOut();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已退出登录')),
+        );
+      }
+    }
+  }
+
+  /// 游客模式下点击"登录账号"
+  /// 退出游客模式，回到登录页
+  Future<void> _onGuestLogin() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('登录账号'),
+        content: const Text('登录后，本地数据将自动同步到服务器。是否继续？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('继续'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await AuthService.instance.exitGuestMode();
+      // AuthWrapper 会自动检测状态切换到登录页
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // 进入设置页面时记录日志
@@ -1068,7 +1969,7 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
       body: SafeArea(
         child: ListenableBuilder(
-          listenable: appSettings,
+          listenable: Listenable.merge([appSettings, AuthService.instance]),
           builder: (context, _) {
             return SingleChildScrollView(
               padding: const EdgeInsets.all(16),
@@ -1147,6 +2048,30 @@ class _SettingsPageState extends State<SettingsPage> {
                   const SizedBox(height: 8),
                   // v1.6.56+ 新增：7. 存储空间管理
                   _buildStorageCard(context),
+                  const SizedBox(height: 20),
+                  // 分组标题：账号与同步
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 8,
+                    ),
+                    child: Text(
+                      '账号与同步',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                  ),
+                  // 8. 服务器地址
+                  _buildServerUrlCard(context),
+                  const SizedBox(height: 8),
+                  // 9. 同步数据
+                  _buildSyncCard(context),
+                  const SizedBox(height: 8),
+                  // 10. 登出按钮
+                  _buildLogoutCard(context),
                   const SizedBox(height: 16),
                   // 提示信息
                   Container(
@@ -1189,7 +2114,3 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 }
-
-// 全局可访问的 AppSettings 实例（单例）
-// 方便在任意位置通过 appSettings 访问/修改设置
-final AppSettings appSettings = AppSettings();

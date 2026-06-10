@@ -1,0 +1,16 @@
+{
+  "name": "toolapp-server",
+  "version": "1.0.0",
+  "description": "ToolApp 轻量认证与数据同步服务器",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "better-sqlite3": "^11.0.0",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "cors": "^2.8.5"
+  }
+}

@@ -12,6 +12,11 @@ class AppSettings extends ChangeNotifier {
   // SharedPreferences key 常量
   static const String _kAllowRotation = 'settings_allow_rotation';
   static const String _kDarkMode = 'settings_dark_mode';
+  static const String _kServerUrl = 'settings_server_url';
+
+  // 默认服务器地址（自建轻量服务器，局域网 IP）
+  static const String defaultServerUrl = 'http://192.168.31.13:3000';
+  static const String _defaultServerUrl = defaultServerUrl;
 
   // 内部 SharedPreferences 实例
   SharedPreferences? _prefs;
@@ -24,6 +29,10 @@ class AppSettings extends ChangeNotifier {
   bool _darkMode = false;
   bool get darkMode => _darkMode;
 
+  // 服务器地址
+  String _serverUrl = _defaultServerUrl;
+  String get serverUrl => _serverUrl;
+
   // 初始化设置：从 SharedPreferences 读取已保存的偏好
   // 必须在 runApp 之前调用一次以加载历史数据
   Future<void> load() async {
@@ -31,15 +40,17 @@ class AppSettings extends ChangeNotifier {
       _prefs = await SharedPreferences.getInstance();
       _allowRotation = _prefs?.getBool(_kAllowRotation) ?? false;
       _darkMode = _prefs?.getBool(_kDarkMode) ?? false;
+      _serverUrl = _prefs?.getString(_kServerUrl) ?? _defaultServerUrl;
       AppLogger.i(
         'AppSettings',
-        '设置已加载 - 屏幕旋转: $_allowRotation, 暗色模式: $_darkMode',
+        '设置已加载 - 屏幕旋转: $_allowRotation, 暗色模式: $_darkMode, 服务器: $_serverUrl',
       );
     } catch (e, st) {
       // 加载失败时使用默认值，并记录错误
       AppLogger.e('AppSettings', '加载设置失败：$e', e, st);
       _allowRotation = false;
       _darkMode = false;
+      _serverUrl = _defaultServerUrl;
     }
     // 应用加载到的初始屏幕方向
     _applyOrientation(_allowRotation);
@@ -70,6 +81,15 @@ class AppSettings extends ChangeNotifier {
     notifyListeners();
   }
 
+  // 设置服务器地址
+  Future<void> setServerUrl(String value) async {
+    if (_serverUrl == value) return;
+    _serverUrl = value;
+    AppLogger.i('AppSettings', '服务器地址 -> $value');
+    await _prefs?.setString(_kServerUrl, value);
+    notifyListeners();
+  }
+
   // 将屏幕方向设置应用到系统
   // 当关闭时仅允许竖屏；开启时允许所有方向（随屏幕旋转）
   void _applyOrientation(bool allow) {
@@ -89,3 +109,6 @@ class AppSettings extends ChangeNotifier {
     }
   }
 }
+
+// 全局 AppSettings 实例（在 main() 中 load 一次即可）
+final appSettings = AppSettings();

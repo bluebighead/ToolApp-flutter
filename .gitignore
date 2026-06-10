@@ -43,3 +43,23 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# ToolApp Admin - 桌面管理端
+/toolapp-admin/node_modules/
+/toolapp-admin/dist/
+/toolapp-admin/release/
+/toolapp-admin/*.log
+# ToolApp Admin - 调试测试脚本（不提交）
+/toolapp-admin/test_*.js
+/toolapp-admin/check_db*.js
+/toolapp-admin/electron/main_debug.js
+/toolapp-admin/electron/main_minimal.js
+/toolapp-admin/electron/db.js
+
+# ToolApp Server - 后端服务
+/toolapp-server/node_modules/
+# ToolApp Server - 数据库文件（本地数据不提交）
+/toolapp-server/data/*.db
+/toolapp-server/data/*.db-shm
+/toolapp-server/data/*.db-wal
+/toolapp-server/*.log

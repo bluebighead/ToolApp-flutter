@@ -4,6 +4,11 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'app_logger.dart';
+import 'user_data_manager.dart';
+import '../services/auth_service.dart';
+import '../services/sync_service.dart';
+
 /// 单次测速记录
 class PingRecord {
   /// 测速时间（本地时区）
@@ -88,8 +93,11 @@ class PingRecordStats {
 
 /// 历史记录读写工具
 class NetworkSpeedHistory {
-  /// SharedPreferences 键名
-  static const String _key = 'network_speed_history';
+  /// SharedPreferences 键名基础部分
+  static const String _baseKey = 'network_speed_history';
+
+  /// 获取当前用户的 SharedPreferences key
+  static String get _key => UserDataManager.instance.prefsKey(_baseKey);
 
   /// 最大保存条数
   static const int _maxRecords = 20;
@@ -108,6 +116,8 @@ class NetworkSpeedHistory {
     final jsonString = jsonEncode(jsonList);
     // 写回 SharedPreferences
     await prefs.setString(_key, jsonString);
+    // 后台同步到服务器
+    _triggerSync();
   }
 
   /// 读取全部记录：按 timestamp 倒序（最新在前）
@@ -167,4 +177,15 @@ class NetworkSpeedHistory {
       lossRate: loss,
     );
   }
+}
+
+/// 后台同步辅助：登录状态下触发全量数据同步（fire-and-forget）
+void _triggerSync() {
+  Future.microtask(() async {
+    try {
+      if (AuthService.instance.isLoggedIn && !SyncService.instance.isSyncing) {
+        await SyncService.instance.syncAll();
+      }
+    } catch (_) {}
+  });
 }

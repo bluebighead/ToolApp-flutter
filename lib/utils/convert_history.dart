@@ -13,6 +13,9 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_logger.dart';
+import 'user_data_manager.dart';
+import '../services/auth_service.dart';
+import '../services/sync_service.dart';
 import 'ffmpeg_service.dart' show VideoFormat, VideoQuality;
 
 /// 转换状态
@@ -171,11 +174,17 @@ class ConvertHistoryEntry {
 /// 历史记录存储 / 读取服务
 class ConvertHistory {
   static const String _logTag = 'ConvertHistory';
-  static const String _prefsKey = 'convert_history_v1';
+  static const String _basePrefsKey = 'convert_history_v1';
   static const int maxEntries = 100; // 容量上限
+
+  /// 获取当前用户的 SharedPreferences key
+  static String get _prefsKey => UserDataManager.instance.prefsKey(_basePrefsKey);
 
   /// 内存缓存：避免每次都从 SharedPreferences 读
   static List<ConvertHistoryEntry>? _cache;
+
+  /// 清除内存缓存（用户切换时调用）
+  static void clearCache() => _cache = null;
 
   /// 加载所有历史（按时间倒序）
   static Future<List<ConvertHistoryEntry>> loadAll() async {
@@ -215,6 +224,8 @@ class ConvertHistory {
       _logTag,
       '添加历史：id=${entry.id} status=${entry.status.name} input=${entry.inputDisplayName}',
     );
+    // 后台同步到服务器
+    _triggerSync();
   }
 
   /// 清空所有历史
@@ -291,4 +302,15 @@ class SizeFormat {
     }
     return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
   }
+}
+
+/// 后台同步辅助：登录状态下触发全量数据同步（fire-and-forget）
+void _triggerSync() {
+  Future.microtask(() async {
+    try {
+      if (AuthService.instance.isLoggedIn && !SyncService.instance.isSyncing) {
+        await SyncService.instance.syncAll();
+      }
+    } catch (_) {}
+  });
 }

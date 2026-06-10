@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/tool_item.dart';
+import '../services/auth_service.dart';
 import '../utils/app_logger.dart';
 import '../widgets/tool_card.dart';
 import 'about_page.dart';
@@ -13,6 +14,7 @@ import 'network_speed_page.dart';
 import 'settings_page.dart';
 import 'video_convert_page.dart';
 import 'heart_rate_page.dart';
+import 'fun_tools_page.dart';
 
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
@@ -47,6 +49,12 @@ class HomePage extends StatelessWidget {
       icon: Icons.favorite,
       color: Colors.red,
       pageBuilder: (_) => const HeartRatePage(),
+    ),
+    ToolItem(
+      name: '趣味工具',
+      icon: Icons.toys,
+      color: Colors.deepPurple,
+      pageBuilder: (_) => const FunToolsPage(),
     ),
   ];
 
@@ -88,6 +96,17 @@ class HomePage extends StatelessWidget {
   // 默认从左向右滑出（Flutter Drawer 内置动画即为从左滑入/滑出）
   Widget _buildDrawer(BuildContext context) {
     final theme = Theme.of(context);
+    final isLoggedIn = AuthService.instance.isLoggedIn;
+    final isGuest = AuthService.instance.isGuestMode;
+
+    // 根据登录状态显示不同的用户信息
+    final displayEmail = isLoggedIn
+        ? (AuthService.instance.userEmail ?? '已登录')
+        : (isGuest ? '游客模式' : 'ToolApp');
+    final displayHint = isLoggedIn
+        ? '登录状态：已登录'
+        : (isGuest ? '数据仅保存在本地' : '');
+
     return Drawer(
       // 抽屉整体背景色
       backgroundColor: theme.colorScheme.surface,
@@ -95,7 +114,7 @@ class HomePage extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // 抽屉顶部：应用 Logo + 名称
+            // 抽屉顶部：应用 Logo + 名称 + 用户信息
             Container(
               padding: const EdgeInsets.fromLTRB(20, 24, 20, 20),
               decoration: BoxDecoration(
@@ -117,14 +136,16 @@ class HomePage extends StatelessWidget {
                       color: theme.colorScheme.primary,
                       shape: BoxShape.circle,
                     ),
-                    child: const Icon(
-                      Icons.handyman_outlined,
+                    child: Icon(
+                      isGuest
+                          ? Icons.person_outline
+                          : Icons.handyman_outlined,
                       color: Colors.white,
                       size: 26,
                     ),
                   ),
                   const SizedBox(width: 12),
-                  // 应用名称
+                  // 应用名称 + 用户邮箱/游客标识
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -139,18 +160,49 @@ class HomePage extends StatelessWidget {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'ToolApp',
+                          displayEmail,
                           style: TextStyle(
                             fontSize: 12,
-                            color: Colors.grey.shade600,
+                            color: isGuest
+                                ? Colors.orange.shade700
+                                : Colors.grey.shade600,
                           ),
+                          overflow: TextOverflow.ellipsis,
                         ),
+                        if (displayHint.isNotEmpty) ...[
+                          const SizedBox(height: 1),
+                          Text(
+                            displayHint,
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: isGuest
+                                  ? Colors.orange.shade600
+                                  : Colors.grey.shade500,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
                 ],
               ),
             ),
+            // 游客模式下显示"登录账号"入口
+            if (isGuest)
+              ListTile(
+                leading: Icon(
+                  Icons.login,
+                  color: theme.colorScheme.primary,
+                ),
+                title: const Text('登录账号'),
+                subtitle: const Text('登录后数据可同步到服务器'),
+                onTap: () {
+                  AppLogger.i('HomePage', '点击菜单 -> 登录账号');
+                  Navigator.pop(context);
+                  // 退出游客模式，回到登录页
+                  AuthService.instance.exitGuestMode();
+                },
+              ),
             // 菜单项：设置
             ListTile(
               leading: Icon(
