@@ -23,6 +23,39 @@ class PeriodRecordTab extends StatefulWidget {
 }
 
 class _PeriodRecordTabState extends State<PeriodRecordTab> {
+  // 筛选状态
+  DateTime? _filterStartDate;
+  DateTime? _filterEndDate;
+  String _filterMode = 'all'; // 'all'=全部, 'precise'=精确, 'fuzzy'=模糊
+
+  /// 应用筛选条件
+  List<PeriodRecord> _applyFilters(List<PeriodRecord> records) {
+    return records.where((r) {
+      // 日期范围筛选
+      if (_filterStartDate != null) {
+        final start = DateTime(
+            _filterStartDate!.year, _filterStartDate!.month, _filterStartDate!.day);
+        if (r.startDate.isBefore(start)) return false;
+      }
+      if (_filterEndDate != null) {
+        final end = DateTime(
+            _filterEndDate!.year, _filterEndDate!.month, _filterEndDate!.day);
+        if (r.startDate.isAfter(end)) return false;
+      }
+      // 模式筛选
+      if (_filterMode != 'all' && r.mode != _filterMode) return false;
+      return true;
+    }).toList();
+  }
+
+  /// 清除所有筛选条件
+  void _clearFilters() {
+    setState(() {
+      _filterStartDate = null;
+      _filterEndDate = null;
+      _filterMode = 'all';
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -32,15 +65,25 @@ class _PeriodRecordTabState extends State<PeriodRecordTab> {
     final sortedRecords = List<PeriodRecord>.from(widget.records)
       ..sort((a, b) => b.startDate.compareTo(a.startDate));
 
+    // 应用筛选条件
+    final hasActiveFilters = _filterStartDate != null ||
+        _filterEndDate != null ||
+        _filterMode != 'all';
+    final filteredRecords = hasActiveFilters
+        ? _applyFilters(sortedRecords)
+        : sortedRecords;
+
     return Column(
       children: [
+        // 筛选栏
+        _buildFilterBar(theme),
         // 经期记录列表
         Expanded(
-          child: sortedRecords.isEmpty
-              ? _buildEmptyState(theme)
+          child: filteredRecords.isEmpty
+              ? _buildEmptyState(theme, hasActiveFilters)
               : ListView.builder(
                   padding: const EdgeInsets.all(12),
-                  itemCount: sortedRecords.length + 1, // +1 for section header
+                  itemCount: filteredRecords.length + 1, // +1 for section header
                   itemBuilder: (context, index) {
                     if (index == 0) {
                       return Padding(
@@ -49,7 +92,7 @@ class _PeriodRecordTabState extends State<PeriodRecordTab> {
                           children: [
                             Text('经期记录', style: theme.textTheme.titleSmall),
                             const Spacer(),
-                            Text('共 ${sortedRecords.length} 条',
+                            Text('共 ${filteredRecords.length} 条',
                                 style: TextStyle(
                                     fontSize: 12,
                                     color: Colors.grey.shade500)),
@@ -57,7 +100,7 @@ class _PeriodRecordTabState extends State<PeriodRecordTab> {
                         ),
                       );
                     }
-                    final record = sortedRecords[index - 1];
+                    final record = filteredRecords[index - 1];
                     return _buildRecordItem(theme, record);
                   },
                 ),
@@ -69,7 +112,29 @@ class _PeriodRecordTabState extends State<PeriodRecordTab> {
   }
 
   /// 空状态
-  Widget _buildEmptyState(ThemeData theme) {
+  Widget _buildEmptyState(ThemeData theme, bool hasActiveFilters) {
+    if (hasActiveFilters) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.filter_alt_off, size: 64, color: Colors.grey.shade300),
+            const SizedBox(height: 16),
+            Text('没有匹配的记录',
+                style: TextStyle(fontSize: 16, color: Colors.grey.shade500)),
+            const SizedBox(height: 8),
+            Text('请调整筛选条件后重试',
+                style: TextStyle(fontSize: 13, color: Colors.grey.shade400)),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: _clearFilters,
+              icon: const Icon(Icons.clear_all, size: 16),
+              label: const Text('清除筛选'),
+            ),
+          ],
+        ),
+      );
+    }
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -233,6 +298,162 @@ class _PeriodRecordTabState extends State<PeriodRecordTab> {
                         TextStyle(fontSize: 11, color: Colors.grey.shade500)),
               ],
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 筛选栏
+  Widget _buildFilterBar(ThemeData theme) {
+    final hasActiveFilters = _filterStartDate != null ||
+        _filterEndDate != null ||
+        _filterMode != 'all';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 第一行：日期范围筛选
+          Row(
+            children: [
+              Text('日期：',
+                  style: TextStyle(
+                      fontSize: 12, color: Colors.grey.shade600)),
+              // 开始日期
+              InkWell(
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: _filterStartDate ?? DateTime.now(),
+                    firstDate: DateTime(2020, 1, 1),
+                    lastDate: DateTime.now(),
+                  );
+                  if (picked != null) {
+                    setState(() => _filterStartDate = picked);
+                  }
+                },
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey.shade300),
+                    borderRadius: BorderRadius.circular(6),
+                    color: _filterStartDate != null ? Colors.blue.shade50 : null,
+                  ),
+                  child: Text(
+                    _filterStartDate != null ? _formatDateShort(_filterStartDate!) : '开始',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: _filterStartDate != null ? Colors.blue.shade700 : Colors.grey.shade500,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Text('~', style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
+              const SizedBox(width: 4),
+              // 结束日期
+              InkWell(
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: _filterEndDate ?? DateTime.now(),
+                    firstDate: DateTime(2020, 1, 1),
+                    lastDate: DateTime.now(),
+                  );
+                  if (picked != null) {
+                    setState(() => _filterEndDate = picked);
+                  }
+                },
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey.shade300),
+                    borderRadius: BorderRadius.circular(6),
+                    color: _filterEndDate != null ? Colors.blue.shade50 : null,
+                  ),
+                  child: Text(
+                    _filterEndDate != null ? _formatDateShort(_filterEndDate!) : '结束',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: _filterEndDate != null ? Colors.blue.shade700 : Colors.grey.shade500,
+                    ),
+                  ),
+                ),
+              ),
+              const Spacer(),
+              // 清除筛选按钮
+              if (hasActiveFilters)
+                InkWell(
+                  onTap: _clearFilters,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.red.shade50,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.clear, size: 14, color: Colors.red.shade600),
+                        const SizedBox(width: 2),
+                        Text('清除',
+                            style: TextStyle(
+                                fontSize: 11, color: Colors.red.shade600)),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // 第二行：模式筛选
+          Row(
+            children: [
+              Text('模式：',
+                  style: TextStyle(
+                      fontSize: 12, color: Colors.grey.shade600)),
+              const SizedBox(width: 4),
+              _buildModeFilterChip('全部', 'all'),
+              const SizedBox(width: 4),
+              _buildModeFilterChip('精确', 'precise'),
+              const SizedBox(width: 4),
+              _buildModeFilterChip('模糊', 'fuzzy'),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 模式筛选 Chip
+  Widget _buildModeFilterChip(String label, String value) {
+    final isSelected = _filterMode == value;
+    return InkWell(
+      onTap: () => setState(() => _filterMode = value),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: isSelected ? Colors.green.shade100 : Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isSelected ? Colors.green.shade400 : Colors.grey.shade300,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: isSelected ? Colors.green.shade700 : Colors.grey.shade600,
+            fontWeight: isSelected ? FontWeight.w500 : FontWeight.normal,
           ),
         ),
       ),
