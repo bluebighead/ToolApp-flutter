@@ -10,6 +10,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'pages/auth/login_page.dart';
 import 'pages/home_page.dart';
 import 'services/auth_service.dart';
+import 'services/device_info_service.dart';
 import 'services/online_overlay_manager.dart';
 import 'services/session_tracker.dart';
 import 'services/sync_service.dart';
@@ -209,6 +210,17 @@ class _AuthWrapperState extends State<AuthWrapper> {
     // 启动时自动检查更新（延迟2秒，等待页面渲染完成）
     Future.delayed(const Duration(seconds: 2), () {
       _autoCheckUpdate();
+    });
+    // 启动时延迟5秒，尝试在后台异步上传一次设备参数（非强制）
+    Future.delayed(const Duration(seconds: 5), () async {
+      try {
+        if (AuthService.instance.isLoggedIn) {
+          AppLogger.i('AuthWrapper', '启动后延迟上传设备参数');
+          await DeviceInfoService.instance.uploadDeviceInfo();
+        }
+      } catch (e) {
+        AppLogger.w('AuthWrapper', '启动后上传设备参数失败: $e');
+      }
     });
   }
 

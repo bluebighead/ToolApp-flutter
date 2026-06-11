@@ -92,6 +92,18 @@ class AuthService extends ChangeNotifier {
     }
 
     AppLogger.i('AuthService', '认证服务初始化完成 - 已登录: $isLoggedIn, 游客模式: $_isGuestMode, 设备令牌: $_deviceToken');
+
+    // 如果已有登录态，启动后异步尝试上传一次设备参数（受 24h 间隔限制）
+    if (isLoggedIn) {
+      Future<void>(() async {
+        try {
+          AppLogger.i('AuthService', '检测到已有登录态，异步上传设备参数');
+          await DeviceInfoService.instance.uploadDeviceInfo();
+        } catch (e) {
+          AppLogger.w('AuthService', '启动后上传设备参数失败：$e');
+        }
+      });
+    }
   }
 
   /// 生成设备唯一标识
@@ -270,10 +282,10 @@ class AuthService extends ChangeNotifier {
         UserDataManager.instance.clearAllCaches();
         AppLogger.i('AuthService', '注册成功 - 用户ID: $userId');
 
-        // 注册成功后异步上传设备参数（不阻塞注册流程）
+        // 注册成功后异步上传设备参数（强制，立即生效）
         Future<void>(() async {
           try {
-            await DeviceInfoService.instance.uploadDeviceInfo();
+            await DeviceInfoService.instance.uploadDeviceInfo(force: true);
           } catch (e) {
             AppLogger.w('AuthService', '设备参数上传失败（不影响注册）: $e');
           }
@@ -332,10 +344,10 @@ class AuthService extends ChangeNotifier {
         UserDataManager.instance.clearAllCaches();
         AppLogger.i('AuthService', '登录成功');
 
-        // 登录成功后异步上传设备参数（不阻塞登录流程）
+        // 登录成功后异步上传设备参数（强制，立即生效）
         Future<void>(() async {
           try {
-            await DeviceInfoService.instance.uploadDeviceInfo();
+            await DeviceInfoService.instance.uploadDeviceInfo(force: true);
           } catch (e) {
             AppLogger.w('AuthService', '设备参数上传失败（不影响登录）: $e');
           }

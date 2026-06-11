@@ -3,11 +3,17 @@
 // 后续添加新工具时只需在 _toolList 列表中追加 ToolItem
 // 左上角提供三明治菜单按钮，点击后从左向右滑出抽屉
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/tool_item.dart';
 import '../services/auth_service.dart';
 import '../services/session_tracker.dart';
+import '../utils/app_info.dart';
 import '../utils/app_logger.dart';
+import '../utils/app_settings.dart';
 import '../widgets/tool_card.dart';
 import 'about_page.dart';
 import 'decibel_page.dart';
@@ -238,11 +244,55 @@ class HomePage extends StatelessWidget {
                 );
               },
             ),
+            // 菜单项：分享应用
+            ListTile(
+              leading: Icon(
+                Icons.share_outlined,
+                color: theme.colorScheme.primary,
+              ),
+              title: const Text('分享应用'),
+              subtitle: const Text('生成二维码，邀请朋友下载'),
+              onTap: () {
+                AppLogger.i('HomePage', '点击菜单 -> 分享应用');
+                Navigator.pop(context);
+                _showShareDialog(context);
+              },
+            ),
             // 分割线
             const Divider(height: 1),
-            // 菜单项：版本信息（仅展示）
+            // 菜单项：官网链接（小字但明显）
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: InkWell(
+                onTap: () => _openOfficialWebsite(context),
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.public,
+                        size: 16,
+                        color: theme.colorScheme.primary,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '访问官网 · ${appSettings.serverUrl.replaceFirst('http://', '').replaceFirst('https://', '')}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: theme.colorScheme.primary,
+                          fontWeight: FontWeight.w500,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            // 菜单项：版本信息（仅展示）
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               child: Text(
                 '更多功能持续开发中…',
                 style: TextStyle(
@@ -314,5 +364,207 @@ class HomePage extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  // 显示分享应用对话框：包含二维码 + 复制链接按钮
+  void _showShareDialog(BuildContext context) {
+    final theme = Theme.of(context);
+    final serverUrl = appSettings.serverUrl;
+
+    // 防御性：空 URL 时给出明确提示
+    if (serverUrl.isEmpty) {
+      AppLogger.w('HomePage', '分享应用 - serverUrl 为空');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('服务器地址未配置，请先在设置中填写')),
+      );
+      return;
+    }
+
+    // 使用 Uri 规范化拼接，避免双斜杠或缺少斜杠的问题
+    String downloadUrl;
+    try {
+      final baseUri = Uri.parse(serverUrl);
+      // 确保 path 规范化
+      final basePath = baseUri.path.endsWith('/')
+          ? baseUri.path.substring(0, baseUri.path.length - 1)
+          : baseUri.path;
+      downloadUrl = baseUri
+          .replace(
+            path: '$basePath/downloads/${AppInfo.apkFileName}',
+          )
+          .toString();
+    } catch (e) {
+      AppLogger.e('HomePage', '分享应用 - URL 解析异常: $e');
+      downloadUrl = '${serverUrl.replaceAll(RegExp(r'/$'), '')}/downloads/${AppInfo.apkFileName}';
+    }
+
+    AppLogger.d('HomePage', '分享应用 - 下载链接: $downloadUrl');
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Icon(Icons.share_outlined, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            const Text('分享应用'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              '扫描二维码或复制链接，邀请朋友下载 ToolApp',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 14, color: Colors.grey),
+            ),
+            const SizedBox(height: 20),
+            // 二维码容器
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey.shade200),
+              ),
+              child: QrImageView(
+                data: downloadUrl,
+                version: QrVersions.auto,
+                size: 180,
+                eyeStyle: const QrEyeStyle(
+                  eyeShape: QrEyeShape.square,
+                  color: Color(0xFF1d1d1f),
+                ),
+                dataModuleStyle: const QrDataModuleStyle(
+                  dataModuleShape: QrDataModuleShape.square,
+                  color: Color(0xFF1d1d1f),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primary.withValues(alpha: 0.05),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                downloadUrl,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: theme.colorScheme.primary,
+                  fontFamily: 'monospace',
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('关闭'),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              _copyLink(context, downloadUrl);
+            },
+            icon: const Icon(Icons.copy, size: 18),
+            label: const Text('复制链接'),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              _shareViaSystem(context, downloadUrl);
+            },
+            icon: const Icon(Icons.share, size: 18),
+            label: const Text('系统分享'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 复制下载链接到剪贴板
+  void _copyLink(BuildContext context, String url) async {
+    try {
+      await Clipboard.setData(ClipboardData(text: url));
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('链接已复制到剪贴板'),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 2),
+            action: SnackBarAction(
+              label: '知道了',
+              onPressed: () {},
+            ),
+          ),
+        );
+      }
+      AppLogger.i('HomePage', '下载链接已复制: $url');
+    } catch (e) {
+      AppLogger.e('HomePage', '复制链接失败: $e');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('复制失败: $e')),
+        );
+      }
+    }
+  }
+
+  // 通过系统分享功能分享下载链接
+  void _shareViaSystem(BuildContext context, String url) async {
+    try {
+      await Share.share(
+        'ToolApp 实用工具箱，下载地址：$url',
+        subject: 'ToolApp 实用工具箱 · 免费下载',
+      );
+      AppLogger.i('HomePage', '已通过系统分享功能分享: $url');
+    } catch (e) {
+      AppLogger.e('HomePage', '系统分享失败: $e');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('分享失败: $e')),
+        );
+      }
+    }
+  }
+
+  // 打开官网链接
+  void _openOfficialWebsite(BuildContext context) async {
+    final url = appSettings.serverUrl;
+    AppLogger.i('HomePage', '打开官网: $url');
+
+    if (url.isEmpty) {
+      AppLogger.w('HomePage', '官网地址为空');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('服务器地址未配置，请先在设置中填写')),
+        );
+      }
+      return;
+    }
+
+    try {
+      final uri = Uri.parse(url);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(
+          uri,
+          mode: LaunchMode.externalApplication,
+        );
+      } else {
+        if (context.mounted) {
+          _copyLink(context, url);
+        }
+      }
+    } catch (e) {
+      AppLogger.e('HomePage', '打开官网失败: $e');
+      if (context.mounted) {
+        _copyLink(context, url);
+      }
+    }
   }
 }

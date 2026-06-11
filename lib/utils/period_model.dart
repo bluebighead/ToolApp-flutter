@@ -586,10 +586,23 @@ class PeriodStorage {
       if (!await file.exists()) return null;
 
       final content = await file.readAsString();
+      if (content.trim().isEmpty) {
+        AppLogger.w('PeriodStorage', '备份文件为空');
+        return null;
+      }
       final data = jsonDecode(content) as Map<String, dynamic>;
       return data;
     } catch (e) {
       AppLogger.e('PeriodStorage', '读取文件备份失败：$e');
+      // 备份文件损坏时自动删除，避免下次继续出错
+      try {
+        final path = await _getBackupFilePath();
+        final file = File(path);
+        if (await file.exists()) {
+          await file.delete();
+          AppLogger.i('PeriodStorage', '已删除损坏的备份文件');
+        }
+      } catch (_) {}
       return null;
     }
   }
@@ -603,14 +616,26 @@ class PeriodStorage {
     if (jsonStr != null && jsonStr.isNotEmpty) {
       try {
         final List<dynamic> jsonList = jsonDecode(jsonStr);
-        final records = jsonList
-            .map((e) => PeriodRecord.fromJson(e as Map<String, dynamic>))
-            .toList();
+        final records = <PeriodRecord>[];
+        for (final item in jsonList) {
+          if (item is Map<String, dynamic>) {
+            try {
+              records.add(PeriodRecord.fromJson(item));
+            } catch (e) {
+              AppLogger.w('PeriodStorage', '单条记录解析失败，跳过：$e');
+            }
+          }
+        }
         // 同步到文件备份
         _writeBackup(records: records);
         return records;
       } catch (e) {
         AppLogger.e('PeriodStorage', '加载经期记录失败：$e');
+        // 数据损坏时清除 SharedPreferences，避免下次继续报错
+        try {
+          await prefs.remove(_kRecordsKey);
+          AppLogger.i('PeriodStorage', '已清除损坏的经期记录缓存');
+        } catch (_) {}
       }
     }
 
@@ -620,9 +645,16 @@ class PeriodStorage {
     if (backup != null && backup['records'] != null) {
       try {
         final List<dynamic> jsonList = backup['records'] as List<dynamic>;
-        final records = jsonList
-            .map((e) => PeriodRecord.fromJson(e as Map<String, dynamic>))
-            .toList();
+        final records = <PeriodRecord>[];
+        for (final item in jsonList) {
+          if (item is Map<String, dynamic>) {
+            try {
+              records.add(PeriodRecord.fromJson(item));
+            } catch (e) {
+              AppLogger.w('PeriodStorage', '备份单条记录解析失败，跳过：$e');
+            }
+          }
+        }
         // 恢复到 SharedPreferences
         await saveRecords(records);
         AppLogger.i('PeriodStorage', '从文件备份成功恢复 ${records.length} 条经期记录');
@@ -684,14 +716,25 @@ class PeriodStorage {
     if (jsonStr != null && jsonStr.isNotEmpty) {
       try {
         final List<dynamic> jsonList = jsonDecode(jsonStr);
-        final marks = jsonList
-            .map((e) => OvulationMark.fromJson(e as Map<String, dynamic>))
-            .toList();
+        final marks = <OvulationMark>[];
+        for (final item in jsonList) {
+          if (item is Map<String, dynamic>) {
+            try {
+              marks.add(OvulationMark.fromJson(item));
+            } catch (e) {
+              AppLogger.w('PeriodStorage', '单条排卵日标记解析失败，跳过：$e');
+            }
+          }
+        }
         // 同步到文件备份
         _writeBackup(ovulationMarks: marks);
         return marks;
       } catch (e) {
         AppLogger.e('PeriodStorage', '加载排卵日标记失败：$e');
+        try {
+          await prefs.remove(_kOvulationMarksKey);
+          AppLogger.i('PeriodStorage', '已清除损坏的排卵日标记缓存');
+        } catch (_) {}
       }
     }
 
@@ -701,9 +744,16 @@ class PeriodStorage {
     if (backup != null && backup['ovulationMarks'] != null) {
       try {
         final List<dynamic> jsonList = backup['ovulationMarks'] as List<dynamic>;
-        final marks = jsonList
-            .map((e) => OvulationMark.fromJson(e as Map<String, dynamic>))
-            .toList();
+        final marks = <OvulationMark>[];
+        for (final item in jsonList) {
+          if (item is Map<String, dynamic>) {
+            try {
+              marks.add(OvulationMark.fromJson(item));
+            } catch (e) {
+              AppLogger.w('PeriodStorage', '备份单条排卵日标记解析失败，跳过：$e');
+            }
+          }
+        }
         // 恢复到 SharedPreferences
         await saveOvulationMarks(marks);
         AppLogger.i('PeriodStorage', '从文件备份成功恢复 ${marks.length} 条排卵日标记');
@@ -763,6 +813,10 @@ class PeriodStorage {
         return settings;
       } catch (e) {
         AppLogger.e('PeriodStorage', '加载设置失败：$e');
+        try {
+          await prefs.remove(_kSettingsKey);
+          AppLogger.i('PeriodStorage', '已清除损坏的设置缓存');
+        } catch (_) {}
       }
     }
 

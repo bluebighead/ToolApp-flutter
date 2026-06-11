@@ -245,6 +245,25 @@ if (!fs.existsSync(DOWNLOADS_DIR)) {
 }
 app.use('/downloads', express.static(DOWNLOADS_DIR));
 
+// 官网静态文件托管（/website 路径访问官网资源）
+const WEBSITE_DIR = path.join(__dirname, 'website');
+if (!fs.existsSync(WEBSITE_DIR)) {
+  try {
+    fs.mkdirSync(WEBSITE_DIR, { recursive: true });
+  } catch (_) {}
+}
+app.use('/website', express.static(WEBSITE_DIR));
+
+// 根路径重定向到官网首页
+app.get('/', (req, res) => {
+  const indexFile = path.join(WEBSITE_DIR, 'index.html');
+  if (fs.existsSync(indexFile)) {
+    res.sendFile(indexFile);
+  } else {
+    res.status(200).send('ToolApp 服务器已启动 ✅ <a href="/downloads/">下载 APK</a>');
+  }
+});
+
 // ============================================================
 // JWT 认证中间件
 // ============================================================

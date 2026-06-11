@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.33.0+153
+version: 1.34.0+154
 
 environment:
   sdk: ^3.11.1
@@ -70,6 +70,8 @@ dependencies:
   url_launcher: ^6.3.1
   # 文件分享：转换完成后可分享 MP4 到其他 App
   share_plus: ^10.1.2
+  # 二维码生成：应用分享功能生成下载链接二维码
+  qr_flutter: ^4.1.0
   # 获取应用沙盒目录：用于保存转换后的 MP4 文件
   path_provider: ^2.1.5
   # 路径操作工具：用于 M3U8 规范化时的路径拼接 / 扩展名解析

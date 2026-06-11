@@ -60,16 +60,47 @@ class PingRecord {
 
   /// 从 JSON Map 反序列化
   factory PingRecord.fromJson(Map<String, dynamic> json) {
-    final raw = (json['samples'] as List).cast<dynamic>();
+    // samples 字段可能为 null、非列表或包含非 int 数据
+    final samplesRaw = json['samples'];
+    final samplesList = <int?>[];
+    if (samplesRaw is List) {
+      for (final s in samplesRaw) {
+        if (s == null) {
+          samplesList.add(null);
+        } else if (s is num) {
+          samplesList.add(s.toInt());
+        } else {
+          // 非法类型，忽略（但保留一个占位 null，保持条数大致一致）
+          samplesList.add(null);
+        }
+      }
+    }
+
+    // 安全地取其他字段
+    DateTime timestamp;
+    try {
+      timestamp = DateTime.parse(json['timestamp'] as String? ??
+          DateTime.now().toIso8601String());
+    } catch (_) {
+      timestamp = DateTime.now();
+    }
+
+    final server = json['server'] as String? ?? '';
+    final min = (json['min'] as num?)?.toInt() ?? 0;
+    final avg = (json['avg'] as num?)?.toInt() ?? 0;
+    final max = (json['max'] as num?)?.toInt() ?? 0;
+    final jitter = (json['jitter'] as num?)?.toInt() ?? 0;
+    final lossRate = (json['lossRate'] as num?)?.toDouble() ?? 0.0;
+
     return PingRecord(
-      timestamp: DateTime.parse(json['timestamp'] as String),
-      server: json['server'] as String,
-      samples: raw.map((e) => e == null ? null : e as int).toList(),
-      min: json['min'] as int,
-      avg: json['avg'] as int,
-      max: json['max'] as int,
-      jitter: json['jitter'] as int,
-      lossRate: (json['lossRate'] as num).toDouble(),
+      timestamp: timestamp,
+      server: server,
+      samples: samplesList,
+      min: min,
+      avg: avg,
+      max: max,
+      jitter: jitter,
+      lossRate: lossRate,
     );
   }
 }
@@ -129,11 +160,22 @@ class NetworkSpeedHistory {
     }
     try {
       final jsonList = jsonDecode(jsonString) as List<dynamic>;
-      return jsonList
-          .map((e) => PingRecord.fromJson(e as Map<String, dynamic>))
-          .toList();
-    } catch (_) {
-      // 解析失败视为空
+      final records = <PingRecord>[];
+      for (final item in jsonList) {
+        if (item is Map<String, dynamic>) {
+          try {
+            records.add(PingRecord.fromJson(item));
+          } catch (e) {
+            AppLogger.w('NetworkSpeedHistory', '单条测速记录解析失败，跳过：$e');
+          }
+        }
+      }
+      return records;
+    } catch (e) {
+      AppLogger.e('NetworkSpeedHistory', '解析测速历史失败，清除损坏缓存：$e');
+      try {
+        await prefs.remove(_key);
+      } catch (_) {}
       return [];
     }
   }
