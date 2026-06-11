@@ -245,7 +245,10 @@ if (!fs.existsSync(DOWNLOADS_DIR)) {
 }
 app.use('/downloads', express.static(DOWNLOADS_DIR));
 
-// 官网静态文件托管（/website 路径访问官网资源）
+// 官网静态文件托管
+// 支持两种访问方式：
+//   1. /website/styles.css （带前缀）
+//   2. /styles.css （直接根路径，配合 index.html 的相对路径引用）
 const WEBSITE_DIR = path.join(__dirname, 'website');
 if (!fs.existsSync(WEBSITE_DIR)) {
   try {
@@ -254,7 +257,7 @@ if (!fs.existsSync(WEBSITE_DIR)) {
 }
 app.use('/website', express.static(WEBSITE_DIR));
 
-// 根路径重定向到官网首页
+// 根路径：优先返回官网首页（index.html）
 app.get('/', (req, res) => {
   const indexFile = path.join(WEBSITE_DIR, 'index.html');
   if (fs.existsSync(indexFile)) {
@@ -1849,6 +1852,12 @@ function handleWsDisconnect(ws) {
     console.log(`客人断开: ${playerId} from ${clientInfo.roomCode}`);
   }
 }
+
+// ============================================================
+// 官网静态文件兜底（放在所有 API 路由之后）
+// 使 index.html 中的相对路径 ./styles.css 在 HTTP 访问时也能正确加载
+// ============================================================
+app.use(express.static(WEBSITE_DIR));
 
 // 创建HTTP服务器并附加WebSocket
 const server = app.listen(PORT, () => {
