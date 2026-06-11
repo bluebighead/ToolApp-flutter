@@ -113,6 +113,7 @@ import { ElMessage } from 'element-plus';
 import { Loading, ArrowRight } from '@element-plus/icons-vue';
 import { useConnectionStore } from '@/stores/connection';
 import { api } from '@/utils/api';
+import { markConnected } from '@/router';
 
 const router = useRouter();
 const connectionStore = useConnectionStore();
@@ -144,6 +145,7 @@ async function startAutoScan() {
         dbPath: connectionStore.dbPath,
         info: connectionStore.dbInfo
       };
+      markConnected();
       ElMessage.success('自动连接成功');
       setTimeout(() => {
         router.push('/dashboard');
@@ -183,6 +185,7 @@ async function scanFolder() {
         dbPath: connectionStore.dbPath,
         info: connectionStore.dbInfo
       };
+      markConnected();
       ElMessage.success('连接成功');
       setTimeout(() => {
         router.push('/dashboard');
@@ -219,6 +222,7 @@ async function handleConnect() {
     }
 
     if (result.success) {
+      markConnected();
       ElMessage.success('连接成功');
       router.push('/dashboard');
     } else {
@@ -235,7 +239,43 @@ function goToDashboard() {
   router.push('/dashboard');
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // 尝试自动恢复之前的连接
+  const saved = localStorage.getItem('toolapp-admin-connection');
+  if (saved) {
+    try {
+      const data = JSON.parse(saved);
+      if (data.connected) {
+        scanning.value = true;
+        let result;
+        if (data.mode === 'remote' && data.serverUrl) {
+          // 恢复远程连接（使用保存的密码）
+          result = await connectionStore.connectRemote(data.serverUrl, data.remotePassword || '');
+        } else if (data.mode === 'local' && data.dbPath) {
+          // 恢复本地连接
+          result = await connectionStore.connectLocal(data.dbPath);
+        } else {
+          // 没有有效连接信息，执行自动扫描
+          scanning.value = false;
+          startAutoScan();
+          return;
+        }
+
+        scanning.value = false;
+        if (result.success) {
+          markConnected();
+          ElMessage.success('已自动恢复连接');
+          router.push('/dashboard');
+          return;
+        }
+        // 恢复失败，清除连接状态，执行自动扫描
+        await connectionStore.disconnect();
+      }
+    } catch (e) {
+      scanning.value = false;
+    }
+  }
+  // 没有保存的连接或恢复失败，执行自动扫描
   startAutoScan();
 });
 </script>

@@ -189,10 +189,10 @@ async function handleMessage(msg) {
         result = dbPath;
         break;
       case 'getStats':
-        result = getStats();
+        result = await getStats();
         break;
       case 'getUsers':
-        result = getUsers(params || {});
+        result = await getUsers(params || {});
         break;
       case 'getTableData':
         result = getTableData(params?.table, params || {});
@@ -227,7 +227,7 @@ async function handleMessage(msg) {
         result = { success: true };
         break;
       case 'getOnlineStatus':
-        result = getOnlineStatus();
+        result = await getOnlineStatus();
         break;
       case 'getUserSessions':
         result = getUserSessions(params?.userId, params || {});
@@ -236,7 +236,7 @@ async function handleMessage(msg) {
         result = getUserActivity(params?.userId, params || {});
         break;
       case 'getSystemInfo':
-        result = getSystemInfo();
+        result = await getSystemInfo();
         break;
       case 'getLocalDatabaseInfo':
         result = getLocalDatabaseInfo();

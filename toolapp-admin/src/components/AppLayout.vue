@@ -70,6 +70,7 @@
 import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useConnectionStore } from '@/stores/connection'
+import { markDisconnected } from '@/router'
 
 const route = useRoute()
 const router = useRouter()
@@ -80,6 +81,7 @@ const activeMenu = computed(() => route.path)
 
 async function handleDisconnect() {
   await connectionStore.disconnect()
+  markDisconnected()
   router.push('/')
 }
 </script>

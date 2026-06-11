@@ -27,6 +27,8 @@ export const useConnectionStore = defineStore('connection', () => {
   const dbPath = ref(persisted?.dbPath || '');
   // 远程服务器地址
   const serverUrl = ref(persisted?.serverUrl || '');
+  // 远程管理密码
+  const remotePassword = ref(persisted?.remotePassword || '');
   // 数据库信息（各表数据量）
   const dbInfo = ref(persisted?.dbInfo || null);
 
@@ -38,6 +40,7 @@ export const useConnectionStore = defineStore('connection', () => {
         mode: mode.value,
         dbPath: dbPath.value,
         serverUrl: serverUrl.value,
+        remotePassword: remotePassword.value,
         dbInfo: dbInfo.value,
       }));
     } catch (e) {}
@@ -91,6 +94,7 @@ export const useConnectionStore = defineStore('connection', () => {
       connected.value = true;
       mode.value = 'remote';
       serverUrl.value = url;
+      remotePassword.value = password || '';
       dbInfo.value = null;
       persistState();
     }
@@ -104,6 +108,7 @@ export const useConnectionStore = defineStore('connection', () => {
     mode.value = null;
     dbPath.value = '';
     serverUrl.value = '';
+    remotePassword.value = '';
     dbInfo.value = null;
     persistState();
   }
@@ -113,6 +118,7 @@ export const useConnectionStore = defineStore('connection', () => {
     mode,
     dbPath,
     serverUrl,
+    remotePassword,
     dbInfo,
     autoScanAndConnect,
     scanDirectory,
