@@ -1369,8 +1369,8 @@ app.delete('/api/admin/table/:tableName/:id', adminMiddleware, (req, res) => {
 // 已登录用户提交反馈
 app.post('/api/feedback/submit', authMiddleware, (req, res) => {
   try {
-    const userId = req.user.id;
-    const userEmail = req.user.email;
+    const userId = req.userId;
+    const userEmail = req.email;
     const { content, contact, deviceInfo } = req.body || {};
 
     if (!content || !content.trim()) {
