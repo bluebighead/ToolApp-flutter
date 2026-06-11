@@ -1,0 +1,6 @@
+# ToolApp APK 文件不会被提交到 git（文件太大）
+# 请将 toolapp-xxx-release.apk 放在以下位置之一：
+# 1. 本地开发：本目录下（./downloads/）
+# 2. 服务器部署：toolapp-server/downloads/
+# 3. GitHub Pages: 下载按钮会自动指向配置的服务器地址
+*.apk
