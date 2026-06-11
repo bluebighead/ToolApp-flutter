@@ -6,19 +6,43 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const nodemailer = require('nodemailer');
 
 // ============================================================
 // 配置
 // ============================================================
-const PORT = 3000;
-const JWT_SECRET = 'toolapp-secret-key-change-in-production';
+const PORT = parseInt(process.env.PORT || '3000');
+// JWT密钥：优先使用环境变量，否则使用固定密钥（生产环境务必设置环境变量）
+const JWT_SECRET = process.env.JWT_SECRET || 'toolapp-secret-key-change-in-production';
 const JWT_EXPIRES_IN = '7d';
 const DB_PATH = path.join(__dirname, 'data', 'toolapp.db');
+
+// 邮箱验证码配置（优先使用环境变量）
+const EMAIL_USER = process.env.EMAIL_USER || '';
+const EMAIL_PASS = process.env.EMAIL_PASS || '';
+const EMAIL_HOST = process.env.EMAIL_HOST || 'smtp.qq.com';
+const EMAIL_PORT = parseInt(process.env.EMAIL_PORT || '465');
+
+// 创建邮件发送器（QQ邮箱 SMTP，添加超时配置防止阻塞）
+let mailTransporter = null;
+if (EMAIL_USER && EMAIL_PASS) {
+  mailTransporter = nodemailer.createTransport({
+    host: EMAIL_HOST,
+    port: EMAIL_PORT,
+    secure: true,
+    auth: {
+      user: EMAIL_USER,
+      pass: EMAIL_PASS,
+    },
+    connectionTimeout: 10000, // 10秒连接超时
+    greetingTimeout: 5000,    // 5秒问候超时
+    socketTimeout: 15000,     // 15秒整体超时
+  });
+}
 
 // ============================================================
 // 数据库初始化
 // ============================================================
-// 确保 data 目录存在
 const fs = require('fs');
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) {
@@ -28,8 +52,15 @@ if (!fs.existsSync(dataDir)) {
 const Database = require('better-sqlite3');
 const db = new Database(DB_PATH);
 
-// 启用 WAL 模式提升并发性能
 db.pragma('journal_mode = WAL');
+
+// 迁移：为已存在的users表添加is_deleted字段
+try {
+  db.exec(`ALTER TABLE users ADD COLUMN is_deleted INTEGER DEFAULT 0`);
+  console.log('数据库迁移：已添加 is_deleted 字段');
+} catch (e) {
+  // 字段已存在，忽略错误
+}
 
 // 创建用户表
 db.exec(`
@@ -37,6 +68,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
+    is_deleted INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
   )
 `);
@@ -118,7 +150,7 @@ db.exec(`
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
 
-  -- 用户活动日志表 - 记录用户在App中的操作
+  -- 用户活动日志表
   CREATE TABLE IF NOT EXISTS user_activity_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -127,6 +159,61 @@ db.exec(`
     details TEXT,
     timestamp TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  -- 邮箱验证码表 - 用于注册时验证邮箱真实性
+  CREATE TABLE IF NOT EXISTS email_verification_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    code TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    is_used INTEGER DEFAULT 0
+  );
+
+  -- 设备令牌表 - 用于顶号机制，记录每个用户当前登录的设备
+  CREATE TABLE IF NOT EXISTS device_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_token TEXT NOT NULL,
+    device_info TEXT,
+    login_time TEXT DEFAULT (datetime('now')),
+    last_active TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  -- 用户设备参数表 - 记录用户设备详细参数，供优化参考
+  CREATE TABLE IF NOT EXISTS user_device_info (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_token TEXT,
+    platform TEXT,
+    model TEXT,
+    brand TEXT,
+    os_version TEXT,
+    sdk_version INTEGER,
+    screen_width INTEGER,
+    screen_height INTEGER,
+    total_memory INTEGER,
+    total_storage INTEGER,
+    cpu_arch TEXT,
+    cpu_cores INTEGER,
+    is_physical_device INTEGER,
+    app_version TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  -- 应用版本表 - 用于App检查更新和版本管理
+  CREATE TABLE IF NOT EXISTS app_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version TEXT NOT NULL,
+    build_number INTEGER NOT NULL,
+    download_url TEXT NOT NULL,
+    file_size INTEGER DEFAULT 0,
+    update_notes TEXT DEFAULT '',
+    force_update INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
   )
 `);
 
@@ -135,9 +222,17 @@ db.exec(`
 // ============================================================
 const app = express();
 
-// 中间件
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// APK文件静态下载路由（必须在认证中间件之前，允许匿名下载）
+const fs = require('fs');
+const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
+// 确保downloads目录存在
+if (!fs.existsSync(DOWNLOADS_DIR)) {
+  fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+}
+app.use('/downloads', express.static(DOWNLOADS_DIR));
 
 // ============================================================
 // JWT 认证中间件
@@ -151,6 +246,11 @@ function authMiddleware(req, res, next) {
   const token = authHeader.substring(7);
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
+    // 检查用户是否已被软删除
+    const user = db.prepare('SELECT id, is_deleted FROM users WHERE id = ?').get(decoded.userId);
+    if (!user || user.is_deleted) {
+      return res.status(401).json({ error: '账号已被注销，请重新注册' });
+    }
     req.userId = decoded.userId;
     req.email = decoded.email;
     next();
@@ -160,12 +260,148 @@ function authMiddleware(req, res, next) {
 }
 
 // ============================================================
+// 工具函数
+// ============================================================
+
+// 生成6位数字验证码
+function generateVerificationCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// 发送邮件验证码（含超时保护，防止SMTP错误阻塞API）
+async function sendVerificationEmail(email, code) {
+  if (!mailTransporter) {
+    console.warn('邮件发送器未配置，验证码已生成但未发送');
+    return false;
+  }
+
+  // 带超时的发送逻辑（双重超时保护：nodemailer内部超时 + Promise外层超时）
+  const sendWithTimeout = new Promise((resolve) => {
+    const timeoutId = setTimeout(() => {
+      console.warn(`发送邮件超时 (${email})，跳过邮件发送`);
+      resolve(false);
+    }, 8000); // 8秒硬性超时
+
+    mailTransporter.sendMail({
+      from: `"ToolApp" <${EMAIL_USER}>`,
+      to: email,
+      subject: 'ToolApp 注册验证码',
+      html: `
+        <h2>ToolApp 注册验证码</h2>
+        <p>您的验证码是：<strong style="font-size: 24px; color: #1890ff;">${code}</strong></p>
+        <p>验证码有效期为 10 分钟，请勿泄露给他人。</p>
+        <p>如果这不是您的操作，请忽略此邮件。</p>
+      `,
+    }).then(() => {
+      clearTimeout(timeoutId);
+      console.log(`验证码邮件已发送到 ${email}`);
+      resolve(true);
+    }).catch((err) => {
+      clearTimeout(timeoutId);
+      console.error(`发送邮件失败到 ${email}: ${err.message}`);
+      resolve(false);
+    });
+  });
+
+  return sendWithTimeout;
+}
+
+// ============================================================
+// 邮箱验证码接口
+// ============================================================
+
+// 发送验证码到邮箱
+app.post('/api/auth/send-code', async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: '邮箱不能为空' });
+  }
+
+  // 检查邮箱格式
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ error: '邮箱格式不正确' });
+  }
+
+  // 频率限制：同一邮箱60秒内只能发送一次验证码
+  const recentCode = db.prepare(
+    "SELECT created_at FROM email_verification_codes WHERE email = ? ORDER BY id DESC LIMIT 1"
+  ).get(email);
+  if (recentCode && recentCode.created_at) {
+    const lastSent = new Date(recentCode.created_at).getTime();
+    const elapsed = Date.now() - lastSent;
+    if (elapsed < 60000) {
+      const waitSeconds = Math.ceil((60000 - elapsed) / 1000);
+      return res.status(429).json({ error: `请${waitSeconds}秒后再试` });
+    }
+  }
+
+  // 检查邮箱是否已注册（已注销账号允许重新注册）
+  const existing = db.prepare('SELECT id, is_deleted FROM users WHERE email = ?').get(email);
+  if (existing && !existing.is_deleted) {
+    return res.status(400).json({ error: '该邮箱已被注册，请直接登录' });
+  }
+
+  // 生成验证码
+  const code = generateVerificationCode();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 10 * 60 * 1000); // 10分钟有效
+
+  // 删除该邮箱旧的未使用验证码
+  db.prepare('DELETE FROM email_verification_codes WHERE email = ? AND is_used = 0').run(email);
+
+  // 保存验证码
+  db.prepare(
+    'INSERT INTO email_verification_codes (email, code, expires_at) VALUES (?, ?, ?)'
+  ).run(email, code, expiresAt.toISOString());
+
+  // 发送邮件
+  const sent = await sendVerificationEmail(email, code);
+
+  const responseData = {
+    success: true,
+    message: sent ? '验证码已发送到您的邮箱' : '验证码已生成，但邮件发送失败，请稍后重试',
+  };
+
+  // 仅在邮件发送失败时返回验证码（方便用户在开发/测试环境使用）
+  if (!sent) {
+    responseData['code'] = code;
+  }
+
+  res.json(responseData);
+});
+
+// 验证邮箱验证码
+app.post('/api/auth/verify-code', (req, res) => {
+  const { email, code } = req.body;
+
+  if (!email || !code) {
+    return res.status(400).json({ error: '邮箱和验证码不能为空' });
+  }
+
+  // 查找未过期的验证码（使用单引号，SQLite要求字符串字面量用单引号）
+  const record = db.prepare(
+    "SELECT * FROM email_verification_codes WHERE email = ? AND code = ? AND is_used = 0 AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"
+  ).get(email, code);
+
+  if (!record) {
+    return res.status(400).json({ error: '验证码无效或已过期' });
+  }
+
+  // 标记为已使用
+  db.prepare('UPDATE email_verification_codes SET is_used = 1 WHERE id = ?').run(record.id);
+
+  res.json({ success: true, message: '验证通过' });
+});
+
+// ============================================================
 // 认证接口
 // ============================================================
 
-// 注册
+// 注册（需要验证码）
 app.post('/api/auth/register', (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, verificationCode } = req.body;
 
   if (!email || !password) {
     return res.status(400).json({ error: '邮箱和密码不能为空' });
@@ -175,42 +411,92 @@ app.post('/api/auth/register', (req, res) => {
     return res.status(400).json({ error: '密码至少需要6位' });
   }
 
-  // 检查邮箱是否已注册
-  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
-  if (existing) {
-    return res.status(400).json({ error: '该邮箱已被注册' });
+  // 检查邮箱是否已注册（已注销账号允许重新注册）
+  const existing = db.prepare('SELECT id, is_deleted FROM users WHERE email = ?').get(email);
+  if (existing && !existing.is_deleted) {
+    return res.status(400).json({ error: '该邮箱已被注册，请直接登录' });
+  }
+
+  // 验证码验证（邮件服务可用时，验证码为必填）
+  if (mailTransporter && !verificationCode) {
+    return res.status(400).json({ error: '请提供邮箱验证码' });
+  }
+
+  if (verificationCode) {
+    const codeRecord = db.prepare(
+      "SELECT * FROM email_verification_codes WHERE email = ? AND code = ? AND is_used = 0 AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"
+    ).get(email, verificationCode);
+
+    if (!codeRecord) {
+      return res.status(400).json({ error: '验证码无效或已过期' });
+    }
+
+    // 标记验证码为已使用
+    db.prepare('UPDATE email_verification_codes SET is_used = 1 WHERE id = ?').run(codeRecord.id);
   }
 
   // 加密密码并插入
   const passwordHash = bcrypt.hashSync(password, 10);
-  const result = db.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)').run(email, passwordHash);
+
+  let userId;
+  // 如果是已注销账号重新注册，更新原账号
+  if (existing && existing.is_deleted) {
+    db.prepare('UPDATE users SET password_hash = ?, is_deleted = 0 WHERE id = ?').run(passwordHash, existing.id);
+    userId = existing.id;
+  } else {
+    const result = db.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)').run(email, passwordHash);
+    userId = result.lastInsertRowid;
+  }
 
   // 生成 JWT
-  const token = jwt.sign({ userId: result.lastInsertRowid, email }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+  const token = jwt.sign({ userId: userId, email }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 
   res.status(201).json({
-    user: { id: result.lastInsertRowid, email },
+    user: { id: userId, email },
     token,
   });
 });
 
-// 登录
+// 登录（带顶号机制）
 app.post('/api/auth/login', (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, deviceToken } = req.body;
 
   if (!email || !password) {
     return res.status(400).json({ error: '邮箱和密码不能为空' });
   }
 
-  // 查找用户
-  const user = db.prepare('SELECT id, email, password_hash FROM users WHERE email = ?').get(email);
-  if (!user) {
+  // 查找用户（排除已注销的）
+  const user = db.prepare('SELECT id, email, password_hash, is_deleted FROM users WHERE email = ?').get(email);
+  if (!user || user.is_deleted) {
     return res.status(401).json({ error: '邮箱或密码错误' });
   }
 
   // 验证密码
   if (!bcrypt.compareSync(password, user.password_hash)) {
     return res.status(401).json({ error: '邮箱或密码错误' });
+  }
+
+  // 顶号机制：新设备登录时，删除该用户的所有旧设备记录
+  if (deviceToken) {
+    // 删除该用户的所有旧设备令牌记录
+    db.prepare(
+      'DELETE FROM device_tokens WHERE user_id = ? AND device_token != ?'
+    ).run(user.id, deviceToken);
+
+    // 插入或更新当前设备的令牌记录
+    const existing = db.prepare(
+      'SELECT id FROM device_tokens WHERE user_id = ? AND device_token = ?'
+    ).get(user.id, deviceToken);
+
+    if (existing) {
+      db.prepare(
+        'UPDATE device_tokens SET last_active = datetime(\'now\'), device_info = ? WHERE id = ?'
+      ).run(req.body.deviceInfo || '', existing.id);
+    } else {
+      db.prepare(
+        'INSERT INTO device_tokens (user_id, device_token, device_info) VALUES (?, ?, ?)'
+      ).run(user.id, deviceToken, req.body.deviceInfo || '');
+    }
   }
 
   // 生成 JWT
@@ -220,6 +506,24 @@ app.post('/api/auth/login', (req, res) => {
     user: { id: user.id, email: user.email },
     token,
   });
+});
+
+// 检查当前设备是否被踢出
+app.get('/api/auth/check-kicked', authMiddleware, (req, res) => {
+  const { deviceToken } = req.query;
+
+  if (!deviceToken) {
+    return res.json({ kicked: false });
+  }
+
+  // 检查该用户的最新设备令牌是否是当前设备
+  const latestDevice = db.prepare(
+    'SELECT device_token FROM device_tokens WHERE user_id = ? ORDER BY last_active DESC LIMIT 1'
+  ).get(req.userId);
+
+  const kicked = latestDevice && latestDevice.device_token !== deviceToken;
+
+  res.json({ kicked, message: kicked ? '您的账号已在其他设备登录' : null });
 });
 
 // 获取当前用户信息
@@ -232,20 +536,58 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
 });
 
 // ============================================================
+// App检查更新接口（公开接口，无需认证）
+// ============================================================
+app.get('/api/app/version/check', (req, res) => {
+  const platform = req.query.platform || 'android';
+  const buildNumber = parseInt(req.query.buildNumber) || 0;
+
+  try {
+    // 查询最新版本（按build_number降序取第一条）
+    const latest = db.prepare(
+      'SELECT * FROM app_versions ORDER BY build_number DESC LIMIT 1'
+    ).get();
+
+    if (!latest) {
+      return res.json({ hasUpdate: false, message: '暂无版本信息' });
+    }
+
+    if (latest.build_number <= buildNumber) {
+      return res.json({ hasUpdate: false, message: '已是最新版本' });
+    }
+
+    // 有新版本
+    res.json({
+      hasUpdate: true,
+      version: latest.version,
+      buildNumber: latest.build_number,
+      downloadUrl: latest.download_url,
+      fileSize: latest.file_size,
+      updateNotes: latest.update_notes,
+      forceUpdate: latest.force_update === 1,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 健康检查接口（用于流量网络测试连接）
+// ============================================================
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// ============================================================
 // 数据同步接口
-// 采用"全量覆盖"策略：客户端上传所有数据，服务端先删后插
 // ============================================================
 
-// 同步数据通用接口
-// POST /api/sync/:table - 上传全量数据
-// GET /api/sync/:table - 下载全量数据
 const SYNC_TABLES = ['heart_rate_sessions', 'network_speed_records', 'convert_history', 'dice_records', 'period_records'];
 
 // ============================================================
-// 用户会话与活动API - 在线状态上报和使用时长统计
+// 用户会话与活动API
 // ============================================================
 
-// 开始新会话（App启动时调用）
 app.post('/api/session/start', authMiddleware, (req, res) => {
   const userId = req.userId;
   const { deviceInfo } = req.body || {};
@@ -253,10 +595,8 @@ app.post('/api/session/start', authMiddleware, (req, res) => {
   const now = new Date().toISOString();
 
   try {
-    // 先将该用户之前的在线会话标记为离线
     db.prepare('UPDATE user_sessions SET is_online = 0, session_end = ? WHERE user_id = ? AND is_online = 1').run(now, userId);
 
-    // 创建新会话
     const result = db.prepare(`
       INSERT INTO user_sessions (user_id, session_start, device_info, ip_address, last_heartbeat, is_online)
       VALUES (?, ?, ?, ?, ?, 1)
@@ -268,7 +608,6 @@ app.post('/api/session/start', authMiddleware, (req, res) => {
   }
 });
 
-// 心跳上报（App定期调用，表明用户仍在线）
 app.post('/api/session/heartbeat', authMiddleware, (req, res) => {
   const userId = req.userId;
   const { sessionId } = req.body || {};
@@ -276,11 +615,11 @@ app.post('/api/session/heartbeat', authMiddleware, (req, res) => {
 
   try {
     if (sessionId) {
-      // 更新指定会话的心跳时间
-      db.prepare('UPDATE user_sessions SET last_heartbeat = ?, is_online = 1 WHERE id = ? AND user_id = ?').run(now, sessionId, userId);
+      // 仅更新存在的且未结束的session
+      db.prepare('UPDATE user_sessions SET last_heartbeat = ?, is_online = 1 WHERE id = ? AND user_id = ? AND session_end IS NULL').run(now, sessionId, userId);
     } else {
-      // 更新用户最新的在线会话
-      db.prepare('UPDATE user_sessions SET last_heartbeat = ?, is_online = 1 WHERE user_id = ? AND is_online = 1').run(now, userId);
+      // 仅更新未结束的session
+      db.prepare('UPDATE user_sessions SET last_heartbeat = ?, is_online = 1 WHERE user_id = ? AND is_online = 1 AND session_end IS NULL').run(now, userId);
     }
     res.json({ received: true, timestamp: now });
   } catch (err) {
@@ -288,13 +627,11 @@ app.post('/api/session/heartbeat', authMiddleware, (req, res) => {
   }
 });
 
-// 结束会话（App退出时调用）
 app.post('/api/session/end', authMiddleware, (req, res) => {
   const userId = req.userId;
   const now = new Date().toISOString();
 
   try {
-    // 计算会话时长并标记为离线
     const sessions = db.prepare('SELECT id, session_start FROM user_sessions WHERE user_id = ? AND is_online = 1').all(userId);
 
     for (const session of sessions) {
@@ -310,7 +647,6 @@ app.post('/api/session/end', authMiddleware, (req, res) => {
   }
 });
 
-// 上报用户活动
 app.post('/api/activity/log', authMiddleware, (req, res) => {
   const userId = req.userId;
   const { activityType, pageName, details } = req.body || {};
@@ -327,7 +663,56 @@ app.post('/api/activity/log', authMiddleware, (req, res) => {
   }
 });
 
-// 上传同步数据
+// 用户端上传设备参数（登录后调用，记录设备详细信息供优化参考）
+app.post('/api/device-info', authMiddleware, (req, res) => {
+  const userId = req.userId;
+  const {
+    deviceToken, platform, model, brand, osVersion, sdkVersion,
+    screenWidth, screenHeight, totalMemory, totalStorage,
+    cpuArch, cpuCores, isPhysicalDevice, appVersion
+  } = req.body || {};
+  const now = new Date().toISOString();
+
+  try {
+    // 检查用户是否已有设备记录，有则更新，无则插入
+    const existing = db.prepare('SELECT id FROM user_device_info WHERE user_id = ?').get(userId);
+
+    if (existing) {
+      db.prepare(`
+        UPDATE user_device_info SET
+          device_token = ?, platform = ?, model = ?, brand = ?,
+          os_version = ?, sdk_version = ?, screen_width = ?, screen_height = ?,
+          total_memory = ?, total_storage = ?, cpu_arch = ?, cpu_cores = ?,
+          is_physical_device = ?, app_version = ?, updated_at = ?
+        WHERE user_id = ?
+      `).run(
+        deviceToken || '', platform || '', model || '', brand || '',
+        osVersion || '', sdkVersion || null, screenWidth || null, screenHeight || null,
+        totalMemory || null, totalStorage || null, cpuArch || '', cpuCores || null,
+        isPhysicalDevice ? 1 : 0, appVersion || '', now, userId
+      );
+      res.json({ success: true, action: 'updated', message: '设备参数更新成功' });
+    } else {
+      db.prepare(`
+        INSERT INTO user_device_info (
+          user_id, device_token, platform, model, brand,
+          os_version, sdk_version, screen_width, screen_height,
+          total_memory, total_storage, cpu_arch, cpu_cores,
+          is_physical_device, app_version, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        userId, deviceToken || '', platform || '', model || '', brand || '',
+        osVersion || '', sdkVersion || null, screenWidth || null, screenHeight || null,
+        totalMemory || null, totalStorage || null, cpuArch || '', cpuCores || null,
+        isPhysicalDevice ? 1 : 0, appVersion || '', now
+      );
+      res.json({ success: true, action: 'created', message: '设备参数记录成功' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/sync/:table', authMiddleware, (req, res) => {
   const { table } = req.params;
 
@@ -342,8 +727,16 @@ app.post('/api/sync/:table', authMiddleware, (req, res) => {
 
   const userId = req.userId;
 
+  // 各表允许的列名白名单（防止SQL注入）
+  const TABLE_COLUMNS = {
+    'heart_rate_sessions': ['user_id', 'start_time', 'end_time', 'max_hr', 'min_hr', 'avg_hr', 'samples', 'connection_mode'],
+    'network_speed_records': ['user_id', 'test_time', 'server_url', 'min_latency', 'avg_latency', 'max_latency', 'jitter', 'loss_rate'],
+    'convert_history': ['user_id', 'input_file', 'output_file', 'output_size', 'format', 'quality', 'status', 'timestamp_ms'],
+    'dice_records': ['user_id', 'dice_type', 'result', 'timestamp_ms'],
+    'period_records': ['user_id', 'start_date', 'end_date', 'record_mode', 'flow_level', 'symptoms', 'notes', 'local_id'],
+  };
+
   try {
-    // 在事务中执行：先删后插
     const deleteStmt = db.prepare(`DELETE FROM ${table} WHERE user_id = ?`);
     let insertStmt;
 
@@ -352,9 +745,12 @@ app.post('/api/sync/:table', authMiddleware, (req, res) => {
       return res.json({ uploaded: 0 });
     }
 
-    // 根据表名构建 INSERT 语句
-    const columns = Object.keys(rows[0]);
-    // 确保每行都有 user_id
+    // 过滤列名，只允许白名单中的列
+    const allowedColumns = TABLE_COLUMNS[table] || [];
+    const columns = Object.keys(rows[0]).filter(col => allowedColumns.includes(col));
+    if (columns.length === 0) {
+      return res.status(400).json({ error: '没有有效的数据列' });
+    }
     if (!columns.includes('user_id')) {
       columns.unshift('user_id');
     }
@@ -383,7 +779,6 @@ app.post('/api/sync/:table', authMiddleware, (req, res) => {
   }
 });
 
-// 下载同步数据
 app.get('/api/sync/:table', authMiddleware, (req, res) => {
   const { table } = req.params;
 
@@ -401,12 +796,10 @@ app.get('/api/sync/:table', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// 管理员 API（供 ToolApp Admin 桌面端使用）
+// 管理员 API
 // ============================================================
-// 管理员密码（默认 666666，可通过 API 修改）
 let adminPassword = process.env.ADMIN_PASSWORD || '666666';
 
-// 管理员认证中间件
 function adminMiddleware(req, res, next) {
   const password = req.headers['x-admin-password'];
   if (!password || password !== adminPassword) {
@@ -415,7 +808,6 @@ function adminMiddleware(req, res, next) {
   next();
 }
 
-// 修改管理员密码
 app.post('/api/admin/change-password', adminMiddleware, (req, res) => {
   const { newPassword } = req.body || {};
   if (!newPassword || newPassword.length < 4) {
@@ -425,63 +817,46 @@ app.post('/api/admin/change-password', adminMiddleware, (req, res) => {
   res.json({ success: true, message: '密码修改成功' });
 });
 
-// 获取用户在线状态（用于在线监控页面）
 app.get('/api/admin/users/online-status', adminMiddleware, (req, res) => {
   const now = Date.now();
-  const ONLINE_THRESHOLD = 5 * 60 * 1000; // 5分钟内心跳视为在线
+  const ONLINE_THRESHOLD = 5 * 60 * 1000;
 
   try {
-    // 获取所有用户及其最新会话信息
-    const users = db.prepare('SELECT id, email, created_at FROM users ORDER BY id').all();
+    const users = db.prepare('SELECT id, email, created_at, is_deleted FROM users ORDER BY id').all();
 
     const result = users.map(user => {
-      // 获取用户最新会话
       const latestSession = db.prepare(`
-        SELECT * FROM user_sessions
-        WHERE user_id = ?
-        ORDER BY id DESC
-        LIMIT 1
+        SELECT * FROM user_sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1
       `).get(user.id);
 
-      // 计算用户今日使用时长
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const todayStart = today.toISOString();
 
       const todayStats = db.prepare(`
         SELECT COALESCE(SUM(
-          CASE
-            WHEN session_end IS NOT NULL THEN duration_seconds
-            ELSE CAST((julianday('now') - julianday(session_start)) * 86400 AS INTEGER)
-          END
+          CASE WHEN session_end IS NOT NULL THEN duration_seconds
+          ELSE CAST((julianday('now') - julianday(session_start)) * 86400 AS INTEGER) END
         ), 0) as total_seconds
-        FROM user_sessions
-        WHERE user_id = ? AND session_start >= ?
+        FROM user_sessions WHERE user_id = ? AND session_start >= ?
       `).get(user.id, todayStart);
 
-      // 计算总使用时长
       const totalStats = db.prepare(`
         SELECT COALESCE(SUM(
-          CASE
-            WHEN session_end IS NOT NULL THEN duration_seconds
-            ELSE CAST((julianday('now') - julianday(session_start)) * 86400 AS INTEGER)
-          END
+          CASE WHEN session_end IS NOT NULL THEN duration_seconds
+          ELSE CAST((julianday('now') - julianday(session_start)) * 86400 AS INTEGER) END
         ), 0) as total_seconds
-        FROM user_sessions
-        WHERE user_id = ?
+        FROM user_sessions WHERE user_id = ?
       `).get(user.id);
 
-      // 计算会话次数
       const sessionCount = db.prepare('SELECT COUNT(*) as count FROM user_sessions WHERE user_id = ?').get(user.id).count;
 
-      // 判断是否在线
       let isOnline = false;
       let lastSeen = null;
       let currentSessionStart = null;
 
       if (latestSession) {
         const lastHeartbeat = latestSession.last_heartbeat ? new Date(latestSession.last_heartbeat).getTime() : 0;
-        // 判断在线：is_online=1 且有有效心跳且心跳在5分钟内
         isOnline = latestSession.is_online === 1
           && latestSession.last_heartbeat
           && (now - lastHeartbeat) < ONLINE_THRESHOLD;
@@ -502,16 +877,14 @@ app.get('/api/admin/users/online-status', adminMiddleware, (req, res) => {
       };
     });
 
-    // 按在线状态排序（在线用户在前）
     result.sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
 
     const onlineCount = result.filter(u => u.isOnline).length;
-    const totalCount = result.length;
 
     res.json({
       users: result,
       onlineCount,
-      totalCount,
+      totalCount: result.length,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
@@ -519,7 +892,6 @@ app.get('/api/admin/users/online-status', adminMiddleware, (req, res) => {
   }
 });
 
-// 获取用户会话历史
 app.get('/api/admin/users/:id/sessions', adminMiddleware, (req, res) => {
   const userId = Number(req.params.id);
   const { page = 1, pageSize = 20 } = req.query;
@@ -528,10 +900,7 @@ app.get('/api/admin/users/:id/sessions', adminMiddleware, (req, res) => {
   try {
     const total = db.prepare('SELECT COUNT(*) as count FROM user_sessions WHERE user_id = ?').get(userId).count;
     const sessions = db.prepare(`
-      SELECT * FROM user_sessions
-      WHERE user_id = ?
-      ORDER BY id DESC
-      LIMIT ? OFFSET ?
+      SELECT * FROM user_sessions WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?
     `).all(userId, Number(pageSize), Number(offset));
 
     res.json({ rows: sessions, total, page: Number(page), pageSize: Number(pageSize) });
@@ -540,7 +909,6 @@ app.get('/api/admin/users/:id/sessions', adminMiddleware, (req, res) => {
   }
 });
 
-// 获取用户活动日志
 app.get('/api/admin/users/:id/activity', adminMiddleware, (req, res) => {
   const userId = Number(req.params.id);
   const { page = 1, pageSize = 50 } = req.query;
@@ -549,10 +917,7 @@ app.get('/api/admin/users/:id/activity', adminMiddleware, (req, res) => {
   try {
     const total = db.prepare('SELECT COUNT(*) as count FROM user_activity_logs WHERE user_id = ?').get(userId).count;
     const logs = db.prepare(`
-      SELECT * FROM user_activity_logs
-      WHERE user_id = ?
-      ORDER BY id DESC
-      LIMIT ? OFFSET ?
+      SELECT * FROM user_activity_logs WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?
     `).all(userId, Number(pageSize), Number(offset));
 
     res.json({ rows: logs, total, page: Number(page), pageSize: Number(pageSize) });
@@ -561,10 +926,20 @@ app.get('/api/admin/users/:id/activity', adminMiddleware, (req, res) => {
   }
 });
 
-// 获取系统信息（用于设置页面）
+// 管理后台获取用户设备参数
+app.get('/api/admin/users/:id/device-info', adminMiddleware, (req, res) => {
+  const userId = Number(req.params.id);
+
+  try {
+    const deviceInfo = db.prepare('SELECT * FROM user_device_info WHERE user_id = ? ORDER BY id DESC LIMIT 1').get(userId);
+    res.json(deviceInfo || null);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/admin/system-info', adminMiddleware, (req, res) => {
   const os = require('os');
-  const path = require('path');
 
   try {
     const q = (sql) => db.prepare(sql).get().count;
@@ -585,10 +960,7 @@ app.get('/api/admin/system-info', adminMiddleware, (req, res) => {
         platform: os.platform(),
         hostname: os.hostname(),
         ips,
-        memory: {
-          total: os.totalmem(),
-          free: os.freemem(),
-        },
+        memory: { total: os.totalmem(), free: os.freemem() },
         nodeVersion: process.version,
       },
       database: {
@@ -603,7 +975,7 @@ app.get('/api/admin/system-info', adminMiddleware, (req, res) => {
           return s;
         })(),
         tables: {
-          users: q('SELECT COUNT(*) as count FROM users'),
+          users: q('SELECT COUNT(*) as count FROM users WHERE is_deleted = 0'),
           heart_rate_sessions: q('SELECT COUNT(*) as count FROM heart_rate_sessions'),
           network_speed_records: q('SELECT COUNT(*) as count FROM network_speed_records'),
           convert_history: q('SELECT COUNT(*) as count FROM convert_history'),
@@ -611,206 +983,740 @@ app.get('/api/admin/system-info', adminMiddleware, (req, res) => {
           period_records: q('SELECT COUNT(*) as count FROM period_records'),
           user_sessions: q('SELECT COUNT(*) as count FROM user_sessions'),
           user_activity_logs: q('SELECT COUNT(*) as count FROM user_activity_logs'),
+          email_verification_codes: q('SELECT COUNT(*) as count FROM email_verification_codes'),
+          device_tokens: q('SELECT COUNT(*) as count FROM device_tokens'),
         },
       },
-      adminPassword: adminPassword,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 全局统计
 app.get('/api/admin/stats', adminMiddleware, (req, res) => {
   try {
     const q = (sql) => db.prepare(sql).get().count;
     res.json({
-      users: q('SELECT COUNT(*) as count FROM users'),
+      users: q('SELECT COUNT(*) as count FROM users WHERE is_deleted = 0'),
+      deletedUsers: q('SELECT COUNT(*) as count FROM users WHERE is_deleted = 1'),
       heartRate: q('SELECT COUNT(*) as count FROM heart_rate_sessions'),
       networkSpeed: q('SELECT COUNT(*) as count FROM network_speed_records'),
       convert: q('SELECT COUNT(*) as count FROM convert_history'),
       dice: q('SELECT COUNT(*) as count FROM dice_records'),
       period: q('SELECT COUNT(*) as count FROM period_records'),
+      sessions: q('SELECT COUNT(*) as count FROM user_sessions'),
+      activityLogs: q('SELECT COUNT(*) as count FROM user_activity_logs'),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 用户列表（分页+搜索）
-app.get('/api/admin/users', adminMiddleware, (req, res) => {
-  const { page = 1, pageSize = 20, search = '' } = req.query;
-  const offset = (page - 1) * pageSize;
-
-  let where = '';
-  const sp = [];
-  if (search) {
-    where = 'WHERE email LIKE ?';
-    sp.push(`%${search}%`);
-  }
-
-  try {
-    const total = db.prepare(`SELECT COUNT(*) as count FROM users ${where}`).get(...sp).count;
-    const rows = db.prepare(`SELECT id, email, password_hash, created_at FROM users ${where} ORDER BY id LIMIT ? OFFSET ?`).all(...sp, Number(pageSize), Number(offset));
-
-    const usersWithData = rows.map(user => {
-      const c = (table) => db.prepare(`SELECT COUNT(*) as count FROM ${table} WHERE user_id = ?`).get(user.id).count;
-      return {
-        ...user,
-        dataCount: {
-          heartRate: c('heart_rate_sessions'),
-          networkSpeed: c('network_speed_records'),
-          convert: c('convert_history'),
-          dice: c('dice_records'),
-          period: c('period_records'),
-        },
-      };
-    });
-
-    res.json({ rows: usersWithData, total, page: Number(page), pageSize: Number(pageSize) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 删除用户及其所有数据
+// 软删除用户（注销账号）- 标记为已删除并清理关联数据
 app.delete('/api/admin/users/:id', adminMiddleware, (req, res) => {
   const userId = Number(req.params.id);
+
   try {
-    for (const table of SYNC_TABLES) {
-      db.prepare(`DELETE FROM ${table} WHERE user_id = ?`).run(userId);
+    const user = db.prepare('SELECT id, email FROM users WHERE id = ?').get(userId);
+    if (!user) {
+      return res.status(404).json({ error: '用户不存在' });
     }
-    db.prepare('DELETE FROM users WHERE id = ?').run(userId);
-    res.json({ success: true });
+
+    // 清理该用户的所有关联数据
+    db.prepare('DELETE FROM heart_rate_sessions WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM network_speed_records WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM convert_history WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM dice_records WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM period_records WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM user_sessions WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM user_activity_logs WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM device_tokens WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM email_verification_codes WHERE email = ?').run(user.email);
+
+    // 软删除：标记为已注销（保留用户记录）
+    db.prepare('UPDATE users SET is_deleted = 1 WHERE id = ?').run(userId);
+
+    console.log(`用户已注销（软删除）: ${user.email} (ID: ${userId})`);
+    res.json({ success: true, message: '用户已注销，关联数据已清理' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 通用数据表查询（分页+用户筛选）
-const ADMIN_TABLES = [...SYNC_TABLES];
-app.get('/api/admin/:table', adminMiddleware, (req, res) => {
-  const { table } = req.params;
-  if (!ADMIN_TABLES.includes(table)) {
-    return res.status(400).json({ error: '无效的数据表' });
+// 管理员创建用户
+app.post('/api/admin/users', adminMiddleware, (req, res) => {
+  const { email, password, accountType } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: '账号和密码不能为空' });
   }
 
-  const { page = 1, pageSize = 20, userId = '' } = req.query;
-  const offset = (page - 1) * pageSize;
-
-  const conditions = [];
-  const sp = [];
-  if (userId) {
-    conditions.push('user_id = ?');
-    sp.push(Number(userId));
+  if (password.length < 6) {
+    return res.status(400).json({ error: '密码至少需要6位' });
   }
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  // 根据账号类型校验格式
+  // - admin: 管理员账号，格式不受限制（但不能包含特殊字符）
+  // - email: 邮箱用户，必须为有效邮箱格式
+  const isAdminType = accountType === 'admin';
+  if (!isAdminType) {
+    // 邮箱用户：必须为有效邮箱格式
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: '请输入有效的邮箱格式（例如：user@example.com）' });
+    }
+  } else {
+    // 管理员账号：允许任意用户名，但限制不超过64字符
+    if (email.length > 64) {
+      return res.status(400).json({ error: '管理员账号名称不能超过64个字符' });
+    }
+  }
+
+  // 检查账号是否已注册（包括已注销的账号）
+  const existing = db.prepare('SELECT id, is_deleted FROM users WHERE email = ?').get(email);
+  if (existing) {
+    if (existing.is_deleted) {
+      // 已注销账号：更新密码并激活
+      const passwordHash = bcrypt.hashSync(password, 10);
+      db.prepare('UPDATE users SET password_hash = ?, is_deleted = 0 WHERE id = ?').run(passwordHash, existing.id);
+      console.log(`管理员激活已注销账号: ${email} (ID: ${existing.id})`);
+      return res.json({ success: true, message: '账号已激活', user: { id: existing.id, email } });
+    }
+    return res.status(400).json({ error: '该账号已存在' });
+  }
+
+  // 创建新用户
+  const passwordHash = bcrypt.hashSync(password, 10);
+  const result = db.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)').run(email, passwordHash);
+
+  console.log(`管理员创建账号: ${email} (ID: ${result.lastInsertRowid}, 类型: ${isAdminType ? '管理员' : '邮箱'})`);
+  res.status(201).json({ success: true, message: '账号创建成功', user: { id: result.lastInsertRowid, email } });
+});
+
+// ============================================================
+// 管理员 - 应用版本管理接口
+// ============================================================
+
+// multer用于处理APK文件上传
+const multer = require('multer');
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, DOWNLOADS_DIR),
+    filename: (req, file, cb) => {
+      // 使用原始文件名，但添加时间戳避免冲突
+      const ext = path.extname(file.originalname) || '.apk';
+      const baseName = path.basename(file.originalname, ext);
+      cb(null, `${baseName}-${Date.now()}${ext}`);
+    }
+  }),
+  limits: { fileSize: 500 * 1024 * 1024 }, // 500MB限制
+});
+
+// 获取版本列表
+app.get('/api/admin/app-versions', adminMiddleware, (req, res) => {
+  try {
+    const versions = db.prepare(
+      'SELECT * FROM app_versions ORDER BY build_number DESC'
+    ).all();
+    res.json(versions);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 发布新版本（上传APK + 版本信息）
+app.post('/api/admin/app-version', adminMiddleware, upload.single('apk'), (req, res) => {
+  const { version, build_number, update_notes, force_update } = req.body;
+  const file = req.file;
+
+  if (!version || !build_number) {
+    // 如果上传了文件但参数不全，删除已上传的文件
+    if (file) {
+      try { fs.unlinkSync(file.path); } catch (e) {}
+    }
+    return res.status(400).json({ error: '版本号和构建号不能为空' });
+  }
+
+  if (!file) {
+    return res.status(400).json({ error: '请上传APK文件' });
+  }
+
+  const buildNumber = parseInt(build_number);
+  if (isNaN(buildNumber) || buildNumber <= 0) {
+    try { fs.unlinkSync(file.path); } catch (e) {}
+    return res.status(400).json({ error: '构建号必须是正整数' });
+  }
+
+  // 检查构建号是否已存在
+  const existing = db.prepare('SELECT id FROM app_versions WHERE build_number = ?').get(buildNumber);
+  if (existing) {
+    try { fs.unlinkSync(file.path); } catch (e) {}
+    return res.status(400).json({ error: `构建号 ${buildNumber} 已存在` });
+  }
+
+  // 构建下载URL
+  const downloadUrl = `/downloads/${file.filename}`;
+  const fileSize = file.size;
 
   try {
-    const total = db.prepare(`SELECT COUNT(*) as count FROM ${table} ${where}`).get(...sp).count;
-    const rows = db.prepare(`SELECT * FROM ${table} ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...sp, Number(pageSize), Number(offset));
-    res.json({ rows, total, page: Number(page), pageSize: Number(pageSize) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+    const result = db.prepare(
+      'INSERT INTO app_versions (version, build_number, download_url, file_size, update_notes, force_update) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(version, buildNumber, downloadUrl, fileSize, update_notes || '', force_update === '1' || force_update === true ? 1 : 0);
 
-// 更新记录
-app.put('/api/admin/:table/:id', adminMiddleware, (req, res) => {
-  const { table, id } = req.params;
-  if (!ADMIN_TABLES.includes(table)) {
-    return res.status(400).json({ error: '无效的数据表' });
-  }
-
-  const data = req.body;
-  const cols = Object.keys(data);
-  const vals = Object.values(data);
-  const setClause = cols.map(c => `${c} = ?`).join(', ');
-
-  try {
-    db.prepare(`UPDATE ${table} SET ${setClause} WHERE id = ?`).run(...vals, Number(id));
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 删除记录
-app.delete('/api/admin/:table/:id', adminMiddleware, (req, res) => {
-  const { table, id } = req.params;
-  if (!ADMIN_TABLES.includes(table)) {
-    return res.status(400).json({ error: '无效的数据表' });
-  }
-
-  try {
-    db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(Number(id));
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ============================================================
-// 健康检查
-// ============================================================
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString() });
-});
-
-// ============================================================
-// 启动服务器
-// ============================================================
-const os = require('os');
-
-// 获取本机所有局域网 IP 地址
-function getLocalIPs() {
-  const interfaces = os.networkInterfaces();
-  const ips = [];
-  for (const name of Object.keys(interfaces)) {
-    for (const iface of interfaces[name]) {
-      // 跳过内部和非 IPv4 地址
-      if (iface.family === 'IPv4' && !iface.internal) {
-        ips.push(iface.address);
+    res.status(201).json({
+      success: true,
+      message: '版本发布成功',
+      version: {
+        id: result.lastInsertRowid,
+        version,
+        build_number: buildNumber,
+        download_url: downloadUrl,
+        file_size: fileSize,
       }
-    }
+    });
+  } catch (err) {
+    // 数据库写入失败时删除已上传的文件
+    try { fs.unlinkSync(file.path); } catch (e) {}
+    res.status(500).json({ error: err.message });
   }
-  return ips;
+});
+
+// 修改版本信息
+app.put('/api/admin/app-version/:id', adminMiddleware, (req, res) => {
+  const { id } = req.params;
+  const { version, build_number, update_notes, force_update } = req.body;
+
+  try {
+    const existing = db.prepare('SELECT * FROM app_versions WHERE id = ?').get(id);
+    if (!existing) {
+      return res.status(404).json({ error: '版本不存在' });
+    }
+
+    db.prepare(
+      'UPDATE app_versions SET version = ?, build_number = ?, update_notes = ?, force_update = ? WHERE id = ?'
+    ).run(
+      version || existing.version,
+      build_number || existing.build_number,
+      update_notes !== undefined ? update_notes : existing.update_notes,
+      force_update !== undefined ? (force_update ? 1 : 0) : existing.force_update,
+      id
+    );
+
+    res.json({ success: true, message: '版本信息更新成功' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 删除版本（同时删除APK文件）
+app.delete('/api/admin/app-version/:id', adminMiddleware, (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const existing = db.prepare('SELECT * FROM app_versions WHERE id = ?').get(id);
+    if (!existing) {
+      return res.status(404).json({ error: '版本不存在' });
+    }
+
+    // 删除APK文件
+    if (existing.download_url) {
+      const filePath = path.join(DOWNLOADS_DIR, path.basename(existing.download_url));
+      try { fs.unlinkSync(filePath); } catch (e) {}
+    }
+
+    db.prepare('DELETE FROM app_versions WHERE id = ?').run(id);
+    res.json({ success: true, message: '版本删除成功' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// WebSocket 服务器 - 联机掷骰子房间管理
+// ============================================================
+const WebSocket = require('ws');
+
+// 房间存储：roomCode -> Room 对象
+const rooms = new Map();
+
+// WebSocket 客户端存储：ws -> { playerId, roomCode, role }
+const wsClients = new Map();
+
+// 生成4位数字房间号（便于用户输入）
+function generateRoomCode() {
+  return Math.floor(1000 + Math.random() * 9000).toString();
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  const ips = getLocalIPs();
-  console.log(`========================================`);
-  console.log(`  ToolApp 服务器已启动`);
-  console.log(`  本机: http://localhost:${PORT}`);
-  if (ips.length > 0) {
-    ips.forEach(ip => {
-      console.log(`  局域网: http://${ip}:${PORT}`);
-    });
-  } else {
-    console.log(`  局域网: 未检测到局域网 IP`);
+// 房间类 - 管理单个房间的状态和玩家
+class Room {
+  constructor(code, hostWs, roomData) {
+    this.code = code;
+    this.hostWs = hostWs;
+    this.roomName = roomData.roomName;
+    this.maxPlayers = roomData.maxPlayers;
+    this.diceType = roomData.diceType;
+    this.diceCount = roomData.diceCount;
+    this.gameMode = roomData.gameMode;
+    this.rollMode = roomData.rollMode || 'multi_player';
+    this.state = 'waiting'; // waiting, playing, finished
+    this.roundNumber = 0;
+    this.rollerId = '';
+    this.players = new Map(); // playerId -> { ws, name, isHost, status, results, total, guessNumber }
+    this.createdAt = Date.now();
   }
-  console.log(`  数据库: ${DB_PATH}`);
-  console.log(`========================================`);
-  console.log(`  请在 App 中设置服务器地址为上面的局域网地址`);
-  console.log(`========================================`);
 
-  // 定期清理过期会话：每分钟检查一次，将超过10分钟没有心跳的会话标记为离线
-  setInterval(() => {
-    try {
-      const result = db.prepare(`
-        UPDATE user_sessions
-        SET is_online = 0,
-            session_end = datetime('now'),
-            duration_seconds = CAST((julianday('now') - julianday(session_start)) * 86400 AS INTEGER)
-        WHERE is_online = 1
-          AND last_heartbeat IS NOT NULL
-          AND julianday('now') - julianday(last_heartbeat) > 0.007
-      `).run();
-      if (result.changes > 0) {
-        console.log(`[会话清理] 已将 ${result.changes} 个过期会话标记为离线`);
+  get currentPlayers() {
+    return this.players.size;
+  }
+
+  get isFull() {
+    return this.currentPlayers >= this.maxPlayers;
+  }
+
+  addPlayer(playerId, ws, name, isHost) {
+    this.players.set(playerId, {
+      ws,
+      name,
+      isHost,
+      status: isHost ? 'waiting' : (this.state === 'playing' ? 'rolling' : 'waiting'),
+      results: [],
+      total: 0,
+      guessNumber: -1,
+    });
+  }
+
+  removePlayer(playerId) {
+    this.players.delete(playerId);
+  }
+
+  getPlayer(playerId) {
+    return this.players.get(playerId);
+  }
+
+  // 序列化房间信息
+  toJson() {
+    return {
+      roomCode: this.code,
+      roomName: this.roomName,
+      maxPlayers: this.maxPlayers,
+      currentPlayers: this.currentPlayers,
+      diceType: this.diceType,
+      diceCount: this.diceCount,
+      gameMode: this.gameMode,
+      rollMode: this.rollMode,
+      state: this.state,
+      roundNumber: this.roundNumber,
+      rollerId: this.rollerId,
+      hostIp: 'server',
+      hostPort: 3000,
+    };
+  }
+
+  // 序列化玩家列表
+  playersToJson() {
+    return Array.from(this.players.entries()).map(([id, p]) => ({
+      id,
+      name: p.name,
+      isHost: p.isHost,
+      status: p.status,
+      results: p.results,
+      total: p.total,
+      guessNumber: p.guessNumber,
+    }));
+  }
+
+  // 广播消息给房间内所有玩家（排除发送者）
+  broadcast(message, excludeWs = null) {
+    const msgStr = JSON.stringify(message) + '\n';
+    for (const [playerId, player] of this.players) {
+      if (player.ws !== excludeWs && player.ws.readyState === WebSocket.OPEN) {
+        player.ws.send(msgStr);
       }
-    } catch (err) {
-      // 忽略清理错误
     }
-  }, 60 * 1000);
+  }
+
+  // 广播给所有玩家（包括发送者）
+  broadcastAll(message) {
+    const msgStr = JSON.stringify(message) + '\n';
+    for (const [playerId, player] of this.players) {
+      if (player.ws.readyState === WebSocket.OPEN) {
+        player.ws.send(msgStr);
+      }
+    }
+  }
+}
+
+// 处理WebSocket消息
+function handleWsMessage(ws, msg) {
+  const { type, data } = msg;
+
+  switch (type) {
+    case 'create_room':
+      handleCreateRoom(ws, data);
+      break;
+    case 'join_room':
+      handleJoinRoom(ws, data);
+      break;
+    case 'leave_room':
+      handleLeaveRoom(ws);
+      break;
+    case 'close_room':
+      handleCloseRoom(ws);
+      break;
+    default:
+      // 游戏消息转发（需要ws在房间中）
+      const clientInfo = wsClients.get(ws);
+      if (!clientInfo || !clientInfo.roomCode) {
+        console.warn('收到游戏消息但客户端不在房间中:', type);
+        return;
+      }
+      const room = rooms.get(clientInfo.roomCode);
+      if (!room) {
+        console.warn('房间不存在:', clientInfo.roomCode);
+        return;
+      }
+      // 转发给房间内其他玩家
+      room.broadcast(msg, ws);
+      break;
+  }
+}
+
+// 创建房间
+function handleCreateRoom(ws, data) {
+  const { roomName, maxPlayers, diceType, diceCount, gameMode, rollMode, preferredRoomCode } = data;
+
+  if (!roomName || !maxPlayers || !diceType || !diceCount || !gameMode) {
+    ws.send(JSON.stringify({
+      type: 'error',
+      data: { message: '缺少必要参数' }
+    }) + '\n');
+    return;
+  }
+
+  // 检查是否已在房间中
+  const existingClient = wsClients.get(ws);
+  if (existingClient && existingClient.roomCode) {
+    ws.send(JSON.stringify({
+      type: 'error',
+      data: { message: '你已在房间中' }
+    }) + '\n');
+    return;
+  }
+
+  // 生成唯一房间号（优先使用客户端提供的房间号）
+  let roomCode;
+  if (preferredRoomCode && !rooms.has(preferredRoomCode) && /^\d{4}$/.test(preferredRoomCode)) {
+    // 使用客户端建议的4位房间号
+    roomCode = preferredRoomCode;
+  } else {
+    // 服务器自动生成4位房间号
+    do {
+      roomCode = generateRoomCode();
+    } while (rooms.has(roomCode));
+  }
+
+  // 创建房间
+  const room = new Room(roomCode, ws, {
+    roomName,
+    maxPlayers,
+    diceType,
+    diceCount,
+    gameMode,
+    rollMode: rollMode || 'multi_player',
+  });
+
+  // 房主加入房间
+  const hostId = `host_${ws.userId}`;
+  room.addPlayer(hostId, ws, '房主', true);
+
+  // 存储房间和客户端信息
+  rooms.set(roomCode, room);
+  wsClients.set(ws, { playerId: hostId, roomCode, role: 'host' });
+
+  // 返回创建成功
+  ws.send(JSON.stringify({
+    type: 'room_created',
+    data: {
+      roomInfo: room.toJson(),
+      players: room.playersToJson(),
+      assignedPlayerId: hostId,
+    }
+  }) + '\n');
+
+  console.log(`房间创建: ${roomCode} - ${roomName} by ${ws.userEmail}`);
+}
+
+// 加入房间
+function handleJoinRoom(ws, data) {
+  const { roomCode, playerName } = data;
+
+  // 检查是否已在房间中
+  const existingClient = wsClients.get(ws);
+  if (existingClient && existingClient.roomCode) {
+    ws.send(JSON.stringify({
+      type: 'join_result',
+      data: { success: false, message: '你已在房间中，请先离开当前房间', roomInfo: {}, players: [] }
+    }) + '\n');
+    return;
+  }
+
+  if (!roomCode || !playerName) {
+    ws.send(JSON.stringify({
+      type: 'join_result',
+      data: { success: false, message: '缺少房间号或玩家名称', roomInfo: {}, players: [] }
+    }) + '\n');
+    return;
+  }
+
+  const room = rooms.get(roomCode);
+  if (!room) {
+    ws.send(JSON.stringify({
+      type: 'join_result',
+      data: { success: false, message: '房间不存在', roomInfo: {}, players: [] }
+    }) + '\n');
+    return;
+  }
+
+  if (room.isFull) {
+    ws.send(JSON.stringify({
+      type: 'join_result',
+      data: { success: false, message: '房间已满', roomInfo: room.toJson(), players: room.playersToJson() }
+    }) + '\n');
+    return;
+  }
+
+  // 检查同名玩家，添加后缀避免重复
+  let uniqueName = playerName;
+  let suffix = 2;
+  while (Array.from(room.players.values()).some(p => p.name === uniqueName)) {
+    uniqueName = `${playerName}${suffix}`;
+    suffix++;
+  }
+
+  // 生成唯一playerId
+  const playerId = `guest_${ws.userId}_${Date.now()}`;
+
+  // 加入房间
+  room.addPlayer(playerId, ws, uniqueName, false);
+  wsClients.set(ws, { playerId, roomCode, role: 'guest' });
+
+  // 返回加入成功
+  ws.send(JSON.stringify({
+    type: 'join_result',
+    data: {
+      success: true,
+      message: '加入成功',
+      roomInfo: room.toJson(),
+      players: room.playersToJson(),
+      assignedPlayerId: playerId,
+    }
+  }) + '\n');
+
+  // 通知房间内其他玩家
+  room.broadcast({
+    type: 'player_joined',
+    data: {
+      playerId,
+      playerName: uniqueName,
+      currentPlayers: room.currentPlayers,
+    }
+  }, ws);
+
+  console.log(`玩家加入: ${uniqueName} -> ${roomCode}`);
+}
+
+// 离开房间
+function handleLeaveRoom(ws) {
+  const clientInfo = wsClients.get(ws);
+  if (!clientInfo || !clientInfo.roomCode) return;
+
+  const room = rooms.get(clientInfo.roomCode);
+  if (!room) return;
+
+  const playerId = clientInfo.playerId;
+  const isHost = clientInfo.role === 'host';
+
+  // 从房间移除玩家
+  room.removePlayer(playerId);
+  wsClients.delete(ws);
+
+  if (isHost) {
+    // 房主离开，关闭房间
+    room.broadcastAll({ type: 'room_closed', data: {} });
+
+    // 清理该房间所有客户端的wsClients映射（包括客人的）
+    const roomCode = clientInfo.roomCode;
+    for (const [clientWs, info] of wsClients) {
+      if (info.roomCode === roomCode) {
+        wsClients.delete(clientWs);
+      }
+    }
+
+    rooms.delete(clientInfo.roomCode);
+    console.log(`房主离开，房间关闭: ${clientInfo.roomCode}`);
+  } else {
+    // 客人离开，通知其他玩家
+    room.broadcast({
+      type: 'player_left',
+      data: {
+        playerId,
+        currentPlayers: room.currentPlayers,
+      }
+    });
+    console.log(`客人离开: ${playerId} from ${clientInfo.roomCode}`);
+  }
+}
+
+// 关闭房间（房主专用）
+function handleCloseRoom(ws) {
+  const clientInfo = wsClients.get(ws);
+  if (!clientInfo || clientInfo.role !== 'host') return;
+
+  const room = rooms.get(clientInfo.roomCode);
+  if (!room) return;
+
+  room.broadcastAll({ type: 'room_closed', data: {} });
+  rooms.delete(clientInfo.roomCode);
+
+  // 清理所有客人的wsClients映射
+  for (const [clientWs, info] of wsClients) {
+    if (info.roomCode === clientInfo.roomCode) {
+      wsClients.delete(clientWs);
+    }
+  }
+
+  console.log(`房间关闭: ${clientInfo.roomCode}`);
+}
+
+// 处理WebSocket断开连接
+function handleWsDisconnect(ws) {
+  const clientInfo = wsClients.get(ws);
+  if (!clientInfo || !clientInfo.roomCode) return;
+
+  const room = rooms.get(clientInfo.roomCode);
+  if (!room) return;
+
+  const playerId = clientInfo.playerId;
+  const isHost = clientInfo.role === 'host';
+
+  room.removePlayer(playerId);
+  wsClients.delete(ws);
+
+  if (isHost) {
+    // 房主断开，关闭房间
+    room.broadcastAll({ type: 'room_closed', data: {} });
+
+    // 清理该房间所有客户端的wsClients映射（包括客人的）
+    const roomCode = clientInfo.roomCode;
+    for (const [clientWs, info] of wsClients) {
+      if (info.roomCode === roomCode) {
+        wsClients.delete(clientWs);
+      }
+    }
+
+    rooms.delete(clientInfo.roomCode);
+    console.log(`房主断开，房间关闭: ${clientInfo.roomCode}`);
+  } else {
+    // 客人断开，通知其他玩家
+    room.broadcast({
+      type: 'player_left',
+      data: {
+        playerId,
+        currentPlayers: room.currentPlayers,
+      }
+    });
+    console.log(`客人断开: ${playerId} from ${clientInfo.roomCode}`);
+  }
+}
+
+// 创建HTTP服务器并附加WebSocket
+const server = app.listen(PORT, () => {
+  console.log(`ToolApp 服务器已启动: http://localhost:${PORT}`);
+  console.log(`邮箱验证码: ${mailTransporter ? '已配置' : '未配置（设置 EMAIL_USER 和 EMAIL_PASS 环境变量）'}`);
+});
+
+// 初始化WebSocket服务器
+const wss = new WebSocket.Server({ server });
+
+// 定期清理过期的验证码和僵尸会话（每小时执行一次）
+setInterval(() => {
+  try {
+    // 清理过期验证码（超过24小时的）
+    db.prepare("DELETE FROM email_verification_codes WHERE expires_at < datetime('now', '-1 day')").run();
+    // 清理僵尸会话（超过1天仍标记为在线的会话）
+    db.prepare("UPDATE user_sessions SET is_online = 0, session_end = datetime('now') WHERE is_online = 1 AND last_heartbeat < datetime('now', '-1 day')").run();
+  } catch (err) {
+    console.error('定期清理任务失败:', err.message);
+  }
+}, 3600000);
+
+wss.on('connection', (ws, req) => {
+  // 解析URL参数获取token
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const token = url.searchParams.get('token');
+
+  if (!token) {
+    ws.close(1008, '未提供认证令牌');
+    return;
+  }
+
+  // 验证JWT token
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    // 检查用户是否已被软删除
+    const user = db.prepare('SELECT id, is_deleted FROM users WHERE id = ?').get(decoded.userId);
+    if (!user || user.is_deleted) {
+      ws.close(1008, '账号已被注销');
+      return;
+    }
+    ws.userId = decoded.userId;
+    ws.userEmail = decoded.email;
+    console.log(`WebSocket连接: ${decoded.email}`);
+  } catch (err) {
+    ws.close(1008, '认证令牌无效或已过期');
+    return;
+  }
+
+  // 心跳定时器（服务器发送心跳 + 检测客户端存活）
+  let heartbeatTimer = null;
+  // 客户端最后活跃时间（收到任何消息即视为活跃）
+  ws.lastActiveTime = Date.now();
+
+  ws.on('message', (data) => {
+    // 收到任何消息都更新活跃时间
+    ws.lastActiveTime = Date.now();
+
+    try {
+      const msgStr = data.toString().trim();
+      const msg = JSON.parse(msgStr);
+      handleWsMessage(ws, msg);
+    } catch (err) {
+      console.error('WebSocket消息解析失败:', err.message);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log(`WebSocket断开: ${ws.userEmail}`);
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    handleWsDisconnect(ws);
+  });
+
+  ws.on('error', (err) => {
+    console.error(`WebSocket错误: ${ws.userEmail} - ${err.message}`);
+  });
+
+  // 启动心跳检测（30秒发送心跳 + 检测客户端超时）
+  heartbeatTimer = setInterval(() => {
+    // 检测客户端是否超时（90秒无任何消息视为断开）
+    const inactiveTime = Date.now() - ws.lastActiveTime;
+    if (inactiveTime > 90000) {
+      console.log(`WebSocket客户端超时: ${ws.userEmail}，${Math.floor(inactiveTime / 1000)}秒无活动`);
+      ws.terminate();
+      return;
+    }
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'heartbeat', data: { timestamp: Date.now() } }) + '\n');
+    }
+  }, 30000);
 });

@@ -55,7 +55,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import * as echarts from 'echarts'
 import AppLayout from '@/components/AppLayout.vue'
 import StatsCard from '@/components/StatsCard.vue'
@@ -73,11 +73,35 @@ const recentUsers = ref([])
 const barChartRef = ref(null)
 const pieChartRef = ref(null)
 
+// 保存echarts实例，用于resize和销毁
+let barChartInstance = null
+let pieChartInstance = null
+
 onMounted(async () => {
   await loadStats()
   await nextTick()
   renderCharts()
+  // 监听窗口resize，自动调整图表大小
+  window.addEventListener('resize', handleResize)
 })
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize)
+  // 销毁echarts实例，防止内存泄漏
+  if (barChartInstance) {
+    barChartInstance.dispose()
+    barChartInstance = null
+  }
+  if (pieChartInstance) {
+    pieChartInstance.dispose()
+    pieChartInstance = null
+  }
+})
+
+function handleResize() {
+  barChartInstance?.resize()
+  pieChartInstance?.resize()
+}
 
 async function loadStats() {
   try {
@@ -97,8 +121,8 @@ async function loadStats() {
 function renderCharts() {
   // 柱状图 - 数据分布
   if (barChartRef.value) {
-    const barChart = echarts.init(barChartRef.value)
-    barChart.setOption({
+    barChartInstance = echarts.init(barChartRef.value)
+    barChartInstance.setOption({
       tooltip: { trigger: 'axis' },
       xAxis: {
         type: 'category',
@@ -126,8 +150,8 @@ function renderCharts() {
 
   // 饼图 - 模块数据占比
   if (pieChartRef.value) {
-    const pieChart = echarts.init(pieChartRef.value)
-    pieChart.setOption({
+    pieChartInstance = echarts.init(pieChartRef.value)
+    pieChartInstance.setOption({
       tooltip: { trigger: 'item' },
       series: [{
         type: 'pie',

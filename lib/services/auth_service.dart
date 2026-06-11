@@ -2,16 +2,20 @@
 // 替代 Supabase SDK，使用自建轻量服务器
 // 提供全局单例，供 UI 层和同步服务调用
 // 支持游客模式：未登录时可进入游客模式，所有功能正常使用，数据存本地
+// 支持邮箱验证码注册、顶号机制（单设备登录）
 import 'dart:convert';
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 
 import '../utils/app_logger.dart';
 import '../utils/app_settings.dart';
 import '../utils/user_data_manager.dart';
+import 'device_info_service.dart';
 import 'session_tracker.dart';
 
 class AuthService extends ChangeNotifier {
@@ -27,7 +31,8 @@ class AuthService extends ChangeNotifier {
   static const String _kRememberMe = 'auth_remember_me';
   static const String _kSavedEmail = 'auth_saved_email';
   static const String _kSavedPassword = 'auth_saved_password';
-  static const String _kAccountHistory = 'auth_account_history'; // 多账号历史记录
+  static const String _kAccountHistory = 'auth_account_history';
+  static const String _kDeviceToken = 'auth_device_token'; // 设备唯一标识
 
   // 当前登录用户信息（内存缓存）
   String? _token;
@@ -36,6 +41,10 @@ class AuthService extends ChangeNotifier {
 
   // 游客模式状态
   bool _isGuestMode = false;
+
+  // 设备唯一标识（用于顶号机制）
+  String? _deviceToken;
+  String? get deviceToken => _deviceToken;
 
   // 是否已登录
   bool get isLoggedIn => _token != null && _userId != null;
@@ -68,6 +77,13 @@ class AuthService extends ChangeNotifier {
     _userId = prefs.getString(_kUserId);
     _userEmail = prefs.getString(_kUserEmail);
     _isGuestMode = prefs.getBool(_kGuestMode) ?? false;
+    _deviceToken = prefs.getString(_kDeviceToken);
+
+    // 如果没有设备令牌，生成一个
+    if (_deviceToken == null) {
+      _deviceToken = await _generateDeviceToken();
+      await prefs.setString(_kDeviceToken, _deviceToken!);
+    }
 
     // 如果已有登录态，清除游客模式标记
     if (isLoggedIn && _isGuestMode) {
@@ -75,7 +91,25 @@ class AuthService extends ChangeNotifier {
       await prefs.setBool(_kGuestMode, false);
     }
 
-    AppLogger.i('AuthService', '认证服务初始化完成 - 已登录: $isLoggedIn, 游客模式: $_isGuestMode');
+    AppLogger.i('AuthService', '认证服务初始化完成 - 已登录: $isLoggedIn, 游客模式: $_isGuestMode, 设备令牌: $_deviceToken');
+  }
+
+  /// 生成设备唯一标识
+  Future<String> _generateDeviceToken() async {
+    try {
+      final deviceInfo = DeviceInfoPlugin();
+      if (Platform.isAndroid) {
+        final androidInfo = await deviceInfo.androidInfo;
+        return 'android_${androidInfo.id}_${androidInfo.model}';
+      } else if (Platform.isIOS) {
+        final iosInfo = await deviceInfo.iosInfo;
+        return 'ios_${iosInfo.identifierForVendor ?? 'unknown'}_${iosInfo.model}';
+      }
+    } catch (e) {
+      AppLogger.w('AuthService', '获取设备信息失败: $e');
+    }
+    // 降级方案：使用时间戳+随机数
+    return 'device_${DateTime.now().millisecondsSinceEpoch}_${DateTime.now().microsecond}';
   }
 
   // 保存登录态到本地
@@ -101,7 +135,6 @@ class AuthService extends ChangeNotifier {
   }
 
   /// 进入游客模式
-  /// 跳过登录直接使用应用，数据仅存本地
   Future<void> enterGuestMode() async {
     _isGuestMode = true;
     final prefs = await SharedPreferences.getInstance();
@@ -112,7 +145,6 @@ class AuthService extends ChangeNotifier {
   }
 
   /// 退出游客模式（登录成功后调用）
-  /// 清除游客标记，数据将同步到服务器
   Future<void> exitGuestMode() async {
     _isGuestMode = false;
     final prefs = await SharedPreferences.getInstance();
@@ -123,7 +155,6 @@ class AuthService extends ChangeNotifier {
   }
 
   /// 静默退出游客模式（不触发 notifyListeners）
-  /// 用于 AuthWrapper 回调中避免递归通知
   Future<void> exitGuestModeQuiet() async {
     _isGuestMode = false;
     final prefs = await SharedPreferences.getInstance();
@@ -132,24 +163,104 @@ class AuthService extends ChangeNotifier {
     AppLogger.i('AuthService', '静默退出游客模式');
   }
 
-  /// 邮箱+密码注册
+  // ============================================================
+  // 邮箱验证码
+  // ============================================================
+
+  /// 发送邮箱验证码
+  /// 返回 {success: 是否成功, message: 消息, code: 验证码（服务器返回）, error: 错误信息}
+  Future<Map<String, String?>> sendVerificationCode(String email) async {
+    try {
+      AppLogger.i('AuthService', '发送验证码 - 邮箱: $email');
+      final response = await http.post(
+        Uri.parse('$_baseUrl/api/auth/send-code'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': email}),
+      ).timeout(const Duration(seconds: 15));
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+      if (response.statusCode == 200) {
+        AppLogger.i('AuthService', '验证码发送成功');
+        final serverCode = data['code'] as String?;
+        final message = data['message'] as String? ?? '验证码已发送';
+        return {
+          'success': 'true',
+          'message': message,
+          'code': serverCode,
+          'error': null,
+        };
+      }
+
+      final error = data['error'] as String? ?? '发送失败';
+      AppLogger.e('AuthService', '验证码发送失败: $error');
+      return {
+        'success': 'false',
+        'message': null,
+        'code': null,
+        'error': error,
+      };
+    } catch (e) {
+      AppLogger.e('AuthService', '发送验证码异常: $e');
+      return {
+        'success': 'false',
+        'message': null,
+        'code': null,
+        'error': '发送失败：无法连接服务器',
+      };
+    }
+  }
+
+  /// 验证邮箱验证码
+  /// 返回 null 表示成功，否则返回错误信息
+  Future<String?> verifyCode(String email, String code) async {
+    try {
+      AppLogger.i('AuthService', '验证验证码 - 邮箱: $email');
+      final response = await http.post(
+        Uri.parse('$_baseUrl/api/auth/verify-code'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': email, 'code': code}),
+      ).timeout(const Duration(seconds: 15));
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+      if (response.statusCode == 200) {
+        AppLogger.i('AuthService', '验证码验证通过');
+        return null;
+      }
+
+      final error = data['error'] as String? ?? '验证失败';
+      AppLogger.e('AuthService', '验证码验证失败: $error');
+      return error;
+    } catch (e) {
+      AppLogger.e('AuthService', '验证验证码异常: $e');
+      return '验证失败：无法连接服务器';
+    }
+  }
+
+  /// 邮箱+密码注册（带验证码）
   /// 返回 null 表示成功，否则返回错误信息
   Future<String?> signUp({
     required String email,
     required String password,
+    String? verificationCode,
   }) async {
     try {
       AppLogger.i('AuthService', '注册请求 - 邮箱: $email');
+      final body = {'email': email, 'password': password};
+      if (verificationCode != null) {
+        body['verificationCode'] = verificationCode;
+      }
+
       final response = await http.post(
         Uri.parse('$_baseUrl/api/auth/register'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'email': email, 'password': password}),
-      );
+        body: jsonEncode(body),
+      ).timeout(const Duration(seconds: 15));
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
 
       if (response.statusCode == 201) {
-        // 注册成功，自动登录
         final token = data['token'] as String;
         final user = data['user'] as Map<String, dynamic>;
         final userId = user['id'].toString();
@@ -158,19 +269,30 @@ class AuthService extends ChangeNotifier {
         await _saveSession(token, userId, userEmail);
         UserDataManager.instance.clearAllCaches();
         AppLogger.i('AuthService', '注册成功 - 用户ID: $userId');
+
+        // 注册成功后异步上传设备参数（不阻塞注册流程）
+        Future<void>(() async {
+          try {
+            await DeviceInfoService.instance.uploadDeviceInfo();
+          } catch (e) {
+            AppLogger.w('AuthService', '设备参数上传失败（不影响注册）: $e');
+          }
+        });
+
         notifyListeners();
         return null;
       }
 
-      // 注册失败
       final error = data['error'] as String? ?? '注册失败';
       AppLogger.e('AuthService', '注册失败: $error');
-      // 翻译常见错误
       if (error.contains('已被注册') || error.contains('already')) {
         return '该邮箱已被注册';
       }
       if (error.contains('6位') || error.contains('password')) {
         return '密码不符合要求（至少6位）';
+      }
+      if (error.contains('验证码')) {
+        return error;
       }
       return error;
     } catch (e) {
@@ -179,24 +301,28 @@ class AuthService extends ChangeNotifier {
     }
   }
 
-  /// 邮箱+密码登录
+  /// 邮箱+密码登录（带顶号机制）
   /// 返回 null 表示成功，否则返回错误信息
   Future<String?> signIn({
     required String email,
     required String password,
   }) async {
     try {
-      AppLogger.i('AuthService', '登录请求 - 邮箱: $email');
+      AppLogger.i('AuthService', '登录请求 - 邮箱: $email, 设备令牌: $_deviceToken');
       final response = await http.post(
         Uri.parse('$_baseUrl/api/auth/login'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'email': email, 'password': password}),
-      );
+        body: jsonEncode({
+          'email': email,
+          'password': password,
+          'deviceToken': _deviceToken,
+          'deviceInfo': await _getDeviceInfo(),
+        }),
+      ).timeout(const Duration(seconds: 15));
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
 
       if (response.statusCode == 200) {
-        // 登录成功
         final token = data['token'] as String;
         final user = data['user'] as Map<String, dynamic>;
         final userId = user['id'].toString();
@@ -205,11 +331,20 @@ class AuthService extends ChangeNotifier {
         await _saveSession(token, userId, userEmail);
         UserDataManager.instance.clearAllCaches();
         AppLogger.i('AuthService', '登录成功');
+
+        // 登录成功后异步上传设备参数（不阻塞登录流程）
+        Future<void>(() async {
+          try {
+            await DeviceInfoService.instance.uploadDeviceInfo();
+          } catch (e) {
+            AppLogger.w('AuthService', '设备参数上传失败（不影响登录）: $e');
+          }
+        });
+
         notifyListeners();
         return null;
       }
 
-      // 登录失败
       final error = data['error'] as String? ?? '登录失败';
       AppLogger.e('AuthService', '登录失败: $error');
       if (error.contains('密码错误') || error.contains('Invalid')) {
@@ -222,12 +357,50 @@ class AuthService extends ChangeNotifier {
     }
   }
 
+  /// 获取设备信息字符串
+  Future<String> _getDeviceInfo() async {
+    try {
+      final deviceInfo = DeviceInfoPlugin();
+      if (Platform.isAndroid) {
+        final info = await deviceInfo.androidInfo;
+        return '${info.brand} ${info.model} (Android ${info.version.release})';
+      } else if (Platform.isIOS) {
+        final info = await deviceInfo.iosInfo;
+        return '${info.name} (iOS ${info.systemVersion})';
+      }
+    } catch (_) {}
+    return 'Unknown Device';
+  }
+
+  /// 检查当前设备是否被踢出
+  /// 返回 true 表示被踢出，需要强制退出
+  Future<bool> checkIfKicked() async {
+    if (_deviceToken == null || _token == null) return false;
+
+    try {
+      final response = await http.get(
+        Uri.parse('$_baseUrl/api/auth/check-kicked?deviceToken=$_deviceToken'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $_token',
+        },
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        return data['kicked'] == true;
+      }
+    } catch (e) {
+      AppLogger.w('AuthService', '检查踢出状态失败: $e');
+    }
+    return false;
+  }
+
   /// 登出
   Future<void> signOut() async {
     try {
       AppLogger.i('AuthService', '登出请求');
 
-      // 先结束会话（需要有效的 token 才能通知服务器）
       if (SessionTracker.instance.isTracking) {
         await SessionTracker.instance.endSession();
       }
@@ -241,7 +414,6 @@ class AuthService extends ChangeNotifier {
       await prefs.remove(_kUserId);
       await prefs.remove(_kUserEmail);
       await prefs.setBool(_kGuestMode, false);
-      // 登出时如果未勾选记住密码，清除保存的密码
       final rememberMe = prefs.getBool(_kRememberMe) ?? false;
       if (!rememberMe) {
         await prefs.remove(_kSavedEmail);
@@ -252,7 +424,6 @@ class AuthService extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       AppLogger.e('AuthService', '登出失败: $e');
-      // 即使 SharedPreferences 操作失败，也要通知 UI 更新
       _token = null;
       _userId = null;
       _userEmail = null;
@@ -264,22 +435,17 @@ class AuthService extends ChangeNotifier {
 
   // ==================== 记住账号密码 ====================
 
-  /// 保存账号密码（登录成功时调用）
-  /// 密码使用 base64 编码存储，避免明文
   Future<void> saveCredentials(String email, String password) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_kRememberMe, true);
     await prefs.setString(_kSavedEmail, email);
     await prefs.setString(_kSavedPassword, base64Encode(utf8.encode(password)));
-    // 同时保存到账号历史记录
     await _addToAccountHistory(email, password);
     AppLogger.i('AuthService', '已保存登录凭证');
   }
 
   // ==================== 多账号历史记录 ====================
 
-  /// 获取所有历史登录账号列表
-  /// 返回 List<Map>，每个元素包含 email 和 password（已解码，如果记住了密码）
   Future<List<Map<String, String>>> getAccountHistory() async {
     final prefs = await SharedPreferences.getInstance();
     final json = prefs.getString(_kAccountHistory);
@@ -307,22 +473,17 @@ class AuthService extends ChangeNotifier {
     }
   }
 
-  /// 添加账号到历史记录（登录成功时调用）
   Future<void> _addToAccountHistory(String email, String password) async {
     final history = await getAccountHistory();
-    // 移除已存在的同名账号
     history.removeWhere((item) => item['email'] == email);
-    // 插入到最前面
     history.insert(0, {
       'email': email,
       'password': base64Encode(utf8.encode(password)),
     });
-    // 最多保留 10 个账号
     if (history.length > 10) {
       history.removeRange(10, history.length);
     }
     final prefs = await SharedPreferences.getInstance();
-    // 保存时密码保持 base64 编码
     final jsonList = history.map((item) => {
       'email': item['email'],
       'password': item['password'],
@@ -331,17 +492,13 @@ class AuthService extends ChangeNotifier {
     AppLogger.i('AuthService', '已更新账号历史记录，共 ${history.length} 个账号');
   }
 
-  /// 仅记住账号（不记住密码）时添加到历史
   Future<void> addEmailToHistory(String email) async {
     final history = await getAccountHistory();
-    // 检查是否已存在
     final existingIndex = history.indexWhere((item) => item['email'] == email);
     if (existingIndex >= 0) {
-      // 已存在，移到最前面
       final item = history.removeAt(existingIndex);
       history.insert(0, item);
     } else {
-      // 不存在，添加到最前面（无密码）
       history.insert(0, {'email': email, 'password': ''});
       if (history.length > 10) {
         history.removeRange(10, history.length);
@@ -355,7 +512,6 @@ class AuthService extends ChangeNotifier {
     await prefs.setString(_kAccountHistory, jsonEncode(jsonList));
   }
 
-  /// 从历史记录中删除指定账号
   Future<void> removeAccountFromHistory(String email) async {
     final history = await getAccountHistory();
     history.removeWhere((item) => item['email'] == email);
@@ -367,7 +523,6 @@ class AuthService extends ChangeNotifier {
     await prefs.setString(_kAccountHistory, jsonEncode(jsonList));
   }
 
-  /// 清除保存的账号密码（取消记住密码时调用）
   Future<void> clearCredentials() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_kRememberMe, false);
@@ -376,19 +531,16 @@ class AuthService extends ChangeNotifier {
     AppLogger.i('AuthService', '已清除保存的登录凭证');
   }
 
-  /// 是否勾选了记住密码
   Future<bool> isRememberMe() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getBool(_kRememberMe) ?? false;
   }
 
-  /// 获取保存的邮箱
   Future<String?> getSavedEmail() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_kSavedEmail);
   }
 
-  /// 获取保存的密码（解码 base64）
   Future<String?> getSavedPassword() async {
     final prefs = await SharedPreferences.getInstance();
     final encoded = prefs.getString(_kSavedPassword);
@@ -402,7 +554,6 @@ class AuthService extends ChangeNotifier {
 
   // ==================== 服务器扫描 ====================
 
-  // 常见局域网子网前缀
   static const List<String> _commonSubnets = [
     '192.168.0',
     '192.168.1',
@@ -414,10 +565,7 @@ class AuthService extends ChangeNotifier {
   ];
 
   /// 扫描局域网中的 ToolApp 服务器
-  /// 返回找到的服务器 URL，未找到返回 null
-  /// 扫描策略：先测试当前设置地址，再扫描常见子网
   Future<String?> scanServer({void Function(String)? onProgress}) async {
-    // 1. 先测试当前设置的服务器地址
     onProgress?.call('测试当前服务器地址...');
     final currentOk = await _testServer(appSettings.serverUrl);
     if (currentOk) {
@@ -425,7 +573,6 @@ class AuthService extends ChangeNotifier {
       return appSettings.serverUrl;
     }
 
-    // 2. 扫描常见子网
     for (final subnet in _commonSubnets) {
       onProgress?.call('扫描 $subnet.x ...');
       final found = await _scanSubnet(subnet);
@@ -439,7 +586,6 @@ class AuthService extends ChangeNotifier {
     return null;
   }
 
-  /// 扫描指定子网（并发 20 个一批）
   Future<String?> _scanSubnet(String subnet) async {
     const port = 3000;
     const batchSize = 20;
@@ -462,11 +608,12 @@ class AuthService extends ChangeNotifier {
   }
 
   /// 测试指定 URL 是否为 ToolApp 服务器
+  /// 增加超时时间以支持流量网络（cpolar公网）
   Future<bool> _testServer(String url) async {
     try {
       final response = await http
           .get(Uri.parse('$url/api/health'))
-          .timeout(const Duration(milliseconds: 800));
+          .timeout(const Duration(seconds: 10)); // 流量网络下需要更长的超时
       return response.statusCode == 200;
     } catch (_) {
       return false;

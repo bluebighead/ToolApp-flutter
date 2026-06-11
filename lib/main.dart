@@ -9,11 +9,11 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'pages/auth/login_page.dart';
 import 'pages/home_page.dart';
-import 'pages/settings_page.dart';
 import 'services/auth_service.dart';
 import 'services/online_overlay_manager.dart';
 import 'services/session_tracker.dart';
 import 'services/sync_service.dart';
+import 'services/update_service.dart';
 import 'utils/app_info.dart';
 import 'utils/app_logger.dart';
 import 'utils/app_settings.dart';
@@ -195,18 +195,78 @@ class _AuthWrapperState extends State<AuthWrapper> {
   // 记录上一次是否处于游客模式，用于检测"游客→登录"的转换
   bool _wasGuestMode = false;
 
+  // 顶号检测定时器
+  Timer? _kickedCheckTimer;
+
   @override
   void initState() {
     super.initState();
     _wasGuestMode = AuthService.instance.isGuestMode;
     // 监听 AuthService 状态变化（登录/登出/游客模式切换）
     AuthService.instance.addListener(_onAuthStateChanged);
+    // 启动顶号检测定时器（每30秒检查一次）
+    _startKickedCheck();
+    // 启动时自动检查更新（延迟2秒，等待页面渲染完成）
+    Future.delayed(const Duration(seconds: 2), () {
+      _autoCheckUpdate();
+    });
   }
 
   @override
   void dispose() {
     AuthService.instance.removeListener(_onAuthStateChanged);
+    _kickedCheckTimer?.cancel();
     super.dispose();
+  }
+
+  // 启动顶号检测
+  void _startKickedCheck() {
+    _kickedCheckTimer?.cancel();
+    _kickedCheckTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _checkIfKicked();
+    });
+  }
+
+  // 启动时自动检查更新
+  Future<void> _autoCheckUpdate() async {
+    final updateInfo = await UpdateService.instance.checkForUpdate();
+    if (!mounted) return;
+
+    // 有更新时才弹窗（无论是否强制更新都弹窗提示）
+    if (updateInfo.hasUpdate) {
+      UpdateService.showUpdateDialog(context, updateInfo);
+    }
+  }
+
+  // 检查是否被踢出
+  Future<void> _checkIfKicked() async {
+    if (!AuthService.instance.isLoggedIn) return;
+
+    final isKicked = await AuthService.instance.checkIfKicked();
+    if (isKicked && mounted) {
+      // 停止顶号检测
+      _kickedCheckTimer?.cancel();
+
+      // 弹出被踢出提示框
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Text('账号退出提示'),
+          content: const Text('您的账号已在另一台设备登录，当前设备已被强制退出。'),
+          actions: [
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                // 执行登出
+                AuthService.instance.signOut();
+              },
+              child: const Text('确定'),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   // 认证状态变化回调
@@ -239,6 +299,8 @@ class _AuthWrapperState extends State<AuthWrapper> {
       if (appSettings.autoSyncInterval > 0) {
         SyncService.instance.startAutoSync();
       }
+      // 登录成功后重启顶号检测
+      _startKickedCheck();
     }
 
     // 登出时结束会话跟踪
@@ -246,6 +308,8 @@ class _AuthWrapperState extends State<AuthWrapper> {
       SessionTracker.instance.endSession();
       // 停止自动同步
       SyncService.instance.stopAutoSync();
+      // 登出时停止顶号检测
+      _kickedCheckTimer?.cancel();
     }
 
     setState(() {});

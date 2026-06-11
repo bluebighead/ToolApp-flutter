@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.29.1+147
+version: 1.32.0+152
 
 environment:
   sdk: ^3.11.1
@@ -54,6 +54,8 @@ dependencies:
   device_info_plus: ^10.1.0
   # 网速测试：HTTP 客户端
   http: ^1.2.0
+  # WebSocket通信：联机掷骰子服务器模式
+  web_socket_channel: ^2.4.0
   # 文件选择：用于选择 M3U8 视频源文件
   file_picker: ^8.1.4
   # 视频格式转换：基于 FFmpeg 的 M3U8/视频转 MP4 等格式

@@ -1,10 +1,8 @@
 // 联机掷骰子入口页
 // 提供房主/客人两个入口按钮
-// 显示当前连接的 WiFi 网络名称
 // 检测到活跃房间时提示用户返回
 import 'package:flutter/material.dart';
 
-import '../../services/lan_service.dart';
 import '../../services/online_overlay_manager.dart';
 import '../../utils/app_logger.dart';
 import 'guest_join_page.dart';
@@ -20,9 +18,6 @@ class OnlineLobbyPage extends StatefulWidget {
 class _OnlineLobbyPageState extends State<OnlineLobbyPage> {
   static const String _logTag = 'OnlineLobbyPage';
 
-  /// 当前 WiFi SSID
-  String _wifiSsid = '';
-
   /// 是否有活跃房间（用于 UI 显示）
   bool _hasActiveRoom = false;
 
@@ -32,16 +27,7 @@ class _OnlineLobbyPageState extends State<OnlineLobbyPage> {
   @override
   void initState() {
     super.initState();
-    _loadWifiSsid();
     _checkActiveRoom();
-  }
-
-  /// 加载 WiFi SSID
-  Future<void> _loadWifiSsid() async {
-    final ssid = await LanService.getWifiSsid();
-    if (mounted) {
-      setState(() => _wifiSsid = ssid);
-    }
   }
 
   /// 检查是否有活跃房间
@@ -199,7 +185,7 @@ class _OnlineLobbyPageState extends State<OnlineLobbyPage> {
               ],
 
               // 标题图标
-              Icon(Icons.wifi, size: 64, color: theme.primaryColor),
+              Icon(Icons.cloud, size: 64, color: theme.primaryColor),
               const SizedBox(height: 16),
               Text(
                 '联机掷骰子',
@@ -208,31 +194,11 @@ class _OnlineLobbyPageState extends State<OnlineLobbyPage> {
                     ),
               ),
               const SizedBox(height: 8),
-              // 当前 WiFi 网络名称
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                  color: theme.primaryColor.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.wifi, size: 16, color: theme.primaryColor),
-                    const SizedBox(width: 6),
-                    Text(
-                      _wifiSsid.isNotEmpty
-                          ? '当前网络：$_wifiSsid'
-                          : '未检测到 WiFi 网络',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: _wifiSsid.isNotEmpty
-                            ? theme.primaryColor
-                            : Colors.grey.shade600,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
+              Text(
+                '通过服务器与好友一起掷骰子',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey.shade600,
                 ),
               ),
               const SizedBox(height: 32),

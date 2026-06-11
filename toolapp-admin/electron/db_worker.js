@@ -206,6 +206,9 @@ async function handleMessage(msg) {
       case 'deleteUser':
         result = deleteUser(params?.userId);
         break;
+      case 'createUser':
+        result = createUser(params?.email, params?.password, params?.accountType);
+        break;
       case 'exportTable':
         result = exportTable(params?.table, params?.format);
         break;
@@ -235,11 +238,26 @@ async function handleMessage(msg) {
       case 'getUserActivity':
         result = getUserActivity(params?.userId, params || {});
         break;
+      case 'getUserDeviceInfo':
+        result = getUserDeviceInfo(params?.userId);
+        break;
       case 'getSystemInfo':
         result = await getSystemInfo();
         break;
       case 'getLocalDatabaseInfo':
         result = getLocalDatabaseInfo();
+        break;
+      case 'version:getList':
+        result = await getVersionList();
+        break;
+      case 'version:create':
+        result = await createVersion(params);
+        break;
+      case 'version:update':
+        result = await updateVersion(params?.id, params?.data);
+        break;
+      case 'version:delete':
+        result = await deleteVersion(params);
         break;
       default:
         sendError(id, 'UNKNOWN_METHOD', '未知方法: ' + method);
@@ -322,6 +340,13 @@ async function connectLocal(newDbPath) {
     
     db = new Database(newDbPath);
     dbPath = newDbPath;
+    
+    // 迁移：为已存在的users表添加is_deleted字段
+    try {
+      db.exec('ALTER TABLE users ADD COLUMN is_deleted INTEGER DEFAULT 0');
+    } catch(e) {
+      // 字段已存在，忽略
+    }
     
     // 验证
     const row = db.prepare('SELECT COUNT(*) as count FROM users').get();
@@ -427,7 +452,11 @@ async function getStats() {
   };
   for (const [table, key] of Object.entries(tableMap)) {
     try {
-      const r = db.prepare('SELECT COUNT(*) as count FROM ' + table).get();
+      let query = 'SELECT COUNT(*) as count FROM ' + table;
+      if (table === 'users') {
+        query += ' WHERE is_deleted IS NULL OR is_deleted = 0';
+      }
+      const r = db.prepare(query).get();
       stats[key] = r.count;
     } catch(e) { stats[key] = 0; }
   }
@@ -456,11 +485,11 @@ async function getUsers(params) {
     let total;
     let rows;
     if (search) {
-      total = db.prepare('SELECT COUNT(*) as count FROM users WHERE email LIKE ?').get('%' + search + '%').count;
-      rows = db.prepare('SELECT id, email, password_hash, created_at FROM users WHERE email LIKE ? ORDER BY id LIMIT ? OFFSET ?').all('%' + search + '%', pageSize, offset);
+      total = db.prepare('SELECT COUNT(*) as count FROM users WHERE email LIKE ? AND (is_deleted IS NULL OR is_deleted = 0)').get('%' + search + '%').count;
+      rows = db.prepare('SELECT id, email, password_hash, created_at FROM users WHERE email LIKE ? AND (is_deleted IS NULL OR is_deleted = 0) ORDER BY id LIMIT ? OFFSET ?').all('%' + search + '%', pageSize, offset);
     } else {
-      total = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-      rows = db.prepare('SELECT id, email, password_hash, created_at FROM users ORDER BY id LIMIT ? OFFSET ?').all(pageSize, offset);
+      total = db.prepare('SELECT COUNT(*) as count FROM users WHERE is_deleted IS NULL OR is_deleted = 0').get().count;
+      rows = db.prepare('SELECT id, email, password_hash, created_at FROM users WHERE is_deleted IS NULL OR is_deleted = 0 ORDER BY id LIMIT ? OFFSET ?').all(pageSize, offset);
     }
     
     const usersWithData = rows.map(user => {
@@ -542,16 +571,130 @@ function deleteRecord(table, id) {
 }
 
 function deleteUser(userId) {
+  // 远程模式：调用服务器 API
+  if (remoteMode && remoteUrl) {
+    return new Promise((resolve) => {
+      const http = require('http');
+      const apiUrl = new URL('/api/admin/users/' + userId, remoteUrl);
+      const req = http.request(apiUrl, {
+        method: 'DELETE',
+        headers: { 'x-admin-password': remotePassword },
+        timeout: 10000,
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const result = JSON.parse(data);
+            resolve(result.success ? { success: true } : { success: false, error: result.error || result.message });
+          } catch(e) {
+            resolve({ success: false, error: '服务器响应格式错误' });
+          }
+        });
+      });
+      req.on('error', (err) => resolve({ success: false, error: err.message }));
+      req.on('timeout', () => { req.destroy(); resolve({ success: false, error: '连接超时' }); });
+      req.end();
+    });
+  }
+  
   if (!db) return { success: false, error: '未连接' };
   try {
-    const tables = ['heart_rate_sessions', 'network_speed_records', 'convert_history', 'dice_records', 'period_records'];
+    // 软删除：标记用户为已注销
+    db.prepare('UPDATE users SET is_deleted = 1 WHERE id = ?').run(userId);
+    
+    // 清理关联数据
+    const tables = ['heart_rate_sessions', 'network_speed_records', 'convert_history', 'dice_records', 'period_records', 'user_sessions', 'user_activity_logs', 'device_tokens'];
     for (const table of tables) {
       try {
         db.prepare('DELETE FROM ' + table + ' WHERE user_id = ?').run(userId);
       } catch(e) {}
     }
-    db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+    // 清理该用户的邮箱验证码
+    try {
+      const user = db.prepare('SELECT email FROM users WHERE id = ?').get(userId);
+      if (user) {
+        db.prepare('DELETE FROM email_verification_codes WHERE email = ?').run(user.email);
+      }
+    } catch(e) {}
     return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+function createUser(email, password, accountType) {
+  if (!email || !password) return { success: false, error: '账号和密码不能为空' };
+  if (password.length < 6) return { success: false, error: '密码至少需要6位' };
+
+  const isAdminType = accountType === 'admin';
+  if (!isAdminType) {
+    // 邮箱用户：严格校验邮箱格式
+    const strictEmailRegex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,10}$/;
+    if (!strictEmailRegex.test(email.trim())) {
+      return { success: false, error: '请输入有效的邮箱格式（例如：user@example.com）' };
+    }
+  } else {
+    // 管理员账号：限制长度，不允许空格
+    const trimmed = email.trim();
+    if (trimmed.length > 64) return { success: false, error: '管理员账号名称不能超过64个字符' };
+    if (/\s/.test(trimmed)) return { success: false, error: '管理员账号名称不能包含空格' };
+  }
+
+  // 远程模式：调用服务器 API（将账号类型传给服务器）
+  if (remoteMode && remoteUrl) {
+    return new Promise((resolve) => {
+      const http = require('http');
+      const apiUrl = new URL('/api/admin/users', remoteUrl);
+      const body = JSON.stringify({ email, password, accountType });
+      const req = http.request(apiUrl, {
+        method: 'POST',
+        headers: {
+          'x-admin-password': remotePassword,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+        timeout: 10000,
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const result = JSON.parse(data);
+            resolve(result.success ? { success: true, user: result.user } : { success: false, error: result.error || result.message });
+          } catch(e) {
+            resolve({ success: false, error: '服务器响应格式错误' });
+          }
+        });
+      });
+      req.on('error', (err) => resolve({ success: false, error: err.message }));
+      req.on('timeout', () => { req.destroy(); resolve({ success: false, error: '连接超时' }); });
+      req.write(body);
+      req.end();
+    });
+  }
+
+  // 本地模式
+  if (!db) return { success: false, error: '未连接' };
+  try {
+    const bcrypt = require('bcryptjs');
+
+    // 检查账号是否已注册
+    const existing = db.prepare('SELECT id, is_deleted FROM users WHERE email = ?').get(email.trim());
+    if (existing) {
+      if (existing.is_deleted) {
+        // 已注销账号：更新密码并激活
+        const passwordHash = bcrypt.hashSync(password, 10);
+        db.prepare('UPDATE users SET password_hash = ?, is_deleted = 0 WHERE id = ?').run(passwordHash, existing.id);
+        return { success: true, user: { id: existing.id, email: email.trim() } };
+      }
+      return { success: false, error: '该账号已存在' };
+    }
+
+    // 创建新用户
+    const passwordHash = bcrypt.hashSync(password, 10);
+    const result = db.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)').run(email, passwordHash);
+    return { success: true, user: { id: result.lastInsertRowid, email } };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -780,6 +923,33 @@ function getUserActivity(userId, params) {
   }
 }
 
+// ============ 用户设备参数 ============
+async function getUserDeviceInfo(userId) {
+  // 远程模式：从服务器 API 获取
+  if (remoteMode && remoteUrl) {
+    try {
+      return await remoteGet('/api/admin/users/' + userId + '/device-info');
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+
+  // 本地模式：从本地数据库查询
+  if (!db) return { error: '未连接数据库' };
+
+  try {
+    if (!tableExists('user_device_info')) {
+      return null; // 表不存在，返回 null
+    }
+    const deviceInfo = db.prepare(
+      'SELECT * FROM user_device_info WHERE user_id = ? ORDER BY id DESC LIMIT 1'
+    ).get(userId);
+    return deviceInfo || null;
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
 // ============ 系统信息 ============
 async function getSystemInfo() {
   // 远程模式：从服务器 API 获取
@@ -892,7 +1062,11 @@ function getLocalDatabaseInfo() {
 
     for (const { name, key } of tables) {
       if (tableExists(name)) {
-        const row = db.prepare('SELECT COUNT(*) as count FROM ' + name).get();
+        let sql = 'SELECT COUNT(*) as count FROM ' + name;
+        if (name === 'users') {
+          sql += ' WHERE is_deleted IS NULL OR is_deleted = 0';
+        }
+        const row = db.prepare(sql).get();
         tableInfo[key] = row.count;
       } else {
         tableInfo[key] = 0;
@@ -934,6 +1108,152 @@ async function changePassword(newPassword) {
     }
   }
   return { error: '仅远程模式支持修改密码' };
+}
+
+// ============ 版本管理 ============
+
+// 获取版本列表
+async function getVersionList() {
+  if (remoteMode && remoteUrl) {
+    try {
+      return await remoteGet('/api/admin/app-versions');
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+  // 本地模式
+  if (!db) return { error: '数据库未连接' };
+  try {
+    return db.prepare('SELECT * FROM app_versions ORDER BY build_number DESC').all();
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+// 创建新版本（上传APK到远程服务器）
+async function createVersion(data) {
+  if (remoteMode && remoteUrl) {
+    try {
+      // 使用multipart/form-data上传APK文件
+      const fs = require('fs');
+      const path = require('path');
+      const http = require('http');
+
+      if (!data.apkFilePath || !data.version || !data.buildNumber) {
+        return { error: '参数不完整' };
+      }
+
+      const filePath = data.apkFilePath;
+      if (!fs.existsSync(filePath)) {
+        return { error: 'APK文件不存在' };
+      }
+
+      const fileBuffer = fs.readFileSync(filePath);
+      const fileName = path.basename(filePath);
+      const boundary = '----FormBoundary' + Date.now();
+
+      // 构建multipart body
+      const parts = [];
+      // version字段
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="version"\r\n\r\n${data.version}\r\n`));
+      // build_number字段
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="build_number"\r\n\r\n${data.buildNumber}\r\n`));
+      // update_notes字段
+      if (data.updateNotes) {
+        parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="update_notes"\r\n\r\n${data.updateNotes}\r\n`));
+      }
+      // force_update字段
+      if (data.forceUpdate) {
+        parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="force_update"\r\n\r\n1\r\n`));
+      }
+      // APK文件
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="apk"; filename="${fileName}"\r\nContent-Type: application/vnd.android.package-archive\r\n\r\n`));
+      parts.push(fileBuffer);
+      parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+
+      const body = Buffer.concat(parts);
+
+      return new Promise((resolve, reject) => {
+        const apiUrl = new URL('/api/admin/app-version', remoteUrl);
+        const req = http.request(apiUrl, {
+          method: 'POST',
+          headers: {
+            'x-admin-password': remotePassword,
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length,
+          },
+          timeout: 300000, // 5分钟超时（大文件上传）
+        }, (res) => {
+          let responseData = '';
+          res.on('data', chunk => responseData += chunk);
+          res.on('end', () => {
+            try {
+              resolve(JSON.parse(responseData));
+            } catch(e) {
+              resolve({ error: '服务器响应格式错误' });
+            }
+          });
+        });
+        req.on('error', (err) => resolve({ error: err.message }));
+        req.on('timeout', () => { req.destroy(); resolve({ error: '上传超时' }); });
+        req.write(body);
+        req.end();
+      });
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+  return { error: '本地模式暂不支持版本管理，请使用远程模式' };
+}
+
+// 更新版本信息
+async function updateVersion(id, data) {
+  if (remoteMode && remoteUrl) {
+    try {
+      return await remotePost(`/api/admin/app-version/${id}`, {
+        version: data.version,
+        build_number: data.buildNumber,
+        update_notes: data.updateNotes,
+        force_update: data.forceUpdate,
+      });
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+  return { error: '本地模式暂不支持版本管理' };
+}
+
+// 删除版本
+async function deleteVersion(id) {
+  if (remoteMode && remoteUrl) {
+    try {
+      return new Promise((resolve, reject) => {
+        const http = require('http');
+        const apiUrl = new URL(`/api/admin/app-version/${id}`, remoteUrl);
+        const req = http.request(apiUrl, {
+          method: 'DELETE',
+          headers: { 'x-admin-password': remotePassword },
+          timeout: 10000,
+        }, (res) => {
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => {
+            try {
+              resolve(JSON.parse(data));
+            } catch(e) {
+              resolve({ error: '服务器响应格式错误' });
+            }
+          });
+        });
+        req.on('error', (err) => resolve({ error: err.message }));
+        req.on('timeout', () => { req.destroy(); resolve({ error: '连接超时' }); });
+        req.end();
+      });
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+  return { error: '本地模式暂不支持版本管理' };
 }
 
 // 发送就绪信号

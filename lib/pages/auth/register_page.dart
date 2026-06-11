@@ -1,9 +1,11 @@
 // 注册页面
-// 邮箱+密码注册，注册成功后自动登录并跳转首页
+// 邮箱+密码注册，注册时需要先验证邮箱验证码
+// 注册成功后自动登录并跳转首页
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../services/auth_service.dart';
-import '../../utils/app_logger.dart';
 
 class RegisterPage extends StatefulWidget {
   const RegisterPage({super.key});
@@ -13,10 +15,11 @@ class RegisterPage extends StatefulWidget {
 }
 
 class _RegisterPageState extends State<RegisterPage> {
-  // 邮箱、密码、确认密码输入控制器
+  // 邮箱、密码、确认密码、验证码输入控制器
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
+  final _verificationCodeController = TextEditingController();
 
   // 是否正在注册中
   bool _isLoading = false;
@@ -25,12 +28,96 @@ class _RegisterPageState extends State<RegisterPage> {
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
 
+  // 验证码相关状态
+  bool _isSendingCode = false; // 是否正在发送验证码
+  int _countdown = 0; // 倒计时秒数
+  Timer? _countdownTimer; // 倒计时定时器
+  bool _isCodeVerified = false; // 验证码是否已验证通过
+
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
     _confirmPasswordController.dispose();
+    _verificationCodeController.dispose();
+    _countdownTimer?.cancel();
     super.dispose();
+  }
+
+  // 发送验证码
+  Future<void> _onSendCode() async {
+    final email = _emailController.text.trim();
+
+    // 邮箱格式校验
+    if (email.isEmpty) {
+      _showSnackBar('请输入邮箱');
+      return;
+    }
+    if (!RegExp(r'^[\w-]+(\.[\w-]+)*@[\w-]+(\.[\w-]+)+$').hasMatch(email)) {
+      _showSnackBar('请输入有效的邮箱地址');
+      return;
+    }
+
+    setState(() => _isSendingCode = true);
+
+    final result = await AuthService.instance.sendVerificationCode(email);
+
+    if (!mounted) return;
+    setState(() => _isSendingCode = false);
+
+    if (result['success'] == 'true') {
+      final message = result['message'] ?? '验证码已发送到您的邮箱';
+      final serverCode = result['code'];
+      if (serverCode != null) {
+        // 服务器返回了验证码，直接显示给用户
+        _showSnackBar('$message (验证码: $serverCode)');
+      } else {
+        _showSnackBar(message);
+      }
+      // 开始60秒倒计时
+      _startCountdown();
+    } else {
+      _showSnackBar(result['error'] ?? '发送失败');
+    }
+  }
+
+  // 开始倒计时
+  void _startCountdown() {
+    _countdownTimer?.cancel();
+    _countdown = 60;
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_countdown > 0) {
+        setState(() => _countdown--);
+      } else {
+        timer.cancel();
+      }
+    });
+  }
+
+  // 验证验证码
+  Future<void> _onVerifyCode() async {
+    final email = _emailController.text.trim();
+    final code = _verificationCodeController.text.trim();
+
+    if (code.isEmpty) {
+      _showSnackBar('请输入验证码');
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    final error = await AuthService.instance.verifyCode(email, code);
+
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+
+    if (error != null) {
+      _showSnackBar(error);
+      setState(() => _isCodeVerified = false);
+    } else {
+      _showSnackBar('验证码验证成功');
+      setState(() => _isCodeVerified = true);
+    }
   }
 
   // 执行注册
@@ -42,6 +129,10 @@ class _RegisterPageState extends State<RegisterPage> {
     // 输入校验
     if (email.isEmpty) {
       _showSnackBar('请输入邮箱');
+      return;
+    }
+    if (!_isCodeVerified) {
+      _showSnackBar('请先验证邮箱验证码');
       return;
     }
     if (password.isEmpty) {
@@ -128,19 +219,86 @@ class _RegisterPageState extends State<RegisterPage> {
                 ),
                 const SizedBox(height: 32),
 
-                // 邮箱输入框
-                TextField(
-                  controller: _emailController,
-                  keyboardType: TextInputType.emailAddress,
-                  autofillHints: const [AutofillHints.email],
-                  decoration: InputDecoration(
-                    labelText: '邮箱',
-                    hintText: '请输入邮箱地址',
-                    prefixIcon: const Icon(Icons.email_outlined),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
+                // 邮箱输入框 + 发送验证码按钮
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _emailController,
+                        keyboardType: TextInputType.emailAddress,
+                        autofillHints: const [AutofillHints.email],
+                        decoration: InputDecoration(
+                          labelText: '邮箱',
+                          hintText: '请输入邮箱地址',
+                          prefixIcon: const Icon(Icons.email_outlined),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 100,
+                      child: FilledButton(
+                        onPressed: _isSendingCode || _countdown > 0
+                            ? null
+                            : _onSendCode,
+                        child: _isSendingCode
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : Text(
+                                _countdown > 0 ? '$_countdown s' : '发送验证码',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+
+                // 验证码输入框 + 验证按钮
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _verificationCodeController,
+                        keyboardType: TextInputType.number,
+                        maxLength: 6,
+                        decoration: InputDecoration(
+                          labelText: '验证码',
+                          hintText: '请输入6位验证码',
+                          prefixIcon: const Icon(Icons.security),
+                          counterText: '',
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 100,
+                      child: FilledButton(
+                        onPressed: _isCodeVerified ? null : _onVerifyCode,
+                        style: FilledButton.styleFrom(
+                          backgroundColor: _isCodeVerified
+                              ? Colors.green
+                              : null,
+                        ),
+                        child: Text(
+                          _isCodeVerified ? '已验证' : '验证',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 16),
 

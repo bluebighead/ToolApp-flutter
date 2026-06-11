@@ -1,6 +1,6 @@
 {
   "name": "toolapp-server",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "ToolApp 轻量认证与数据同步服务器",
   "main": "server.js",
   "scripts": {
@@ -11,6 +11,9 @@
     "better-sqlite3": "^11.0.0",
     "bcryptjs": "^2.4.3",
     "jsonwebtoken": "^9.0.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "nodemailer": "^6.9.0",
+    "ws": "^8.16.0",
+    "multer": "^1.4.5-lts.1"
   }
 }

@@ -15,8 +15,8 @@ class AppSettings extends ChangeNotifier {
   static const String _kServerUrl = 'settings_server_url';
   static const String _kAutoSyncInterval = 'settings_auto_sync_interval';
 
-  // 默认服务器地址（自建轻量服务器，局域网 IP）
-  static const String defaultServerUrl = 'http://192.168.31.13:3000';
+  // 默认服务器地址（自建轻量服务器，cpolar内网穿透公网地址）
+  static const String defaultServerUrl = 'http://63e160ef.r18.cpolar.top';
   static const String _defaultServerUrl = defaultServerUrl;
 
   // 内部 SharedPreferences 实例

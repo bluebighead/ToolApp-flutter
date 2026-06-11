@@ -7,16 +7,16 @@ import '../utils/app_logger.dart';
 
 /// 消息类型枚举
 enum MessageType {
-  // UDP 广播消息
+  // UDP 广播消息（已废弃，保留兼容）
   roomBroadcast('room_broadcast'),   // 房主广播房间信息
   codeQuery('code_query'),           // 客人查询配对码
   codeResponse('code_response'),     // 房主回应配对码查询
 
-  // TCP 消息
+  // TCP/WebSocket 消息
   joinRoom('join_room'),             // 客人请求加入房间
-  joinResult('join_result'),         // 房主返回加入结果
-  playerJoined('player_joined'),     // 房主通知有新玩家加入
-  playerLeft('player_left'),         // 房主通知有玩家离开
+  joinResult('join_result'),         // 房主/服务器返回加入结果
+  playerJoined('player_joined'),     // 房主/服务器通知有新玩家加入
+  playerLeft('player_left'),         // 房主/服务器通知有玩家离开
   paramsUpdate('params_update'),     // 房主更新游戏参数
   startRound('start_round'),         // 房主开始新一轮
   startRoundRequest('start_round_request'), // 客人请求开始新一轮（单人模式掷骰者）
@@ -27,9 +27,15 @@ enum MessageType {
   allResults('all_results'),         // 房主广播所有结果
   kickPlayer('kick_player'),         // 房主踢出玩家
   leaveRoom('leave_room'),           // 玩家主动离开
-  roomClosed('room_closed'),         // 房主关闭房间
+  roomClosed('room_closed'),         // 房主/服务器关闭房间
   hostMigrated('host_migrated'),     // 房主迁移给客人
-  heartbeat('heartbeat');            // 心跳保活消息
+  heartbeat('heartbeat'),            // 心跳保活消息
+
+  // 服务器专用消息（WebSocket模式）
+  createRoom('create_room'),         // 客户端请求服务器创建房间
+  closeRoom('close_room'),           // 房主请求服务器关闭房间
+  roomCreated('room_created'),       // 服务器返回房间创建成功
+  error('error');                    // 服务器返回错误
 
   final String value;
   const MessageType(this.value);
@@ -325,6 +331,64 @@ class MessageBuilder {
         'playerId': playerId,
         'timestamp': DateTime.now().millisecondsSinceEpoch,
       },
+    );
+  }
+
+  // ============================================================
+  // 服务器专用消息构建器（WebSocket模式）
+  // ============================================================
+
+  /// 创建房间请求（发送到服务器）
+  static OnlineMessage createRoom({
+    required String roomName,
+    required int maxPlayers,
+    required String diceType,
+    required int diceCount,
+    required String gameMode,
+    String rollMode = 'multi_player',
+    String? preferredRoomCode, // 房主端建议的房间号（4位数字）
+  }) {
+    return OnlineMessage(
+      type: MessageType.createRoom, // 正确的类型：create_room，与服务器端匹配
+      data: {
+        'roomName': roomName,
+        'maxPlayers': maxPlayers,
+        'diceType': diceType,
+        'diceCount': diceCount,
+        'gameMode': gameMode,
+        'rollMode': rollMode,
+        'preferredRoomCode': preferredRoomCode,
+      },
+    );
+  }
+
+  /// 加入房间请求（发送到服务器）
+  static OnlineMessage joinRoomRequest({
+    required String roomCode,
+    required String playerName,
+  }) {
+    return OnlineMessage(
+      type: MessageType.joinRoom,
+      data: {
+        'roomCode': roomCode,
+        'playerName': playerName,
+      },
+    );
+  }
+
+  /// 关闭房间请求（房主发送到服务器）
+  static OnlineMessage closeRoomRequest() {
+    return const OnlineMessage(
+      type: MessageType.closeRoom, // 正确的类型：close_room，与服务器端匹配
+      data: {},
+    );
+  }
+
+  /// 离开房间请求（发送到服务器）
+  static OnlineMessage leaveRoomRequest() {
+    return const OnlineMessage(
+      type: MessageType.leaveRoom,
+      data: {},
     );
   }
 }

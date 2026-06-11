@@ -39,6 +39,10 @@
           <el-icon><Setting /></el-icon>
           <template #title>系统设置</template>
         </el-menu-item>
+        <el-menu-item index="/version">
+          <el-icon><Upload /></el-icon>
+          <template #title>版本管理</template>
+        </el-menu-item>
       </el-menu>
     </el-aside>
 

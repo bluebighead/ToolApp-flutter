@@ -12,7 +12,7 @@ import '../models/online_message.dart';
 import '../models/online_player.dart';
 import '../models/online_room.dart';
 import '../utils/app_logger.dart';
-import 'lan_service.dart';
+import 'server_game_service.dart';
 
 /// 游戏服务角色
 enum GameRole { host, guest }
@@ -26,7 +26,7 @@ class OnlineGameService {
   static const String _playerNameKey = 'online_player_name';
 
   /// 通信服务
-  final LanService _lan = LanService();
+  final ServerGameService _server = ServerGameService();
 
   /// 当前角色
   GameRole? _role;
@@ -49,6 +49,13 @@ class OnlineGameService {
   /// 房间关闭回调
   VoidCallback? onRoomClosed;
 
+  /// 加入房间等待器（用于等待服务器响应）
+  Completer<bool>? _joinCompleter;
+
+  /// 最后一次加入错误消息
+  String _lastJoinError = '';
+  String get lastJoinError => _lastJoinError;
+
   /// 获取当前房间
   OnlineRoom? get room => _room;
 
@@ -61,8 +68,8 @@ class OnlineGameService {
   /// 是否为房主
   bool get isHost => _role == GameRole.host;
 
-  /// 获取通信服务（用于发送配对码回应等）
-  LanService get lan => _lan;
+  /// 获取通信服务（用于发送消息等）
+  ServerGameService get server => _server;
 
   /// 获取玩家名称（从 SharedPreferences）
   static Future<String> getPlayerName() async {
@@ -78,7 +85,7 @@ class OnlineGameService {
 
   // ==================== 房主逻辑 ====================
 
-  /// 房主创建房间
+  /// 房主创建房间（服务器模式）
   Future<bool> createRoom({
     required String roomName,
     required int maxPlayers,
@@ -90,17 +97,18 @@ class OnlineGameService {
     _role = GameRole.host;
     _myPlayerId = 'host';
 
-    // 先清理可能残留的旧房间资源（防止旧 UDP 广播仍在运行）
-    await _lan.closeServer();
+    // 先清理可能残留的旧连接
+    _server.disconnect();
 
-    // 生成 4 位数字配对码
+    // 连接服务器
+    final connected = await _server.connect();
+    if (!connected) return false;
+
+    // 生成4位数字配对码（本地显示用，实际房间号由服务器生成）
     final random = Random();
     final roomCode = List.generate(4, (_) => random.nextInt(10)).join();
 
-    // 获取本机 IP
-    final hostIp = await _getLocalIp();
-
-    // 创建房间
+    // 创建本地房间对象
     _room = OnlineRoom(
       roomCode: roomCode,
       roomName: roomName,
@@ -109,8 +117,8 @@ class OnlineGameService {
       diceCount: diceCount,
       gameMode: gameMode,
       rollMode: rollMode,
-      hostIp: hostIp,
-      hostPort: _lan.tcpPort,
+      hostIp: 'server',
+      hostPort: 3000,
       players: [
         OnlinePlayer(
           id: _myPlayerId!,
@@ -120,79 +128,54 @@ class OnlineGameService {
       ],
     );
 
-    // 启动 TCP 服务端
-    final serverOk = await _lan.startServer();
-    if (!serverOk) return false;
+    // 设置消息回调
+    _server.onMessage = _onServerMessage;
+    _server.onDisconnected = () {
+      if (_room != null) {
+        onRoomClosed?.call();
+      }
+    };
 
-    // 设置房主端消息回调
-    _lan.onHostTcpMessage = _onHostReceivedMessage;
-    _lan.onClientDisconnected = _onClientDisconnected;
+    // 发送创建房间请求（将本地生成的4位配对码发送给服务器，让服务器优先使用）
+    _server.createRoom(
+      roomName: roomName,
+      maxPlayers: maxPlayers,
+      diceType: diceType,
+      diceCount: diceCount,
+      gameMode: gameMode.value,
+      rollMode: rollMode.value,
+      preferredRoomCode: roomCode, // 传递房主本地生成的房间号
+    );
 
-    // 启动 UDP 广播
-    _startRoomBroadcast();
-
-    AppLogger.i(_logTag, '房间已创建：$roomCode, 房间名：$roomName');
+    AppLogger.i(_logTag, '房间创建请求已发送，建议房间号：$roomCode');
     onRoomChanged?.call(_room!);
     return true;
   }
 
-  /// 启动房间广播
-  void _startRoomBroadcast() {
-    if (_room == null) return;
-
-    // 先设置 UDP 消息回调，再启动广播
-    // 确保回调在 UDP socket 开始监听前就设置好
-    _lan.onUdpMessage = (msg, fromIp, fromPort) {
-      if (msg.type == MessageType.codeQuery) {
-        final queryCode = msg.data['roomCode'] as String? ?? '';
-        if (queryCode == _room!.roomCode) {
-          // 回应配对码查询（发送到查询者的源端口）
-          final response = MessageBuilder.codeResponse(
-            roomCode: _room!.roomCode,
-            hostIp: _room!.hostIp,
-            hostPort: _room!.hostPort,
-          );
-          _lan.sendCodeResponse(fromIp, fromPort, response);
-        }
-      }
-    };
-
-    // 使用消息生成回调，每次广播时获取最新房间信息
-    _lan.startBroadcasting(() {
-      if (_room == null) {
-        return MessageBuilder.roomBroadcast(
-          roomCode: '',
-          roomName: '',
-          currentPlayers: 0,
-          maxPlayers: 0,
-          diceType: '',
-          diceCount: 0,
-          gameMode: '',
-          hostIp: '',
-          hostPort: 0,
-        );
-      }
-      return MessageBuilder.roomBroadcast(
-        roomCode: _room!.roomCode,
-        roomName: _room!.roomName,
-        currentPlayers: _room!.currentPlayers,
-        maxPlayers: _room!.maxPlayers,
-        diceType: _room!.diceType,
-        diceCount: _room!.diceCount,
-        gameMode: _room!.gameMode.value,
-        hostIp: _room!.hostIp,
-        hostPort: _room!.hostPort,
-      );
-    });
-  }
-
-  /// 房主收到客人消息
-  void _onHostReceivedMessage(OnlineMessage message, String playerId) {
-    AppLogger.i(_logTag, '房主收到消息：${message.type} 来自 $playerId');
+  /// 处理服务器消息
+  void _onServerMessage(OnlineMessage message) {
+    AppLogger.i(_logTag, '收到服务器消息：${message.type}');
 
     switch (message.type) {
-      case MessageType.joinRoom:
-        _handleJoinRoom(playerId, message);
+      case MessageType.roomCreated:
+        // 服务器返回房间创建成功
+        _handleRoomCreated(message);
+        break;
+      case MessageType.joinResult:
+        // 处理加入结果（成功或失败）
+        _handleJoinResult(message);
+        break;
+      case MessageType.playerJoined:
+        _handlePlayerJoined(message);
+        break;
+      case MessageType.playerLeft:
+        _handlePlayerLeft(message);
+        break;
+      case MessageType.paramsUpdate:
+        _handleParamsUpdate(message);
+        break;
+      case MessageType.startRound:
+        _handleStartRound(message);
         break;
       case MessageType.rollResult:
         _handleRollResult(message);
@@ -203,150 +186,119 @@ class OnlineGameService {
       case MessageType.guessSubmit:
         _handleGuessSubmit(message);
         break;
-      case MessageType.leaveRoom:
-        _removePlayer(playerId);
+      case MessageType.guessConfirmed:
+        _handleGuessConfirmed(message);
+        break;
+      case MessageType.allResults:
+        _handleAllResults(message);
+        break;
+      case MessageType.startRoundRequest:
+        // 处理客人请求开始新一轮（单人模式下掷骰者发起）
+        _handleStartRoundRequest(message);
+        break;
+      case MessageType.roomClosed:
+        onRoomClosed?.call();
+        break;
+      case MessageType.error:
+        AppLogger.e(_logTag, '服务器错误：${message.data['message']}');
         break;
       default:
-        AppLogger.d(_logTag, '房主忽略未处理的消息类型：${message.type} 来自 $playerId');
+        AppLogger.d(_logTag, '忽略未处理的消息类型：${message.type}');
         break;
     }
   }
 
-  /// 处理客人加入请求
-  void _handleJoinRoom(String playerId, OnlineMessage message) {
-    if (_room == null) return;
-    final playerName = message.data['playerName'] as String? ?? '未知';
+  /// 处理房间创建成功
+  void _handleRoomCreated(OnlineMessage message) {
+    final roomInfo = message.data['roomInfo'] as Map<String, dynamic>? ?? {};
+    final playersList = message.data['players'] as List<dynamic>? ?? [];
+    final assignedId = message.data['assignedPlayerId'] as String?;
 
-    if (_room!.isFull) {
-      _lan.sendToPlayer(
-        playerId,
-        MessageBuilder.joinResult(
-          success: false,
-          message: '房间已满',
-          roomInfo: {},
-          players: [],
-        ),
-      );
-      return;
+    if (assignedId != null) {
+      _myPlayerId = assignedId;
     }
 
-    // 检查同名玩家，若重名则添加后缀
-    var uniqueName = playerName;
-    var suffix = 2;
-    while (_room!.players.any((p) => p.name == uniqueName)) {
-      uniqueName = '$playerName$suffix';
-      suffix++;
-    }
+    final players = playersList
+        .map((e) => OnlinePlayer.fromJson(e as Map<String, dynamic>))
+        .toList();
 
-    // 使用唯一名称作为 playerId，避免 Socket 映射冲突
-    // 如果游戏正在进行中，新加入的玩家也可以掷骰子
-    final newPlayer = OnlinePlayer(
-      id: uniqueName,
-      name: uniqueName,
-      isHost: false,
-      status: _room!.state == RoomState.playing
-          ? PlayerStatus.rolling
-          : PlayerStatus.waiting,
-    );
-    final updatedPlayers = [..._room!.players, newPlayer];
-    // 仅在游戏未开始时更新房间状态（避免覆盖 playing/finished 状态）
-    RoomState newState = _room!.state;
-    if (_room!.state == RoomState.waiting || _room!.state == RoomState.ready) {
-      newState = updatedPlayers.length >= _room!.maxPlayers
-          ? RoomState.ready
-          : RoomState.waiting;
-    }
-    _room = _room!.copyWith(
-      players: updatedPlayers,
-      state: newState,
-    );
+    _room = OnlineRoom.fromJson(roomInfo).copyWith(players: players);
 
-    // 发送加入成功消息给该客人（包含分配的 playerId）
-    _lan.sendToPlayer(
-      playerId,
-      MessageBuilder.joinResult(
-        success: true,
-        message: '加入成功',
-        roomInfo: _room!.toJson(),
-        players: _room!.players.map((e) => e.toJson()).toList(),
-        assignedPlayerId: uniqueName,
-      ),
-    );
-
-    // 更新 Socket 映射：将 tempId 替换为 uniqueName
-    _lan.renameClientKey(playerId, uniqueName);
-
-    // 广播新玩家加入消息给其他客人（排除刚加入的客人，其已通过 joinResult 获知房间信息）
-    _lan.broadcastToGuestsExcept(
-      uniqueName,
-      MessageBuilder.playerJoined(
-        playerId: uniqueName,
-        playerName: uniqueName,
-        currentPlayers: _room!.currentPlayers,
-      ),
-    );
-
-    // 更新广播消息
-    _updateBroadcast();
-
-    AppLogger.i(_logTag,
-        '玩家 $playerName 加入房间，当前 ${_room!.currentPlayers}/${_room!.maxPlayers}');
+    AppLogger.i(_logTag, '房间创建成功：${_room!.roomCode}');
     onRoomChanged?.call(_room!);
   }
 
-  /// 客人断开连接
-  void _onClientDisconnected(String playerId) {
-    AppLogger.i(_logTag, '玩家 $playerId 断开连接');
-    _removePlayer(playerId);
+  /// 处理加入房间结果（客人端）
+  void _handleJoinResult(OnlineMessage message) {
+    final success = message.data['success'] as bool? ?? false;
+    
+    if (success) {
+      final roomInfo = message.data['roomInfo'] as Map<String, dynamic>? ?? {};
+      final playersList = message.data['players'] as List<dynamic>? ?? [];
+      final assignedId = message.data['assignedPlayerId'] as String?;
+
+      if (assignedId != null) {
+        _myPlayerId = assignedId;
+      }
+
+      final players = playersList
+          .map((e) => OnlinePlayer.fromJson(e as Map<String, dynamic>))
+          .toList();
+
+      _room = OnlineRoom.fromJson(roomInfo).copyWith(players: players);
+
+      AppLogger.i(_logTag, '加入房间成功');
+      onRoomChanged?.call(_room!);
+      
+      // 完成等待器
+      _joinCompleter?.complete(true);
+    } else {
+      final errorMsg = message.data['message'] as String? ?? '加入失败';
+      _lastJoinError = errorMsg;
+      AppLogger.w(_logTag, '加入房间失败：$errorMsg');
+      
+      // 清理本地状态
+      _room = null;
+      _role = null;
+      _myPlayerId = null;
+      
+      // 完成等待器
+      _joinCompleter?.complete(false);
+    }
   }
 
-  /// 移除玩家
-  void _removePlayer(String playerId) {
+  /// 处理新玩家加入
+  void _handlePlayerJoined(OnlineMessage message) {
     if (_room == null) return;
+    final playerId = message.data['playerId'] as String? ?? '';
+    final playerName = message.data['playerName'] as String? ?? '未知';
+    final currentPlayers = message.data['currentPlayers'] as int? ?? 0;
+
+    final newPlayer = OnlinePlayer(
+      id: playerId,
+      name: playerName,
+      isHost: false,
+    );
+
+    final updatedPlayers = [..._room!.players, newPlayer];
+    _room = _room!.copyWith(players: updatedPlayers);
+
+    AppLogger.i(_logTag, '玩家 $playerName 加入，当前 $currentPlayers 人');
+    onRoomChanged?.call(_room!);
+  }
+
+  /// 处理玩家离开
+  void _handlePlayerLeft(OnlineMessage message) {
+    if (_room == null) return;
+    final playerId = message.data['playerId'] as String? ?? '';
+    final currentPlayers = message.data['currentPlayers'] as int? ?? 0;
+
     final updatedPlayers =
         _room!.players.where((p) => p.id != playerId).toList();
+    _room = _room!.copyWith(players: updatedPlayers);
 
-    // 根据当前游戏状态决定新状态：
-    // - 游戏进行中/本轮结束时，保持当前状态不变（避免游戏被意外重置）
-    // - 等待/就绪状态时，根据人数更新
-    RoomState newState = _room!.state;
-    if (_room!.state == RoomState.waiting || _room!.state == RoomState.ready) {
-      newState = updatedPlayers.length >= _room!.maxPlayers
-          ? RoomState.ready
-          : RoomState.waiting;
-    }
-
-    _room = _room!.copyWith(
-      players: updatedPlayers,
-      state: newState,
-    );
-
-    // 通知其他客人
-    _lan.broadcastToGuests(
-      MessageBuilder.playerLeft(
-        playerId: playerId,
-        currentPlayers: _room!.currentPlayers,
-      ),
-    );
-
-    _updateBroadcast();
+    AppLogger.i(_logTag, '玩家离开，当前 $currentPlayers 人');
     onRoomChanged?.call(_room!);
-  }
-
-  /// 更新 UDP 广播消息
-  /// 游戏开始后停止广播，本轮结束后重启广播（让新玩家能发现房间）
-  void _updateBroadcast() {
-    if (_room == null) return;
-    if (_room!.state == RoomState.playing) {
-      _lan.stopBroadcasting();
-    } else if (_room!.state == RoomState.finished ||
-        _room!.state == RoomState.waiting ||
-        _room!.state == RoomState.ready) {
-      // 非游戏中状态，确保广播正在运行（本轮结束后重启广播）
-      if (!_lan.isBroadcasting) {
-        _startRoomBroadcast();
-      }
-    }
   }
 
   /// 房主更新游戏参数
@@ -366,12 +318,19 @@ class OnlineGameService {
     final newGameMode = gameMode ?? _room!.gameMode;
     final newRollMode = rollMode ?? _room!.rollMode;
 
+    final oldRollMode = _room!.rollMode;
     _room = _room!.copyWith(
       diceType: diceType ?? _room!.diceType,
       diceCount: diceCount ?? _room!.diceCount,
       gameMode: newGameMode,
       rollMode: newRollMode,
     );
+
+    // 掷骰模式发生变化时，在任何状态下都重置 rollerId（防止 finished 状态下切换模式后卡住）
+    final rollModeChanged = oldRollMode != newRollMode;
+    if (rollModeChanged) {
+      _room = _room!.copyWith(rollerId: '');
+    }
 
     // 游戏进行中切换玩法时，需要重置玩家状态以匹配新玩法
     if (_room!.state == RoomState.playing) {
@@ -397,7 +356,7 @@ class OnlineGameService {
         '参数更新：骰子类型 $oldDiceType -> ${_room!.diceType}, 数量 $oldDiceCount -> ${_room!.diceCount}, 玩法 $oldGameMode -> ${_room!.gameMode.value}, 掷骰模式 ${_room!.rollMode.value}');
 
     // 广播参数更新（包含玩家状态重置）
-    _lan.broadcastToGuests(
+    _server.sendMessage(
       MessageBuilder.paramsUpdate(
         diceType: _room!.diceType,
         diceCount: _room!.diceCount,
@@ -408,7 +367,7 @@ class OnlineGameService {
 
     // 如果游戏中切换了玩法，还需要广播玩家状态重置
     if (_room!.state == RoomState.playing) {
-      _lan.broadcastToGuests(
+      _server.sendMessage(
         MessageBuilder.guessConfirmed(
           players: _room!.players.map((e) => e.toJson()).toList(),
         ),
@@ -456,7 +415,7 @@ class OnlineGameService {
     );
 
     // 广播开始新一轮
-    _lan.broadcastToGuests(
+    _server.sendMessage(
       MessageBuilder.startRound(roundNumber: _room!.roundNumber),
     );
 
@@ -508,9 +467,7 @@ class OnlineGameService {
 
     // 房主端：转发给其他客人，并检查是否所有人完成
     if (isHost) {
-      // 转发给除发送者外的其他客人，让所有客人都能看到完成标记
-      _lan.broadcastToGuestsExcept(playerId, message);
-
+      // 服务器会自动转发给其他玩家，无需手动广播
       // 猜数字+单人模式：掷骰者掷完后直接广播结果
       if (isGuessMode && isSingleMode) {
         _broadcastResults();
@@ -532,8 +489,7 @@ class OnlineGameService {
     AppLogger.i(_logTag, '收到掷骰动画同步：玩家 $playerId 开始掷骰子');
 
     if (isHost) {
-      // 房主端：转发给其他客人（排除掷骰者自己）
-      _lan.broadcastToGuestsExcept(playerId, message);
+      // 房主端：服务器会自动转发给其他客人
       // 房主端：如果自己不是掷骰者，也需要触发同步动画
       if (_room != null && _room!.rollerId != 'host') {
         onRollStartSync?.call();
@@ -575,7 +531,7 @@ class OnlineGameService {
     _room = _room!.copyWith(players: updatedPlayers);
 
     // 通知客人房主已完成掷骰子，让客人端能显示房主的完成标记
-    _lan.broadcastToGuests(
+    _server.sendMessage(
       MessageBuilder.rollResult(
         playerId: 'host',
         results: results,
@@ -616,7 +572,7 @@ class OnlineGameService {
     _room = _room!.copyWith(players: updatedPlayers);
 
     // 广播猜数字确认（让所有玩家看到谁已提交）
-    _lan.broadcastToGuests(
+    _server.sendMessage(
       MessageBuilder.guessConfirmed(
         players: _room!.players.map((e) => e.toJson()).toList(),
       ),
@@ -641,7 +597,7 @@ class OnlineGameService {
     _room = _room!.copyWith(players: updatedPlayers);
 
     // 广播猜数字确认（让所有玩家看到谁已提交）
-    _lan.broadcastToGuests(
+    _server.sendMessage(
       MessageBuilder.guessConfirmed(
         players: _room!.players.map((e) => e.toJson()).toList(),
       ),
@@ -689,7 +645,7 @@ class OnlineGameService {
     }
 
     // 广播状态切换（通过 guessConfirmed 消息携带更新后的玩家列表）
-    _lan.broadcastToGuests(
+    _server.sendMessage(
       MessageBuilder.guessConfirmed(
         players: _room!.players.map((e) => e.toJson()).toList(),
       ),
@@ -699,12 +655,7 @@ class OnlineGameService {
   /// 客人提交猜数字
   void guestGuess(int guessNumber) {
     if (_room == null || isHost || _myPlayerId == null) return;
-    _lan.sendToHost(
-      MessageBuilder.guessSubmit(
-        playerId: _myPlayerId!,
-        guessNumber: guessNumber,
-      ),
-    );
+    _server.guestGuess(guessNumber: guessNumber, playerId: _myPlayerId!);
 
     // 更新本地状态
     final updatedPlayers = _room!.players.map((p) {
@@ -770,19 +721,16 @@ class OnlineGameService {
       return map;
     }).toList();
 
-    _lan.broadcastToGuests(MessageBuilder.allResults(rankings: rankings));
+    _server.sendMessage(MessageBuilder.allResults(rankings: rankings));
     onRoomChanged?.call(_room!);
   }
 
   /// 关闭房间（房主）
-  /// 房主退出时直接关闭房间，通知所有客人房间已关闭
-  /// 注：房主迁移功能在当前 P2P 架构下不可靠（其他客人无法自动重连到新房主），
-  /// 因此采用直接关闭房间的方案，确保行为可预测
   Future<void> closeRoom() async {
     if (_room != null && isHost) {
-      // 通知所有客人房间关闭
-      _lan.broadcastToGuests(MessageBuilder.roomClosed());
-      await _lan.closeServer();
+      // 通知服务器关闭房间
+      _server.closeRoom();
+      await _server.disconnect();
       _room = null;
       _role = null;
       _myPlayerId = null;
@@ -796,215 +744,60 @@ class OnlineGameService {
 
   // ==================== 客人逻辑 ====================
 
-  /// 客人通过配对码加入房间
+  /// 客人通过房间号加入房间（服务器模式）
   Future<bool> joinByCode(String roomCode, String playerName) async {
     _role = GameRole.guest;
     _myPlayerId = playerName;
 
-    // 通过 UDP 查询房主地址（IP + 端口）
-    final hostAddr = await _lan.queryByCode(roomCode);
-    if (hostAddr == null) {
-      AppLogger.w(_logTag, '配对码 $roomCode 未找到房间');
+    // 先清理可能残留的旧连接
+    _server.disconnect();
+
+    // 连接服务器
+    final connected = await _server.connect();
+    if (!connected) {
+      AppLogger.w(_logTag, '连接服务器失败');
       return false;
     }
 
-    return _connectAndJoin(hostAddr.hostIp, playerName, hostPort: hostAddr.hostPort);
+    // 设置消息回调
+    _server.onMessage = _onServerMessage;
+    _server.onDisconnected = () {
+      if (_room != null) {
+        onRoomClosed?.call();
+      }
+    };
+
+    // 创建等待器
+    _joinCompleter = Completer<bool>();
+
+    // 发送加入房间请求
+    _server.joinRoom(roomCode: roomCode, playerName: playerName);
+
+    AppLogger.i(_logTag, '加入房间请求已发送：$roomCode');
+
+    // 等待服务器响应（最多等待10秒）
+    try {
+      final result = await _joinCompleter!.future.timeout(
+        const Duration(seconds: 10),
+        onTimeout: () {
+          AppLogger.w(_logTag, '加入房间超时');
+          return false;
+        },
+      );
+      _joinCompleter = null;
+      return result;
+    } catch (e) {
+      AppLogger.e(_logTag, '等待加入结果异常：$e');
+      _joinCompleter = null;
+      return false;
+    }
   }
 
-  /// 客人通过搜索结果加入房间
+  /// 客人通过搜索结果加入房间（已废弃，服务器模式不再需要）
   Future<bool> joinBySearch(
       String hostIp, int hostPort, String playerName) async {
-    _role = GameRole.guest;
-    _myPlayerId = playerName;
-    return _connectAndJoin(hostIp, playerName, hostPort: hostPort);
-  }
-
-  /// 连接房主并加入房间
-  /// [hostPort] 指定房主 TCP 端口，默认 19876
-  Future<bool> _connectAndJoin(
-    String hostIp,
-    String playerName, {
-    int hostPort = 19876,
-  }) async {
-    AppLogger.i(_logTag, '尝试连接房主 TCP: $hostIp:$hostPort');
-    // 首次连接时暂时使用 playerName 作为心跳 playerId，
-    // 收到 joinResult 的 assignedPlayerId 后会更新（见下方处理）
-    final connected = await _lan.connectToHost(hostIp, port: hostPort, playerId: playerName);
-    if (!connected) return false;
-
-    // 使用 Completer 等待 joinResult
-    final completer = Completer<bool>();
-
-    // 设置客人端消息回调
-    _lan.onGuestTcpMessage = (message) {
-      if (message.type == MessageType.joinResult && !completer.isCompleted) {
-        final success = message.data['success'] as bool? ?? false;
-        if (success) {
-          // 处理加入成功（同时会更新 _myPlayerId 为房主分配的 assignedPlayerId）
-          _onGuestReceivedMessage(message);
-          // 关键：更新 lan_service 的 guestPlayerId，后续心跳携带正确的 playerId
-          _lan.updateGuestPlayerId(_myPlayerId);
-          completer.complete(true);
-        } else {
-          completer.complete(false);
-        }
-        return;
-      }
-      _onGuestReceivedMessage(message);
-    };
-
-    _lan.onHostDisconnected = () {
-      if (!completer.isCompleted) {
-        // 加入过程中断开：完成 completer 并返回 false
-        completer.complete(false);
-      } else {
-        // 加入成功后断开：触发房间关闭回调
-        onRoomClosed?.call();
-      }
-    };
-
-    // 发送加入请求
-    _lan.sendToHost(MessageBuilder.joinRoom(playerName: playerName));
-
-    // 超时处理
-    Future.delayed(const Duration(seconds: 5), () {
-      if (!completer.isCompleted) {
-        completer.complete(false);
-      }
-    });
-
-    return completer.future;
-  }
-
-  /// 客人收到房主消息
-  void _onGuestReceivedMessage(OnlineMessage message) {
-    AppLogger.i(_logTag, '客人收到消息：${message.type}');
-
-    switch (message.type) {
-      case MessageType.joinResult:
-        _handleJoinResult(message);
-        break;
-      case MessageType.playerJoined:
-        _handlePlayerJoined(message);
-        break;
-      case MessageType.playerLeft:
-        _handlePlayerLeft(message);
-        break;
-      case MessageType.paramsUpdate:
-        _handleParamsUpdate(message);
-        break;
-      case MessageType.startRound:
-        _handleStartRound(message);
-        break;
-      case MessageType.startRoundRequest:
-        _handleStartRoundRequest(message);
-        break;
-      case MessageType.rollResult:
-        _handleRollResult(message);
-        break;
-      case MessageType.rollStart:
-        _handleRollStart(message);
-        break;
-      case MessageType.guessConfirmed:
-        _handleGuessConfirmed(message);
-        break;
-      case MessageType.allResults:
-        _handleAllResults(message);
-        break;
-      case MessageType.roomClosed:
-        onRoomClosed?.call();
-        break;
-      case MessageType.hostMigrated:
-        // 房主迁移功能已移除，收到此消息视为房间关闭
-        AppLogger.w(_logTag, '收到房主迁移消息，但迁移功能已移除，视为房间关闭');
-        _room = null;
-        _role = null;
-        _myPlayerId = null;
-        onRoomClosed?.call();
-        break;
-      case MessageType.kickPlayer:
-        // 被踢出后清理本地状态
-        _room = null;
-        _role = null;
-        _myPlayerId = null;
-        onKicked?.call();
-        break;
-      default:
-        AppLogger.d(_logTag, '客人忽略未处理的消息类型：${message.type}');
-        break;
-    }
-  }
-
-  /// 处理加入结果
-  void _handleJoinResult(OnlineMessage message) {
-    final success = message.data['success'] as bool? ?? false;
-    if (success) {
-      // 更新为房主分配的实际 playerId（可能因重名而添加后缀）
-      final assignedId = message.data['assignedPlayerId'] as String?;
-      if (assignedId != null) {
-        _myPlayerId = assignedId;
-      }
-
-      final roomInfo =
-          message.data['roomInfo'] as Map<String, dynamic>? ?? {};
-      final playersList = message.data['players'] as List<dynamic>? ?? [];
-      final players = playersList
-          .map((e) => OnlinePlayer.fromJson(e as Map<String, dynamic>))
-          .toList();
-
-      _room = OnlineRoom.fromJson(roomInfo).copyWith(players: players);
-      onRoomChanged?.call(_room!);
-      AppLogger.i(_logTag, '加入房间成功：${_room?.roomName}，分配 ID：$_myPlayerId');
-    } else {
-      AppLogger.w(_logTag, '加入房间失败：${message.data['message']}');
-      // 加入失败时清理本地状态（不应调用 onRoomClosed，因为从未真正加入房间）
-      _room = null;
-      _role = null;
-      _myPlayerId = null;
-    }
-  }
-
-  /// 处理新玩家加入通知
-  void _handlePlayerJoined(OnlineMessage message) {
-    if (_room == null) return;
-    final playerId = message.data['playerId'] as String? ?? '';
-    final playerName = message.data['playerName'] as String? ?? '';
-
-    // 避免重复添加
-    if (!_room!.players.any((p) => p.id == playerId)) {
-      final newPlayer = OnlinePlayer(id: playerId, name: playerName);
-      final updatedPlayers = [..._room!.players, newPlayer];
-
-      // 更新房间状态：等待/就绪状态下根据人数切换
-      RoomState newState = _room!.state;
-      if (_room!.state == RoomState.waiting || _room!.state == RoomState.ready) {
-        newState = updatedPlayers.length >= _room!.maxPlayers
-            ? RoomState.ready
-            : RoomState.waiting;
-      }
-
-      _room = _room!.copyWith(players: updatedPlayers, state: newState);
-    }
-    onRoomChanged?.call(_room!);
-  }
-
-  /// 处理玩家离开通知
-  void _handlePlayerLeft(OnlineMessage message) {
-    if (_room == null) return;
-    final playerId = message.data['playerId'] as String? ?? '';
-    final updatedPlayers =
-        _room!.players.where((p) => p.id != playerId).toList();
-
-    // 更新房间状态：等待/就绪状态下根据人数切换（与 _handlePlayerJoined 对称）
-    RoomState newState = _room!.state;
-    if (_room!.state == RoomState.waiting || _room!.state == RoomState.ready) {
-      newState = updatedPlayers.length >= _room!.maxPlayers
-          ? RoomState.ready
-          : RoomState.waiting;
-    }
-
-    _room = _room!.copyWith(players: updatedPlayers, state: newState);
-    onRoomChanged?.call(_room!);
+    AppLogger.w(_logTag, '服务器模式下不再支持搜索加入');
+    return false;
   }
 
   /// 处理参数更新
@@ -1023,12 +816,19 @@ class OnlineGameService {
     AppLogger.i(_logTag,
         '客人收到参数更新：骰子类型 $newDiceType, 数量 $newDiceCount, 玩法 ${newGameMode.value}, 掷骰模式 ${newRollMode.value}');
 
+    final oldRollMode = _room!.rollMode;
     _room = _room!.copyWith(
       diceType: newDiceType,
       diceCount: newDiceCount,
       gameMode: newGameMode,
       rollMode: newRollMode,
     );
+
+    // 掷骰模式发生变化时，在任何状态下都重置 rollerId（防止 finished 状态下切换模式后卡住）
+    final rollModeChanged = oldRollMode != newRollMode;
+    if (rollModeChanged) {
+      _room = _room!.copyWith(rollerId: '');
+    }
 
     // 游戏进行中切换玩法时，需要重置玩家状态以匹配新玩法
     // 房主会随后通过 guessConfirmed 消息广播重置后的玩家状态
@@ -1169,13 +969,7 @@ class OnlineGameService {
   /// 客人提交掷骰子结果
   void guestRoll(List<int> results, int total) {
     if (_room == null || isHost || _myPlayerId == null) return;
-    _lan.sendToHost(
-      MessageBuilder.rollResult(
-        playerId: _myPlayerId!,
-        results: results,
-        total: total,
-      ),
-    );
+    _server.guestRoll(results: results, total: total, playerId: _myPlayerId!);
 
     // 更新本地状态
     final updatedPlayers = _room!.players.map((p) {
@@ -1196,17 +990,15 @@ class OnlineGameService {
   void requestStartRound() {
     if (_room == null || isHost || _myPlayerId == null) return;
     AppLogger.i(_logTag, '客人请求开始新一轮：playerId=$_myPlayerId');
-    _lan.sendToHost(
-      MessageBuilder.startRoundRequest(playerId: _myPlayerId!),
-    );
+    _server.requestStartRound(playerId: _myPlayerId!);
   }
 
   /// 客人离开房间
   Future<void> leaveRoom() async {
     if (_room != null && !isHost) {
-      _lan.sendToHost(MessageBuilder.leaveRoom());
+      _server.leaveRoom();
     }
-    await _lan.closeGuest();
+    await _server.disconnect();
     _room = null;
     _role = null;
     _myPlayerId = null;
@@ -1260,15 +1052,15 @@ class OnlineGameService {
     return second >= 16 && second <= 31;
   }
 
-  /// 搜索局域网房间
+  /// 搜索局域网房间（已废弃，服务器模式不再需要）
   Future<void> searchRooms({
     required void Function(OnlineMessage message, String fromIp) onRoomFound,
   }) async {
-    await _lan.startSearching(onRoomFound: onRoomFound);
+    AppLogger.w(_logTag, '服务器模式下不再支持搜索房间');
   }
 
-  /// 停止搜索
+  /// 停止搜索（已废弃，服务器模式不再需要）
   void stopSearching() {
-    _lan.stopSearching();
+    // 服务器模式下无需搜索
   }
 }

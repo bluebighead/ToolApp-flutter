@@ -19,11 +19,13 @@ contextBridge.exposeInMainWorld('api', {
   updateRecord: (table, id, data) => ipcRenderer.invoke('db:updateRecord', table, id, data),
   deleteRecord: (table, id) => ipcRenderer.invoke('db:deleteRecord', table, id),
   deleteUser: (userId) => ipcRenderer.invoke('db:deleteUser', userId),
+  createUser: (email, password, accountType) => ipcRenderer.invoke('db:createUser', { email, password, accountType }),
 
   // 在线状态 & 会话监控
   getOnlineStatus: () => ipcRenderer.invoke('db:getOnlineStatus'),
   getUserSessions: (userId, params) => ipcRenderer.invoke('db:getUserSessions', { userId, ...params }),
   getUserActivity: (userId, params) => ipcRenderer.invoke('db:getUserActivity', { userId, ...params }),
+  getUserDeviceInfo: (userId) => ipcRenderer.invoke('db:getUserDeviceInfo', { userId }),
 
   // 系统信息
   getSystemInfo: () => ipcRenderer.invoke('db:getSystemInfo'),
@@ -39,4 +41,11 @@ contextBridge.exposeInMainWorld('api', {
   selectFolder: () => ipcRenderer.invoke('dialog:selectFolder'),
   selectSavePath: (defaultName) => ipcRenderer.invoke('dialog:selectSavePath', defaultName),
   saveExport: (data) => ipcRenderer.invoke('file:saveExport', data),
+
+  // 版本管理
+  getAppVersions: () => ipcRenderer.invoke('version:getList'),
+  createAppVersion: (data) => ipcRenderer.invoke('version:create', data),
+  updateAppVersion: (id, data) => ipcRenderer.invoke('version:update', { id, data }),
+  deleteAppVersion: (id) => ipcRenderer.invoke('version:delete', id),
+  selectApkFile: () => ipcRenderer.invoke('dialog:selectApkFile'),
 });

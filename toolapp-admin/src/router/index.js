@@ -17,6 +17,31 @@ const routes = [
     component: () => import('@/views/UsersView.vue'),
   },
   {
+    path: '/heart-rate',
+    name: 'heartRate',
+    component: () => import('@/views/HeartRateView.vue'),
+  },
+  {
+    path: '/network-speed',
+    name: 'networkSpeed',
+    component: () => import('@/views/NetworkSpeedView.vue'),
+  },
+  {
+    path: '/convert-history',
+    name: 'convertHistory',
+    component: () => import('@/views/ConvertHistoryView.vue'),
+  },
+  {
+    path: '/dice-records',
+    name: 'diceRecords',
+    component: () => import('@/views/DiceRecordsView.vue'),
+  },
+  {
+    path: '/period-records',
+    name: 'periodRecords',
+    component: () => import('@/views/PeriodRecordsView.vue'),
+  },
+  {
     path: '/data-center',
     name: 'dataCenter',
     component: () => import('@/views/DataCenterView.vue'),
@@ -35,6 +60,11 @@ const routes = [
     path: '/settings',
     name: 'settings',
     component: () => import('@/views/SettingsView.vue'),
+  },
+  {
+    path: '/version',
+    name: 'version',
+    component: () => import('@/views/VersionView.vue'),
   },
 ]
 

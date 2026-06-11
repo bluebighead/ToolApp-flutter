@@ -1,6 +1,6 @@
 {
   "name": "toolapp-admin",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "description": "ToolApp 数据库管理桌面端",
   "main": "electron/main.js",
   "scripts": {
@@ -33,6 +33,7 @@
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.0",
     "axios": "^1.7.0",
+    "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.10.0",
     "echarts": "^5.5.0",
     "element-plus": "^2.7.0",

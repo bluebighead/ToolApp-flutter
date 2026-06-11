@@ -3,6 +3,7 @@
 // 入口：首页 AppBar 右上角圆形问号按钮。
 import 'package:flutter/material.dart';
 
+import '../services/update_service.dart';
 import '../utils/app_info.dart';
 import '../utils/app_logger.dart';
 import 'logs_page.dart';
@@ -133,6 +134,13 @@ class AboutPage extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 16),
+              // 检查更新按钮
+              FilledButton.icon(
+                icon: const Icon(Icons.system_update),
+                label: const Text('检查更新'),
+                onPressed: () => _checkForUpdate(context),
+              ),
+              const SizedBox(height: 12),
               // 调试入口：进入日志查看页面
               OutlinedButton.icon(
                 icon: const Icon(Icons.bug_report_outlined),
@@ -150,5 +158,42 @@ class AboutPage extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  // 手动检查更新
+  Future<void> _checkForUpdate(BuildContext context) async {
+    AppLogger.i('AboutPage', '手动检查更新');
+
+    // 显示加载提示
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Text('正在检查更新...'),
+          ],
+        ),
+      ),
+    );
+
+    final updateInfo = await UpdateService.instance.checkForUpdate();
+
+    // 关闭加载提示
+    if (context.mounted) Navigator.pop(context);
+
+    if (!context.mounted) return;
+
+    if (updateInfo.hasUpdate) {
+      // 有新版本，显示更新对话框
+      UpdateService.showUpdateDialog(context, updateInfo);
+    } else {
+      // 已是最新版本
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(updateInfo.message ?? '已是最新版本')),
+      );
+    }
   }
 }

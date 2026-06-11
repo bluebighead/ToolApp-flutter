@@ -241,8 +241,8 @@ class _OnlineDicePageState extends State<OnlineDicePage>
         _room!.rollMode == RollMode.singlePlayer) {
       final myId = widget.gameService.myPlayerId;
       final playerId = (myId == 'host') ? 'host' : myId!;
-      // 通过 LanService 广播 rollStart
-      widget.gameService.lan.broadcastToGuests(
+      // 通过服务器广播 rollStart
+      widget.gameService.server.sendMessage(
         MessageBuilder.rollStart(playerId: playerId),
       );
     }
@@ -1147,20 +1147,22 @@ class _OnlineDicePageState extends State<OnlineDicePage>
     String buttonText;
     if (isFinished) {
       // 本轮已结束，判断谁可以开启下一轮
-      if (isGuessMode && isSingleMode && amRoller) {
-        // 猜数字+单人模式：掷骰者可以开启下一轮
+      // 房主优先：无论什么模式，房主都可以开启下一轮
+      if (isHost) {
+        // 房主：任何模式都可以开启下一轮
+        buttonText = '开始下一轮';
+      } else if (isGuessMode && isSingleMode && amRoller) {
+        // 猜数字+单人模式：客人掷骰者也可以开启下一轮
         buttonText = '开始下一轮';
       } else if (isGuessMode && isSingleMode && !amRoller) {
-        // 猜数字+单人模式：非掷骰者等待掷骰者开启下一轮
+        // 猜数字+单人模式：非掷骰者客人等待掷骰者或房主开启下一轮
         final rollerName = _room!.players
             .where((p) => p.id == _room!.rollerId)
             .firstOrNull
             ?.name ?? '掷骰者';
-        buttonText = '等待 $rollerName 开始下一轮...';
-      } else if (isHost) {
-        // 比大小或多人模式：房主开启下一轮
-        buttonText = '开始下一轮';
+        buttonText = '等待 $rollerName 或房主开启下一轮...';
       } else {
+        // 其他模式：客人等待房主开启下一轮
         buttonText = '等待房主开始下一轮...';
       }
     } else if (_room?.state != RoomState.playing) {
@@ -1183,11 +1185,11 @@ class _OnlineDicePageState extends State<OnlineDicePage>
     }
 
     // 判断按钮是否可点击
+    // 房主优先：isFinished && isHost 总是可以点击
     final canPress = _canRoll ||
         (isHost && _room?.state != RoomState.playing && !isFinished) ||
-        (isFinished && isGuessMode && isSingleMode && amRoller) ||
-        (isFinished && !isGuessMode && isHost) ||
-        (isFinished && isGuessMode && !isSingleMode && isHost);
+        (isFinished && isHost) ||
+        (isFinished && isGuessMode && isSingleMode && amRoller);
 
     AppLogger.d('_OnlineDicePageState',
         '按钮状态: state=${_room?.state}, isHost=$isHost, myStatus=$_myStatus, canPress=$canPress, amRoller=$amRoller');

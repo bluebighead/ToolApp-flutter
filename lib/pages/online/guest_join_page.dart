@@ -1,12 +1,10 @@
 // 客人入口页
-// 提供配对码输入和局域网搜索两种加入方式
+// 通过房间号加入服务器房间
 // 首次进入时需要输入玩家名称
 // 检测到活跃房间时提示用户先退出
 import 'package:flutter/material.dart';
 
-import '../../models/online_message.dart';
 import '../../models/online_room.dart';
-import '../../services/lan_service.dart';
 import '../../services/online_game_service.dart';
 import '../../services/online_overlay_manager.dart';
 import 'online_dice_page.dart';
@@ -22,7 +20,7 @@ class GuestJoinPage extends StatefulWidget {
 class _GuestJoinPageState extends State<GuestJoinPage> {
   static const String _logTag = 'GuestJoinPage';
 
-  /// 4 位配对码输入控制器
+  /// 4 位房间号输入控制器
   final List<TextEditingController> _codeControllers = List.generate(
     4,
     (_) => TextEditingController(),
@@ -35,18 +33,6 @@ class _GuestJoinPageState extends State<GuestJoinPage> {
   /// 是否正在加入
   bool _isJoining = false;
 
-  /// 是否正在搜索
-  bool _isSearching = false;
-
-  /// 搜索到的房间列表
-  final Map<String, _RoomInfo> _foundRooms = {};
-
-  /// OnlineGameService 实例（搜索时使用）
-  OnlineGameService? _searchService;
-
-  /// 当前 WiFi SSID
-  String _wifiSsid = '';
-
   /// 是否有活跃房间
   bool _hasActiveRoom = false;
   String _activeRoomName = '';
@@ -55,7 +41,6 @@ class _GuestJoinPageState extends State<GuestJoinPage> {
   void initState() {
     super.initState();
     _loadPlayerName();
-    _loadWifiSsid();
     _checkActiveRoom();
   }
 
@@ -70,14 +55,6 @@ class _GuestJoinPageState extends State<GuestJoinPage> {
     }
   }
 
-  /// 加载 WiFi SSID
-  Future<void> _loadWifiSsid() async {
-    final ssid = await LanService.getWifiSsid();
-    if (mounted) {
-      setState(() => _wifiSsid = ssid);
-    }
-  }
-
   @override
   void dispose() {
     for (final c in _codeControllers) {
@@ -86,9 +63,6 @@ class _GuestJoinPageState extends State<GuestJoinPage> {
     for (final f in _codeFocusNodes) {
       f.dispose();
     }
-    // 释放搜索服务资源
-    _searchService?.stopSearching();
-    _searchService = null;
     super.dispose();
   }
 
@@ -195,7 +169,7 @@ class _GuestJoinPageState extends State<GuestJoinPage> {
     return true;
   }
 
-  /// 通过配对码加入
+  /// 通过房间号加入
   Future<void> _joinByCode() async {
     if (!_isCodeComplete || _isJoining) return;
 
@@ -238,117 +212,11 @@ class _GuestJoinPageState extends State<GuestJoinPage> {
 
     if (!success) {
       setState(() => _isJoining = false);
+      final errorMsg = service.lastJoinError.isNotEmpty
+          ? service.lastJoinError
+          : '未找到该房间号的房间，请检查后重试';
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('未找到该配对码的房间，请检查后重试')),
-      );
-    } else {
-      // 注册到全局管理器
-      OnlineOverlayManager().registerService(service);
-      OnlineOverlayManager().isInOnlinePage = true;
-    }
-  }
-
-  /// 开始搜索局域网房间
-  Future<void> _startSearch() async {
-    if (_isSearching) return;
-
-    // 检查活跃房间
-    final canProceed = await _checkActiveRoomAndPrompt();
-    if (!canProceed) return;
-
-    setState(() {
-      _isSearching = true;
-      _foundRooms.clear();
-    });
-
-    _searchService = OnlineGameService();
-    await _searchService!.searchRooms(
-      onRoomFound: (OnlineMessage message, String fromIp) {
-        if (!mounted) return;
-        final roomCode = message.data['roomCode'] as String? ?? '';
-        final roomName = message.data['roomName'] as String? ?? '';
-        final currentPlayers = message.data['currentPlayers'] as int? ?? 0;
-        final maxPlayers = message.data['maxPlayers'] as int? ?? 0;
-        final diceType = message.data['diceType'] as String? ?? '';
-        final diceCount = message.data['diceCount'] as int? ?? 0;
-        final hostIp = message.data['hostIp'] as String? ?? '';
-        final hostPort = message.data['hostPort'] as int? ?? 19876;
-
-        setState(() {
-          _foundRooms[roomCode] = _RoomInfo(
-            roomCode: roomCode,
-            roomName: roomName,
-            currentPlayers: currentPlayers,
-            maxPlayers: maxPlayers,
-            diceType: diceType,
-            diceCount: diceCount,
-            hostIp: hostIp,
-            hostPort: hostPort,
-          );
-        });
-      },
-    );
-
-    // 5 秒后停止搜索
-    Future.delayed(const Duration(seconds: 5), () {
-      if (mounted) {
-        setState(() => _isSearching = false);
-        _searchService?.stopSearching();
-      }
-    });
-  }
-
-  /// 通过搜索结果加入房间
-  Future<void> _joinBySearch(_RoomInfo roomInfo) async {
-    // 检查活跃房间
-    final canProceed = await _checkActiveRoomAndPrompt();
-    if (!canProceed) return;
-
-    // 检查玩家名称
-    if (_playerName.isEmpty) {
-      await _showNameDialog();
-      if (_playerName.isEmpty) return;
-    }
-
-    // 先停止搜索并释放搜索服务资源
-    _searchService?.stopSearching();
-    _searchService = null;
-
-    setState(() => _isJoining = true);
-
-    final service = OnlineGameService();
-    service.onRoomChanged = (room) {
-      if (!mounted) return;
-      // 加入成功后跳转：如果房间已满或游戏已开始，直接进入游戏页
-      if (room.isFull || room.state == RoomState.playing || room.state == RoomState.finished) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => OnlineDicePage(gameService: service),
-          ),
-        );
-      } else {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => WaitingRoomPage(gameService: service),
-          ),
-        );
-      }
-    };
-
-    final success = await service.joinBySearch(
-      roomInfo.hostIp,
-      roomInfo.hostPort,
-      _playerName,
-    );
-
-    if (!mounted) return;
-
-    if (!success) {
-      setState(() => _isJoining = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('加入房间失败')),
+        SnackBar(content: Text(errorMsg)),
       );
     } else {
       // 注册到全局管理器
@@ -436,35 +304,8 @@ class _GuestJoinPageState extends State<GuestJoinPage> {
               const SizedBox(height: 12),
             ],
 
-            // 当前 WiFi 网络名称
-            if (_wifiSsid.isNotEmpty)
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: theme.primaryColor.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.wifi, size: 14, color: theme.primaryColor),
-                    const SizedBox(width: 4),
-                    Text(
-                      '当前网络：$_wifiSsid',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: theme.primaryColor,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            if (_wifiSsid.isNotEmpty) const SizedBox(height: 12),
-
-            // 配对码输入
-            Text('输入配对码',
+            // 房间号输入
+            Text('输入房间号',
                 style: TextStyle(
                     fontWeight: FontWeight.w500,
                     fontSize: 16,
@@ -524,97 +365,9 @@ class _GuestJoinPageState extends State<GuestJoinPage> {
                 ),
               ),
             ),
-            const SizedBox(height: 24),
-
-            // 分隔线
-            Row(
-              children: [
-                const Expanded(child: Divider()),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Text('或者',
-                      style: TextStyle(color: Colors.grey.shade500)),
-                ),
-                const Expanded(child: Divider()),
-              ],
-            ),
-            const SizedBox(height: 24),
-
-            // 搜索房间按钮
-            SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: OutlinedButton.icon(
-                onPressed: _isSearching ? null : _startSearch,
-                icon: _isSearching
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child:
-                            CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.search),
-                label: Text(_isSearching ? '搜索中...' : '搜索局域网房间'),
-                style: OutlinedButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-              ),
-            ),
-
-            // 搜索结果列表
-            if (_foundRooms.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              Text('发现的房间',
-                  style: TextStyle(
-                      fontWeight: FontWeight.w500,
-                      color: Colors.grey.shade700)),
-              const SizedBox(height: 8),
-              ..._foundRooms.values.map((room) => Card(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    child: ListTile(
-                      leading: const Icon(Icons.meeting_room),
-                      title: Text(room.roomName),
-                      subtitle: Text(
-                          '${room.currentPlayers}/${room.maxPlayers} 人 · ${room.diceType.toUpperCase()} x${room.diceCount}'),
-                      trailing: Text(room.roomCode,
-                          style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              color: theme.primaryColor,
-                              letterSpacing: 2)),
-                      onTap: room.currentPlayers < room.maxPlayers
-                          ? () => _joinBySearch(room)
-                          : null,
-                    ),
-                  )),
-            ],
           ],
         ),
       ),
     );
   }
-}
-
-/// 搜索到的房间信息
-class _RoomInfo {
-  final String roomCode;
-  final String roomName;
-  final int currentPlayers;
-  final int maxPlayers;
-  final String diceType;
-  final int diceCount;
-  final String hostIp;
-  final int hostPort;
-
-  const _RoomInfo({
-    required this.roomCode,
-    required this.roomName,
-    required this.currentPlayers,
-    required this.maxPlayers,
-    required this.diceType,
-    required this.diceCount,
-    required this.hostIp,
-    required this.hostPort,
-  });
 }

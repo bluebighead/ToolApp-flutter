@@ -55,7 +55,7 @@ function startDbWorker() {
     
     dbWorker = spawn(nodeExe, [workerPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
     });
     
     let stdoutBuffer = '';
@@ -235,6 +235,7 @@ ipcMain.handle('db:getTableData', (event, table, params) => sendToWorker('getTab
 ipcMain.handle('db:getOnlineStatus', () => sendToWorker('getOnlineStatus'));
 ipcMain.handle('db:getUserSessions', (event, params) => sendToWorker('getUserSessions', params));
 ipcMain.handle('db:getUserActivity', (event, params) => sendToWorker('getUserActivity', params));
+ipcMain.handle('db:getUserDeviceInfo', (event, params) => sendToWorker('getUserDeviceInfo', params));
 
 // 系统信息
 ipcMain.handle('db:getSystemInfo', () => sendToWorker('getSystemInfo'));
@@ -245,6 +246,7 @@ ipcMain.handle('db:changePassword', (event, newPassword) => sendToWorker('change
 ipcMain.handle('db:updateRecord', (event, table, id, data) => sendToWorker('updateRecord', { table, id, data }));
 ipcMain.handle('db:deleteRecord', (event, table, id) => sendToWorker('deleteRecord', { table, id }));
 ipcMain.handle('db:deleteUser', (event, userId) => sendToWorker('deleteUser', { userId }));
+ipcMain.handle('db:createUser', (event, { email, password, accountType }) => sendToWorker('createUser', { email, password, accountType }));
 
 // 导出备份相关
 ipcMain.handle('db:exportTable', (event, table, format) => sendToWorker('exportTable', { table, format }));
@@ -295,6 +297,38 @@ ipcMain.handle('file:saveExport', (event, { data, filePath }) => {
   } catch (err) {
     return { success: false, error: err.message };
   }
+});
+
+// ============ 版本管理 IPC ============
+
+// 选择APK文件
+ipcMain.handle('dialog:selectApkFile', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: '选择APK文件',
+    filters: [{ name: 'Android 安装包', extensions: ['apk'] }],
+    properties: ['openFile'],
+  });
+  return (canceled || filePaths.length === 0) ? null : filePaths[0];
+});
+
+// 获取版本列表
+ipcMain.handle('version:getList', async () => {
+  return await sendToWorker('version:getList');
+});
+
+// 创建新版本（上传APK到服务器）
+ipcMain.handle('version:create', async (event, data) => {
+  return await sendToWorker('version:create', data);
+});
+
+// 更新版本信息
+ipcMain.handle('version:update', async (event, { id, data }) => {
+  return await sendToWorker('version:update', { id, data });
+});
+
+// 删除版本
+ipcMain.handle('version:delete', async (event, id) => {
+  return await sendToWorker('version:delete', id);
 });
 
 // ============ 应用生命周期 ============

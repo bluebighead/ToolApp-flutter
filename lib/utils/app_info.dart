@@ -92,18 +92,18 @@ class AppInfo {
   //   - 游客模式下数据仅保存在本地，登录后自动同步到服务器
   //   - 首页抽屉区分游客/已登录状态，游客模式下显示"登录账号"入口
   //   - 设置页账号与同步区域适配游客模式
-  static const String version = '1.8.0';
+  static const String version = '1.32.0';
 
   // 当前构建号（整数，每次发版递增）
   // 每次发版时同步更新 pubspec.yaml 中 version 字段的 + 号后的数字
-  static const int buildNumber = 97;
+  static const int buildNumber = 152;
 
   // 开发者署名
   static const String developer = 'SuperYH';
 
   // 最近一次发版的更新时间（格式：yyyy-MM-dd）
   // 每次发版时必须更新到当天日期
-  static const String lastUpdate = '2026-06-10';
+  static const String lastUpdate = '2026-06-11';
 
   // 完整版本字符串，UI 上直接显示使用
   static String get fullVersion => '$version (Build $buildNumber)';
