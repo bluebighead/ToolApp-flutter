@@ -10,6 +10,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'pages/auth/login_page.dart';
 import 'pages/home_page.dart';
 import 'services/auth_service.dart';
+import 'services/camera_stream_service.dart';
 import 'services/device_info_service.dart';
 import 'services/online_overlay_manager.dart';
 import 'services/session_tracker.dart';
@@ -100,6 +101,8 @@ class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
       case AppLifecycleState.resumed:
         // 应用恢复前台
         SessionTracker.instance.onAppResumed();
+        // 检查WebSocket连接状态，断开则自动重连
+        _checkAndReconnectWebSocket();
         break;
       case AppLifecycleState.detached:
         // 应用被分离
@@ -107,6 +110,25 @@ class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
         break;
       default:
         break;
+    }
+  }
+
+  /// 检查WebSocket连接状态，断开则自动重连
+  void _checkAndReconnectWebSocket() {
+    final cameraService = CameraStreamService.instance;
+    if (AuthService.instance.isLoggedIn && !cameraService.isConnected) {
+      AppLogger.i('ToolApp', 'App恢复前台，WebSocket已断开，尝试重连...');
+      // 取消可能存在的自动重连定时器，避免重复重连
+      cameraService.cancelReconnect();
+      cameraService.connect().then((ok) {
+        if (ok) {
+          AppLogger.i('ToolApp', 'WebSocket重连成功');
+        } else {
+          AppLogger.w('ToolApp', 'WebSocket重连失败，将由自动重连机制继续尝试');
+        }
+      }).catchError((e) {
+        AppLogger.w('ToolApp', 'WebSocket重连异常: $e');
+      });
     }
   }
 
@@ -234,7 +256,10 @@ class _AuthWrapperState extends State<AuthWrapper> {
   // 启动顶号检测
   void _startKickedCheck() {
     _kickedCheckTimer?.cancel();
-    _kickedCheckTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+    // 立即检测一次
+    _checkIfKicked();
+    // 每15秒检测一次
+    _kickedCheckTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       _checkIfKicked();
     });
   }

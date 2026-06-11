@@ -569,6 +569,171 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
 });
 
 // ============================================================
+// 忘记密码：通过邮箱验证码重置密码
+// ============================================================
+app.post('/api/auth/reset-password', (req, res) => {
+  const { email, verificationCode, newPassword } = req.body;
+
+  if (!email || !verificationCode || !newPassword) {
+    return res.status(400).json({ error: '邮箱、验证码和新密码不能为空' });
+  }
+
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: '密码至少需要6位' });
+  }
+
+  // 检查用户是否存在
+  const user = db.prepare('SELECT id, email, is_deleted FROM users WHERE email = ?').get(email);
+  if (!user || user.is_deleted) {
+    return res.status(404).json({ error: '该邮箱未注册' });
+  }
+
+  // 检查邮箱服务是否已配置
+  if (!mailTransporter) {
+    return res.status(503).json({ error: '邮箱服务未配置，请联系管理员重置密码' });
+  }
+
+  // 验证验证码
+  const codeRecord = db.prepare(
+    "SELECT * FROM email_verification_codes WHERE email = ? AND code = ? AND is_used = 0 AND expires_at > datetime('now') ORDER BY created_at DESC LIMIT 1"
+  ).get(email, verificationCode);
+
+  if (!codeRecord) {
+    return res.status(400).json({ error: '验证码无效或已过期' });
+  }
+
+  // 标记验证码为已使用
+  db.prepare('UPDATE email_verification_codes SET is_used = 1 WHERE id = ?').run(codeRecord.id);
+
+  // 更新密码
+  const passwordHash = bcrypt.hashSync(newPassword, 10);
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, user.id);
+
+  // 清除该用户所有设备的登录令牌（强制所有设备重新登录）
+  db.prepare('DELETE FROM device_tokens WHERE user_id = ?').run(user.id);
+
+  res.json({ success: true, message: '密码重置成功，请使用新密码登录' });
+});
+
+// ============================================================
+// 查询当前账号登录过的设备列表
+// ============================================================
+app.get('/api/auth/devices', authMiddleware, (req, res) => {
+  try {
+    const devices = db.prepare(
+      'SELECT id, device_token, device_info, last_active FROM device_tokens WHERE user_id = ? ORDER BY last_active DESC'
+    ).all(req.userId);
+
+    // 标记当前设备
+    const currentDeviceToken = req.query.deviceToken;
+    const result = devices.map(d => ({
+      ...d,
+      isCurrentDevice: d.device_token === currentDeviceToken,
+    }));
+
+    res.json({ devices: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 踢出指定设备（顶号操作）
+// ============================================================
+app.delete('/api/auth/devices/:deviceToken', authMiddleware, (req, res) => {
+  const { deviceToken } = req.params;
+
+  // 不允许踢出自己
+  if (deviceToken === req.query.currentDeviceToken) {
+    return res.status(400).json({ error: '不能踢出当前设备' });
+  }
+
+  try {
+    const result = db.prepare(
+      'DELETE FROM device_tokens WHERE user_id = ? AND device_token = ?'
+    ).run(req.userId, deviceToken);
+
+    if (result.changes === 0) {
+      return res.status(404).json({ error: '设备不存在' });
+    }
+
+    res.json({ success: true, message: '已踢出该设备' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 管理员查询用户登录设备列表
+// ============================================================
+app.get('/api/admin/users/:id/devices', adminMiddleware, (req, res) => {
+  const userId = Number(req.params.id);
+
+  try {
+    const devices = db.prepare(
+      'SELECT id, device_token, device_info, last_active FROM device_tokens WHERE user_id = ? ORDER BY last_active DESC'
+    ).all(userId);
+
+    res.json({ devices });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 管理员踢出用户指定设备
+// ============================================================
+app.delete('/api/admin/users/:id/devices/:deviceToken', adminMiddleware, (req, res) => {
+  const userId = Number(req.params.id);
+  const { deviceToken } = req.params;
+
+  try {
+    const result = db.prepare(
+      'DELETE FROM device_tokens WHERE user_id = ? AND device_token = ?'
+    ).run(userId, deviceToken);
+
+    if (result.changes === 0) {
+      return res.status(404).json({ error: '设备不存在' });
+    }
+
+    res.json({ success: true, message: '已踢出该设备' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 用户修改自己的密码
+// ============================================================
+app.post('/api/auth/change-password', authMiddleware, (req, res) => {
+  const { oldPassword, newPassword } = req.body;
+
+  if (!oldPassword || !newPassword) {
+    return res.status(400).json({ error: '旧密码和新密码不能为空' });
+  }
+
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: '新密码至少需要6位' });
+  }
+
+  const user = db.prepare('SELECT id, password_hash FROM users WHERE id = ?').get(req.userId);
+  if (!user) {
+    return res.status(404).json({ error: '用户不存在' });
+  }
+
+  // 验证旧密码
+  if (!bcrypt.compareSync(oldPassword, user.password_hash)) {
+    return res.status(400).json({ error: '旧密码不正确' });
+  }
+
+  // 更新密码
+  const passwordHash = bcrypt.hashSync(newPassword, 10);
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, user.id);
+
+  res.json({ success: true, message: '密码修改成功' });
+});
+
+// ============================================================
 // App检查更新接口（公开接口，无需认证）
 // ============================================================
 app.get('/api/app/version/check', (req, res) => {
@@ -840,6 +1005,17 @@ function adminMiddleware(req, res, next) {
   }
   next();
 }
+
+// 管理员获取临时JWT Token（用于WebSocket连接）
+app.post('/api/admin/ws-token', adminMiddleware, (req, res) => {
+  // 生成一个临时JWT，有效期1小时，标记为admin角色
+  const token = jwt.sign(
+    { userId: 'admin', email: 'admin', role: 'admin' },
+    JWT_SECRET,
+    { expiresIn: '1h' }
+  );
+  res.json({ token });
+});
 
 app.post('/api/admin/change-password', adminMiddleware, (req, res) => {
   const { newPassword } = req.body || {};
@@ -1466,6 +1642,18 @@ const rooms = new Map();
 // WebSocket 客户端存储：ws -> { playerId, roomCode, role }
 const wsClients = new Map();
 
+// ============================================================
+// 摄像头推流中转：管理员请求 -> App推流 -> 管理员接收
+// ============================================================
+// 管理员WebSocket连接存储：ws -> { role: 'admin' }
+const adminWsClients = new Map();
+// App端用户WebSocket连接存储（所有在线用户）：ws -> { userId }
+const userWsClients = new Map();
+// App端摄像头推流连接存储：ws -> { role: 'app', userId }
+const appCameraStreams = new Map();
+// 推流请求映射：userId -> adminWs（哪个管理员在请求该用户的摄像头）
+const cameraRequests = new Map();
+
 // 生成4位数字房间号（便于用户输入）
 function generateRoomCode() {
   return Math.floor(1000 + Math.random() * 9000).toString();
@@ -1575,6 +1763,45 @@ function handleWsMessage(ws, msg) {
   const { type, data } = msg;
 
   switch (type) {
+    // ============================================================
+    // 摄像头推流相关消息
+    // ============================================================
+    case 'admin_camera_request':
+      // 管理员请求某用户的摄像头
+      handleAdminCameraRequest(ws, data);
+      break;
+    case 'admin_camera_stop':
+      // 管理员停止请求
+      handleAdminCameraStop(ws, data);
+      break;
+    case 'app_camera_start':
+      // App端确认开始推流
+      handleAppCameraStart(ws, data);
+      break;
+    case 'app_camera_frame':
+      // App端推送摄像头画面帧
+      handleAppCameraFrame(ws, data);
+      break;
+    case 'app_camera_stop':
+      // App端停止推流
+      handleAppCameraStop(ws, data);
+      break;
+    case 'admin_camera_snapshot':
+      // 管理员请求抓拍
+      handleAdminCameraSnapshot(ws, data);
+      break;
+    case 'app_camera_snapshot':
+      // App端返回抓拍结果
+      handleAppCameraSnapshot(ws, data);
+      break;
+    case 'admin_get_online_users':
+      // 管理员查询WebSocket在线用户列表
+      handleAdminGetOnlineUsers(ws);
+      break;
+
+    // ============================================================
+    // 联机掷骰子房间相关消息
+    // ============================================================
     case 'create_room':
       handleCreateRoom(ws, data);
       break;
@@ -1812,8 +2039,305 @@ function handleCloseRoom(ws) {
   console.log(`房间关闭: ${clientInfo.roomCode}`);
 }
 
+// ============================================================
+// 摄像头推流处理函数
+// ============================================================
+
+// 管理员请求某用户的摄像头
+function handleAdminCameraRequest(ws, data) {
+  const { userId } = data;
+  if (!userId) {
+    ws.send(JSON.stringify({ type: 'camera_error', data: { message: '缺少userId' } }));
+    return;
+  }
+
+  // 记录管理员连接
+  adminWsClients.set(ws, { role: 'admin', targetUserId: userId });
+
+  // 调试：打印所有在线用户
+  console.log(`管理员请求摄像头: userId=${userId} (type: ${typeof userId}), 在线用户数: ${userWsClients.size}`);
+  for (const [clientWs, info] of userWsClients) {
+    console.log(`  在线用户: userId=${info.userId} (type: ${typeof info.userId})`);
+  }
+
+  // 查找该用户的App WebSocket连接（从所有在线用户中查找）
+  // 使用 == 比较以兼容数字和字符串类型的userId
+  let appWs = null;
+  for (const [clientWs, info] of userWsClients) {
+    if (info.userId == userId) {
+      appWs = clientWs;
+      break;
+    }
+  }
+
+  if (!appWs || appWs.readyState !== WebSocket.OPEN) {
+    // App端不在线，记录请求，等App上线后通知
+    cameraRequests.set(userId, ws);
+    ws.send(JSON.stringify({ type: 'camera_status', data: { status: 'waiting', message: '等待App端连接...' } }));
+    console.log(`摄像头请求已记录: userId=${userId}，等待App端上线`);
+    return;
+  }
+
+  // App端在线，发送推流请求（转发摄像头模式）
+  cameraRequests.set(userId, ws);
+  const cameraMode = data.cameraMode || 'front';
+  appWs.send(JSON.stringify({ type: 'camera_start_request', data: { cameraMode } }));
+  ws.send(JSON.stringify({ type: 'camera_status', data: { status: 'requesting', message: '已发送推流请求，等待App端确认...' } }));
+  console.log(`摄像头推流请求已发送: userId=${userId}, cameraMode=${cameraMode}`);
+}
+
+// 管理员停止请求
+function handleAdminCameraStop(ws, data) {
+  const adminInfo = adminWsClients.get(ws);
+  if (!adminInfo) return;
+
+  const userId = adminInfo.targetUserId;
+  if (userId) {
+    // 通知App端停止推流（搜索所有连接和正在推流的连接）
+    for (const [clientWs, info] of userWsClients) {
+      if (info.userId == userId && clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify({ type: 'camera_stop_request', data: {} }));
+      }
+    }
+    for (const [clientWs, info] of appCameraStreams) {
+      if (info.userId == userId && clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify({ type: 'camera_stop_request', data: {} }));
+      }
+    }
+    cameraRequests.delete(userId);
+  }
+
+  adminWsClients.delete(ws);
+  ws.send(JSON.stringify({ type: 'camera_status', data: { status: 'stopped', message: '已停止' } }));
+  console.log(`管理员停止摄像头请求: userId=${userId}`);
+}
+
+// App端确认开始推流
+function handleAppCameraStart(ws, data) {
+  const userId = ws.userId;
+  if (!userId) {
+    console.log('handleAppCameraStart: ws.userId为空，跳过');
+    return;
+  }
+
+  // 记录App推流连接
+  appCameraStreams.set(ws, { role: 'app', userId });
+
+  // 通知管理员推流已开始（遍历查找，兼容类型差异）
+  let adminWs = cameraRequests.get(userId);
+  if (!adminWs) {
+    // 尝试字符串/数字类型转换查找
+    for (const [key, val] of cameraRequests) {
+      if (key == userId) {
+        adminWs = val;
+        break;
+      }
+    }
+  }
+
+  console.log(`handleAppCameraStart: userId=${userId}(type:${typeof userId}), cameraRequests中有${cameraRequests.size}条, 找到管理员: ${!!adminWs}`);
+  for (const [key] of cameraRequests) {
+    console.log(`  cameraRequests key=${key}(type:${typeof key})`);
+  }
+
+  if (adminWs && adminWs.readyState === WebSocket.OPEN) {
+    adminWs.send(JSON.stringify({ type: 'camera_status', data: { status: 'streaming', message: '摄像头推流已开始' } }));
+  }
+
+  console.log(`App端开始摄像头推流: userId=${userId}`);
+}
+
+// App端推送摄像头画面帧
+let frameCount = 0;
+function handleAppCameraFrame(ws, data) {
+  const streamInfo = appCameraStreams.get(ws);
+  if (!streamInfo) {
+    // 可能还没注册到appCameraStreams，尝试用userWsClients中的userId查找
+    const userInfo = userWsClients.get(ws);
+    if (userInfo) {
+      // 自动注册到appCameraStreams
+      appCameraStreams.set(ws, { role: 'app', userId: userInfo.userId });
+      console.log(`handleAppCameraFrame: 自动注册推流连接 userId=${userInfo.userId}`);
+    } else {
+      return;
+    }
+  }
+
+  const userId = (appCameraStreams.get(ws) || {}).userId;
+  let adminWs = cameraRequests.get(userId);
+  if (!adminWs) {
+    for (const [key, val] of cameraRequests) {
+      if (key == userId) { adminWs = val; break; }
+    }
+  }
+
+  frameCount++;
+  if (frameCount % 30 === 0) {
+    console.log(`帧转发: 第${frameCount}帧, userId=${userId}, 找到管理员: ${!!adminWs}, 管理员状态: ${adminWs ? adminWs.readyState : 'N/A'}`);
+  }
+
+  // 转发画面帧给管理员
+  if (adminWs && adminWs.readyState === WebSocket.OPEN) {
+    adminWs.send(JSON.stringify({ type: 'camera_frame', data }));
+  }
+}
+
+// App端停止推流
+function handleAppCameraStop(ws, data) {
+  const streamInfo = appCameraStreams.get(ws);
+  if (!streamInfo) return;
+
+  const userId = streamInfo.userId;
+
+  // 通知管理员推流已停止
+  let adminWs = cameraRequests.get(userId);
+  if (!adminWs) {
+    for (const [key, val] of cameraRequests) {
+      if (key == userId) { adminWs = val; break; }
+    }
+  }
+  if (adminWs && adminWs.readyState === WebSocket.OPEN) {
+    adminWs.send(JSON.stringify({ type: 'camera_status', data: { status: 'stopped', message: 'App端已停止推流' } }));
+  }
+
+  appCameraStreams.delete(ws);
+  cameraRequests.delete(userId);
+  console.log(`App端停止摄像头推流: userId=${userId}`);
+}
+
+// 管理员请求抓拍
+function handleAdminCameraSnapshot(ws, data) {
+  const { userId } = data;
+  if (!userId) {
+    ws.send(JSON.stringify({ type: 'camera_error', data: { message: '缺少userId' } }));
+    return;
+  }
+
+  // 记录管理员连接（如果尚未记录）
+  if (!adminWsClients.has(ws)) {
+    adminWsClients.set(ws, { role: 'admin', targetUserId: userId });
+  }
+
+  // 查找该用户的App WebSocket连接
+  let appWs = null;
+  for (const [clientWs, info] of userWsClients) {
+    if (info.userId == userId) {
+      appWs = clientWs;
+      break;
+    }
+  }
+
+  if (!appWs || appWs.readyState !== WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'camera_error', data: { message: 'App端不在线，无法抓拍' } }));
+    return;
+  }
+
+  // 发送抓拍请求给App端（转发摄像头模式）
+  cameraRequests.set(userId, ws);
+  const cameraMode = data.cameraMode || 'front';
+  appWs.send(JSON.stringify({ type: 'camera_snapshot_request', data: { cameraMode } }));
+  ws.send(JSON.stringify({ type: 'camera_status', data: { status: 'snapshot_requesting', message: '已发送抓拍请求...' } }));
+  console.log(`管理员请求抓拍: userId=${userId}, cameraMode=${cameraMode}`);
+}
+
+// App端返回抓拍结果
+function handleAppCameraSnapshot(ws, data) {
+  const userInfo = userWsClients.get(ws);
+  if (!userInfo) return;
+
+  const userId = userInfo.userId;
+  let adminWs = cameraRequests.get(userId);
+  if (!adminWs) {
+    for (const [key, val] of cameraRequests) {
+      if (key == userId) { adminWs = val; break; }
+    }
+  }
+
+  // 转发抓拍结果给管理员
+  if (adminWs && adminWs.readyState === WebSocket.OPEN) {
+    adminWs.send(JSON.stringify({ type: 'camera_snapshot', data }));
+  }
+
+  console.log(`App端返回抓拍结果: userId=${userId}`);
+}
+
+// 管理员查询WebSocket在线用户列表
+function handleAdminGetOnlineUsers(ws) {
+  const onlineUserIds = new Set();
+  for (const [clientWs, info] of userWsClients) {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      onlineUserIds.add(info.userId);
+    }
+  }
+
+  // 从数据库获取用户信息
+  const users = [];
+  for (const userId of onlineUserIds) {
+    try {
+      const user = db.prepare('SELECT id, email FROM users WHERE id = ?').get(userId);
+      if (user && !user.is_deleted) {
+        users.push({ id: user.id, email: user.email, isOnline: true });
+      }
+    } catch (e) {
+      // 忽略
+    }
+  }
+
+  ws.send(JSON.stringify({ type: 'online_users', data: { users } }));
+  console.log(`管理员查询在线用户: ${users.length} 人在线`);
+}
+
 // 处理WebSocket断开连接
 function handleWsDisconnect(ws) {
+  // 清理摄像头推流相关连接
+  const adminInfo = adminWsClients.get(ws);
+  if (adminInfo) {
+    // 管理员断开，通知App端停止推流
+    const userId = adminInfo.targetUserId;
+    if (userId) {
+      for (const [clientWs, info] of appCameraStreams) {
+        if (info.userId == userId && clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(JSON.stringify({ type: 'camera_stop_request', data: {} }));
+        }
+      }
+      cameraRequests.delete(userId);
+    }
+    adminWsClients.delete(ws);
+  }
+
+  const streamInfo = appCameraStreams.get(ws);
+  if (streamInfo) {
+    // App端断开，通知管理员
+    const userId = streamInfo.userId;
+    let adminWs = cameraRequests.get(userId);
+    if (!adminWs) {
+      for (const [key, val] of cameraRequests) {
+        if (key == userId) { adminWs = val; break; }
+      }
+    }
+    if (adminWs && adminWs.readyState === WebSocket.OPEN) {
+      adminWs.send(JSON.stringify({ type: 'camera_status', data: { status: 'stopped', message: 'App端已断开连接' } }));
+    }
+    appCameraStreams.delete(ws);
+    cameraRequests.delete(userId);
+  }
+
+  // 清理用户连接存储，并通知管理员用户下线
+  const userInfo = userWsClients.get(ws);
+  if (userInfo) {
+    const userOfflineMsg = JSON.stringify({
+      type: 'user_offline',
+      data: { id: userInfo.userId, isOnline: false }
+    });
+    for (const [adminWs] of adminWsClients) {
+      if (adminWs.readyState === WebSocket.OPEN) {
+        adminWs.send(userOfflineMsg);
+      }
+    }
+  }
+  userWsClients.delete(ws);
+
+  // 清理联机掷骰子房间连接
   const clientInfo = wsClients.get(ws);
   if (!clientInfo || !clientInfo.roomCode) return;
 
@@ -1860,9 +2384,53 @@ function handleWsDisconnect(ws) {
 app.use(express.static(WEBSITE_DIR));
 
 // 创建HTTP服务器并附加WebSocket
-const server = app.listen(PORT, () => {
-  console.log(`ToolApp 服务器已启动: http://localhost:${PORT}`);
-  console.log(`邮箱验证码: ${mailTransporter ? '已配置' : '未配置（设置 EMAIL_USER 和 EMAIL_PASS 环境变量）'}`);
+const os = require('os');
+
+function getNetworkInfo() {
+  const interfaces = os.networkInterfaces();
+  const result = {
+    hostname: os.hostname(),
+    platform: os.platform(),
+    localIPs: [],
+  };
+  Object.keys(interfaces).forEach(iface => {
+    interfaces[iface].forEach(addr => {
+      if (addr.family === 'IPv4' && !addr.internal) {
+        result.localIPs.push({ name: iface, ip: addr.address });
+      }
+    });
+  });
+  return result;
+}
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  const netInfo = getNetworkInfo();
+  console.log('');
+  console.log('========================================');
+  console.log('  ToolApp 服务器已启动 ✅');
+  console.log('========================================');
+  console.log(`  本地访问:  http://localhost:${PORT}`);
+  console.log(`  主机名:    ${netInfo.hostname}`);
+  console.log('');
+  console.log('  局域网访问地址:');
+  if (netInfo.localIPs.length === 0) {
+    console.log('    (未检测到局域网网卡)');
+  } else {
+    netInfo.localIPs.forEach(item => {
+      console.log(`    - ${item.name}: http://${item.ip}:${PORT}`);
+    });
+  }
+  console.log('');
+  console.log('  官网页面: http://localhost:' + PORT + '/');
+  console.log('  下载页面: http://localhost:' + PORT + '/downloads/');
+  console.log('  API 地址: http://localhost:' + PORT + '/api/...');
+  console.log('');
+  console.log(`  邮箱验证码: ${mailTransporter ? '已配置' : '未配置（设置 EMAIL_USER 和 EMAIL_PASS 环境变量）'}`);
+  console.log('========================================');
+  console.log('');
+  console.log('  提示: 局域网设备（手机/平板）需要在同一 Wi-Fi 下通过局域网 IP 访问');
+  console.log('        公网访问需要配置内网穿透（如 cpolar）或部署到服务器');
+  console.log('');
 });
 
 // 初始化WebSocket服务器
@@ -1893,15 +2461,50 @@ wss.on('connection', (ws, req) => {
   // 验证JWT token
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    // 检查用户是否已被软删除
-    const user = db.prepare('SELECT id, is_deleted FROM users WHERE id = ?').get(decoded.userId);
-    if (!user || user.is_deleted) {
-      ws.close(1008, '账号已被注销');
-      return;
+
+    if (decoded.role === 'admin') {
+      // 管理员连接：跳过用户表查询，直接注册
+      ws.userId = 'admin';
+      ws.userEmail = decoded.email;
+      ws.isAdmin = true;
+      adminWsClients.set(ws, { role: 'admin' });
+      console.log(`管理员WebSocket连接成功`);
+    } else {
+      // 普通用户连接：检查用户是否已被软删除
+      const user = db.prepare('SELECT id, is_deleted FROM users WHERE id = ?').get(decoded.userId);
+      if (!user || user.is_deleted) {
+        ws.close(1008, '账号已被注销');
+        return;
+      }
+      ws.userId = decoded.userId;
+      ws.userEmail = decoded.email;
+      ws.isAdmin = false;
+      userWsClients.set(ws, { userId: decoded.userId });
+      console.log(`WebSocket连接: ${decoded.email}`);
+
+      // 通知所有管理员：有用户上线
+      const userOnlineMsg = JSON.stringify({
+        type: 'user_online',
+        data: { id: decoded.userId, email: decoded.email, isOnline: true }
+      });
+      for (const [adminWs] of adminWsClients) {
+        if (adminWs.readyState === WebSocket.OPEN) {
+          adminWs.send(userOnlineMsg);
+        }
+      }
+
+      // 检查是否有管理员在等待此用户的摄像头
+      let pendingAdmin = cameraRequests.get(decoded.userId);
+      if (!pendingAdmin) {
+        for (const [key, val] of cameraRequests) {
+          if (key == decoded.userId) { pendingAdmin = val; break; }
+        }
+      }
+      if (pendingAdmin && pendingAdmin.readyState === WebSocket.OPEN) {
+        console.log(`发现等待摄像头请求: userId=${decoded.userId}，发送推流请求`);
+        ws.send(JSON.stringify({ type: 'camera_start_request', data: {} }));
+      }
     }
-    ws.userId = decoded.userId;
-    ws.userEmail = decoded.email;
-    console.log(`WebSocket连接: ${decoded.email}`);
   } catch (err) {
     ws.close(1008, '认证令牌无效或已过期');
     return;
@@ -1937,16 +2540,16 @@ wss.on('connection', (ws, req) => {
 
   // 启动心跳检测（30秒发送心跳 + 检测客户端超时）
   heartbeatTimer = setInterval(() => {
-    // 检测客户端是否超时（90秒无任何消息视为断开）
+    // 检测客户端是否超时（120秒无任何消息视为断开，给移动端更多容错空间）
     const inactiveTime = Date.now() - ws.lastActiveTime;
-    if (inactiveTime > 90000) {
+    if (inactiveTime > 120000) {
       console.log(`WebSocket客户端超时: ${ws.userEmail}，${Math.floor(inactiveTime / 1000)}秒无活动`);
       ws.terminate();
       return;
     }
 
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'heartbeat', data: { timestamp: Date.now() } }) + '\n');
+      ws.send(JSON.stringify({ type: 'heartbeat', data: { timestamp: Date.now() } }));
     }
   }, 30000);
 });

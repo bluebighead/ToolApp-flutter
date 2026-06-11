@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- 申请网络权限，用于网速测试（HTTP HEAD） -->
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 申请麦克风权限，用于分贝测试 -->
@@ -10,7 +11,12 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <!-- 视频格式转换：保存转换后的 MP4 文件到下载目录（可选） -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
+        android:maxSdkVersion="29"
+        tools:replace="android:maxSdkVersion" />
+    <!-- 摄像头检测：设备检修工具中的摄像头测试 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
     <!-- 视频转换后台进度：Android 13+ 通知权限（弹转换进度通知用） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 视频转换后台运行：避免系统杀进程 -->
@@ -85,6 +91,17 @@
         -->
         <service
             android:name=".ConvertForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <!--
+          WebSocket连接保活前台服务：
+            - App切后台时保持WebSocket连接不被系统杀掉
+            - 使用WakeLock防止CPU休眠导致心跳中断
+            - 通知栏显示"设备连接中"状态
+        -->
+        <service
+            android:name=".WebSocketForegroundService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />

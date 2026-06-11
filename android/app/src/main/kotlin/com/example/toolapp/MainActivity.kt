@@ -553,6 +553,29 @@ class MainActivity : FlutterActivity() {
                             result.error("EXCEPTION", e.message ?: "unknown", e.stackTraceToString())
                         }
                     }
+                    // WebSocket保活前台服务：启动
+                    "startWsForegroundService" -> {
+                        val content = call.argument<String>("content") ?: "设备连接保持中"
+                        try {
+                            WebSocketForegroundService.start(this, content)
+                            Log.i(TAG, "WebSocket保活前台服务已请求启动: $content")
+                            result.success(true)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "启动WebSocket保活前台服务失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", e.stackTraceToString())
+                        }
+                    }
+                    // WebSocket保活前台服务：停止
+                    "stopWsForegroundService" -> {
+                        try {
+                            WebSocketForegroundService.stop(this)
+                            Log.i(TAG, "WebSocket保活前台服务已请求停止")
+                            result.success(true)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "停止WebSocket保活前台服务失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", e.stackTraceToString())
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }
