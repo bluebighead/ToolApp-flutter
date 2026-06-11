@@ -49,7 +49,8 @@ function startDbWorker() {
     const workerPath = path.join(__dirname, 'db_worker.js');
     console.log('启动数据库工作进程:', workerPath);
     
-    const nodeExe = findNodeExecutable();
+    // 使用 Electron 自带的 Node.js 运行 db_worker，确保 better-sqlite3 兼容
+    const nodeExe = process.execPath;
     console.log('使用 Node.js 可执行文件:', nodeExe);
     
     dbWorker = spawn(nodeExe, [workerPath], {

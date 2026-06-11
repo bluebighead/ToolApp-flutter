@@ -254,20 +254,13 @@ async function handleMessage(msg) {
 // ============ 数据库操作实现 ============
 
 function autoScanDatabase() {
-  // 尝试多个位置找到 toolapp.db
   const candidates = [
-    // 从 electron/ 目录向上两级（最常见的项目结构）
     path.join(__dirname, '..', '..', 'toolapp-server', 'data'),
-    // 从 electron/ 目录向上一级
     path.join(__dirname, '..', 'toolapp-server', 'data'),
-    // 当前工作目录的 toolapp-server/data
     path.join(process.cwd(), 'toolapp-server', 'data'),
-    // 当前工作目录的父目录中的 toolapp-server/data
     path.join(path.dirname(process.cwd()), 'toolapp-server', 'data'),
-    // 简单的 data 目录
     path.join(process.cwd(), 'data'),
     path.join(__dirname, 'data'),
-    // 尝试从项目根目录的常见位置
   ];
   
   for (const dir of candidates) {
