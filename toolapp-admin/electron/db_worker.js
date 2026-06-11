@@ -8,65 +8,105 @@ console.error = (...args) => {
   process.stderr.write(args.join(' ') + '\n');
 };
 
-// 远程 API 请求通用方法
-function remoteGet(apiPath) {
+// ============ 远程 API 请求 ============
+// 根据URL协议自动选择http或https模块
+function getHttpModule(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' ? require('https') : require('http');
+  } catch (e) {
+    return require('http');
+  }
+}
+
+// 规范化服务器地址：自动补全http://前缀、去除末尾斜杠和空白
+function normalizeServerUrl(url) {
+  if (!url) return '';
+  let trimmed = url.trim();
+  if (!trimmed.match(/^https?:\/\//i)) {
+    trimmed = 'http://' + trimmed;
+  }
+  return trimmed.replace(/\/+$/, '');
+}
+
+// 统一的远程API请求函数（支持GET/POST/PUT/DELETE，自动选择http/https）
+function remoteRequest(apiPath, options) {
   return new Promise((resolve, reject) => {
     if (!remoteUrl) return reject(new Error('未连接远程服务器'));
-    const http = require('http');
-    const apiUrl = new URL(apiPath, remoteUrl);
-    const req = http.request(apiUrl, {
-      method: 'GET',
-      headers: { 'x-admin-password': remotePassword },
-      timeout: 10000,
-    }, (res) => {
+    const method = options?.method || 'GET';
+    const body = options?.body;
+    const extraHeaders = options?.headers || {};
+    const timeout = options?.timeout || 10000;
+
+    const fullUrl = new URL(apiPath, remoteUrl.endsWith('/') ? remoteUrl : remoteUrl + '/');
+    const http = getHttpModule(fullUrl.href);
+
+    const reqOptions = {
+      method: method,
+      headers: {
+        'x-admin-password': remotePassword,
+        ...extraHeaders,
+      },
+      timeout: timeout,
+    };
+
+    const req = http.request(fullUrl, reqOptions, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         try {
-          resolve(JSON.parse(data));
-        } catch(e) {
+          const json = JSON.parse(data);
+          resolve(json);
+        } catch (e) {
           reject(new Error('服务器响应格式错误'));
         }
       });
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('连接超时')); });
+    if (body !== undefined) {
+      req.write(body);
+    }
     req.end();
   });
 }
 
-// 远程 API POST 请求通用方法
+// 远程API GET请求
+function remoteGet(apiPath) {
+  return remoteRequest(apiPath, { method: 'GET' });
+}
+
+// 远程API POST请求（JSON body）
 function remotePost(apiPath, body) {
-  return new Promise((resolve, reject) => {
-    if (!remoteUrl) return reject(new Error('未连接远程服务器'));
-    const http = require('http');
-    const apiUrl = new URL(apiPath, remoteUrl);
-    const postData = JSON.stringify(body || {});
-    const req = http.request(apiUrl, {
-      method: 'POST',
-      headers: {
-        'x-admin-password': remotePassword,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData),
-      },
-      timeout: 10000,
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch(e) {
-          reject(new Error('服务器响应格式错误'));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('连接超时')); });
-    req.write(postData);
-    req.end();
+  const jsonData = JSON.stringify(body || {});
+  return remoteRequest(apiPath, {
+    method: 'POST',
+    body: jsonData,
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(jsonData),
+    },
   });
 }
+
+// 远程API PUT请求（JSON body）
+function remotePut(apiPath, body) {
+  const jsonData = JSON.stringify(body || {});
+  return remoteRequest(apiPath, {
+    method: 'PUT',
+    body: jsonData,
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(jsonData),
+    },
+  });
+}
+
+// 远程API DELETE请求
+function remoteDelete(apiPath) {
+  return remoteRequest(apiPath, { method: 'DELETE' });
+}
+
 
 // ============ 数据库状态 ============
 let db = null;
@@ -259,6 +299,9 @@ async function handleMessage(msg) {
       case 'version:delete':
         result = await deleteVersion(params);
         break;
+      case 'feedback:getList':
+        result = await getFeedbacks(params || {});
+        break;
       default:
         sendError(id, 'UNKNOWN_METHOD', '未知方法: ' + method);
         return;
@@ -333,10 +376,14 @@ async function connectLocal(newDbPath) {
   }
   
   try {
-    // 关闭旧连接
+    // 关闭旧连接 + 重置远程状态
     if (db) {
       try { db.close(); } catch(e) {}
     }
+    // 关键：切换到本地模式时必须重置远程标记，否则所有操作会走错误的分支
+    remoteMode = false;
+    remoteUrl = '';
+    remotePassword = '';
     
     db = new Database(newDbPath);
     dbPath = newDbPath;
@@ -376,12 +423,26 @@ async function connectRemote(url, password) {
       dbPath = null;
     }
 
-    // 测试远程连接
-    const http = require('http');
-    const testUrl = new URL('/api/admin/system-info', url);
+    // 规范化URL（补全http://前缀、去除空白和末尾斜杠）
+    const normalizedUrl = normalizeServerUrl(url);
+    if (!normalizedUrl) {
+      return { success: false, error: '服务器地址不能为空' };
+    }
 
+    // 验证URL格式
+    let parsedUrl;
+    try {
+      parsedUrl = new URL('/api/admin/system-info', normalizedUrl.endsWith('/') ? normalizedUrl : normalizedUrl + '/');
+    } catch (e) {
+      return { success: false, error: '服务器地址格式错误：' + e.message };
+    }
+
+    // 根据协议选择http或https模块
+    const http = parsedUrl.protocol === 'https:' ? require('https') : require('http');
+
+    // 测试远程连接
     const info = await new Promise((resolve, reject) => {
-      const req = http.request(testUrl, {
+      const req = http.request(parsedUrl, {
         method: 'GET',
         headers: { 'x-admin-password': password || '' },
         timeout: 10000,
@@ -397,18 +458,36 @@ async function connectRemote(url, password) {
               resolve(json);
             }
           } catch(e) {
-            reject(new Error('服务器响应格式错误'));
+            if (res.statusCode === 403) {
+              reject(new Error('管理员密码错误'));
+            } else if (res.statusCode === 404) {
+              reject(new Error('服务器找不到该接口（404），请确认服务器地址正确'));
+            } else if (res.statusCode >= 500) {
+              reject(new Error('服务器内部错误（' + res.statusCode + '）'));
+            } else {
+              reject(new Error('服务器响应格式错误（状态码：' + res.statusCode + '）'));
+            }
           }
         });
       });
-      req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('连接超时')); });
+      req.on('error', (e) => {
+        if (e.code === 'ECONNREFUSED') {
+          reject(new Error('连接被拒绝，请确认服务器已启动且地址正确（' + normalizedUrl + '）'));
+        } else if (e.code === 'ENOTFOUND' || e.code === 'EAI_AGAIN') {
+          reject(new Error('无法解析服务器地址，请检查网络连接或地址是否正确'));
+        } else if (e.code === 'ETIMEDOUT' || e.code === 'ESOCKETTIMEDOUT') {
+          reject(new Error('连接超时，请确认服务器可访问'));
+        } else {
+          reject(new Error('连接失败：' + e.message));
+        }
+      });
+      req.on('timeout', () => { req.destroy(); reject(new Error('连接超时（10秒）')); });
       req.end();
     });
 
     // 连接成功，保存远程状态
     remoteMode = true;
-    remoteUrl = url;
+    remoteUrl = normalizedUrl;
     remotePassword = password || '';
 
     return { success: true, info };
@@ -517,7 +596,20 @@ async function getUsers(params) {
   }
 }
 
-function getTableData(table, params) {
+async function getTableData(table, params) {
+  // 远程模式：从服务器 API 获取
+  if (remoteMode && remoteUrl) {
+    try {
+      const query = new URLSearchParams();
+      if (params?.page) query.set('page', params.page);
+      if (params?.pageSize) query.set('pageSize', params.pageSize);
+      if (params?.userId) query.set('userId', params.userId);
+      return await remoteGet('/api/admin/table/' + table + '?' + query.toString());
+    } catch (err) {
+      return { rows: [], total: 0, error: err.message };
+    }
+  }
+
   if (!db) return { rows: [], total: 0, error: '未连接' };
   const validTables = ['heart_rate_sessions', 'network_speed_records', 'convert_history', 'dice_records', 'period_records'];
   if (!validTables.includes(table)) return { rows: [], total: 0, error: '无效的表名' };
@@ -542,6 +634,18 @@ function getTableData(table, params) {
 }
 
 function updateRecord(table, id, data) {
+  // 远程模式：调用服务器 API
+  if (remoteMode && remoteUrl) {
+    return remotePut('/api/admin/table/' + table + '/' + id, data)
+      .then((result) => {
+        if (result && result.success) {
+          return { success: true };
+        }
+        return { success: false, error: result?.error || '更新失败' };
+      })
+      .catch((err) => ({ success: false, error: err.message }));
+  }
+
   if (!db) return { success: false, error: '未连接' };
   const validTables = ['heart_rate_sessions', 'network_speed_records', 'convert_history', 'dice_records', 'period_records'];
   if (!validTables.includes(table)) return { success: false, error: '无效的表名' };
@@ -558,6 +662,18 @@ function updateRecord(table, id, data) {
 }
 
 function deleteRecord(table, id) {
+  // 远程模式：调用服务器 API
+  if (remoteMode && remoteUrl) {
+    return remoteDelete('/api/admin/table/' + table + '/' + id)
+      .then((result) => {
+        if (result && result.success) {
+          return { success: true };
+        }
+        return { success: false, error: result?.error || '删除失败' };
+      })
+      .catch((err) => ({ success: false, error: err.message }));
+  }
+
   if (!db) return { success: false, error: '未连接' };
   const validTables = ['heart_rate_sessions', 'network_speed_records', 'convert_history', 'dice_records', 'period_records'];
   if (!validTables.includes(table)) return { success: false, error: '无效的表名' };
@@ -573,29 +689,14 @@ function deleteRecord(table, id) {
 function deleteUser(userId) {
   // 远程模式：调用服务器 API
   if (remoteMode && remoteUrl) {
-    return new Promise((resolve) => {
-      const http = require('http');
-      const apiUrl = new URL('/api/admin/users/' + userId, remoteUrl);
-      const req = http.request(apiUrl, {
-        method: 'DELETE',
-        headers: { 'x-admin-password': remotePassword },
-        timeout: 10000,
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
-          try {
-            const result = JSON.parse(data);
-            resolve(result.success ? { success: true } : { success: false, error: result.error || result.message });
-          } catch(e) {
-            resolve({ success: false, error: '服务器响应格式错误' });
-          }
-        });
-      });
-      req.on('error', (err) => resolve({ success: false, error: err.message }));
-      req.on('timeout', () => { req.destroy(); resolve({ success: false, error: '连接超时' }); });
-      req.end();
-    });
+    return remoteDelete('/api/admin/users/' + userId)
+      .then((result) => {
+        if (result && result.success) {
+          return { success: true };
+        }
+        return { success: false, error: result?.error || result?.message || '删除失败' };
+      })
+      .catch((err) => ({ success: false, error: err.message }));
   }
   
   if (!db) return { success: false, error: '未连接' };
@@ -643,35 +744,14 @@ function createUser(email, password, accountType) {
 
   // 远程模式：调用服务器 API（将账号类型传给服务器）
   if (remoteMode && remoteUrl) {
-    return new Promise((resolve) => {
-      const http = require('http');
-      const apiUrl = new URL('/api/admin/users', remoteUrl);
-      const body = JSON.stringify({ email, password, accountType });
-      const req = http.request(apiUrl, {
-        method: 'POST',
-        headers: {
-          'x-admin-password': remotePassword,
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body),
-        },
-        timeout: 10000,
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
-          try {
-            const result = JSON.parse(data);
-            resolve(result.success ? { success: true, user: result.user } : { success: false, error: result.error || result.message });
-          } catch(e) {
-            resolve({ success: false, error: '服务器响应格式错误' });
-          }
-        });
-      });
-      req.on('error', (err) => resolve({ success: false, error: err.message }));
-      req.on('timeout', () => { req.destroy(); resolve({ success: false, error: '连接超时' }); });
-      req.write(body);
-      req.end();
-    });
+    return remotePost('/api/admin/users', { email, password, accountType })
+      .then((result) => {
+        if (result && result.success) {
+          return { success: true, user: result.user };
+        }
+        return { success: false, error: result?.error || result?.message || '创建失败' };
+      })
+      .catch((err) => ({ success: false, error: err.message }));
   }
 
   // 本地模式
@@ -879,7 +959,19 @@ async function getOnlineStatus() {
   }
 }
 
-function getUserSessions(userId, params) {
+async function getUserSessions(userId, params) {
+  // 远程模式：从服务器 API 获取
+  if (remoteMode && remoteUrl) {
+    try {
+      const query = new URLSearchParams();
+      if (params?.page) query.set('page', params.page);
+      if (params?.pageSize) query.set('pageSize', params.pageSize);
+      return await remoteGet('/api/admin/users/' + userId + '/sessions?' + query.toString());
+    } catch (err) {
+      return { rows: [], total: 0, error: err.message };
+    }
+  }
+
   if (!db) return { rows: [], total: 0, error: '未连接' };
   if (!tableExists('user_sessions')) return { rows: [], total: 0, error: '会话表不存在' };
 
@@ -901,7 +993,19 @@ function getUserSessions(userId, params) {
   }
 }
 
-function getUserActivity(userId, params) {
+async function getUserActivity(userId, params) {
+  // 远程模式：从服务器 API 获取
+  if (remoteMode && remoteUrl) {
+    try {
+      const query = new URLSearchParams();
+      if (params?.page) query.set('page', params.page);
+      if (params?.pageSize) query.set('pageSize', params.pageSize);
+      return await remoteGet('/api/admin/users/' + userId + '/activity?' + query.toString());
+    } catch (err) {
+      return { rows: [], total: 0, error: err.message };
+    }
+  }
+
   if (!db) return { rows: [], total: 0, error: '未连接' };
   if (!tableExists('user_activity_logs')) return { rows: [], total: 0, error: '活动日志表不存在' };
 
@@ -919,6 +1023,34 @@ function getUserActivity(userId, params) {
 
     return { rows: logs, total, page, pageSize };
   } catch (err) {
+    return { rows: [], total: 0, error: err.message };
+  }
+}
+
+// ============ 用户反馈 ============
+async function getFeedbacks(params) {
+  // 远程模式：从服务器 API 获取
+  if (remoteMode && remoteUrl) {
+    try {
+      const query = new URLSearchParams();
+      if (params?.page) query.set('page', params.page);
+      if (params?.pageSize) query.set('pageSize', params.pageSize);
+      return await remoteGet('/api/admin/feedbacks?' + query.toString());
+    } catch (err) {
+      return { rows: [], total: 0, error: err.message };
+    }
+  }
+
+  if (!db) return { rows: [], total: 0, error: '未连接' };
+  const { page = 1, pageSize = 20 } = params;
+  const offset = (page - 1) * pageSize;
+
+  try {
+    const total = db.prepare('SELECT COUNT(*) as count FROM feedback').get().count;
+    const rows = db.prepare('SELECT * FROM feedback ORDER BY id DESC LIMIT ? OFFSET ?').all(pageSize, offset);
+    return { rows, total, page, pageSize };
+  } catch (err) {
+    // 本地数据库可能没有 feedback 表（老数据库），返回空
     return { rows: [], total: 0, error: err.message };
   }
 }
@@ -955,34 +1087,7 @@ async function getSystemInfo() {
   // 远程模式：从服务器 API 获取
   if (remoteMode && remoteUrl) {
     try {
-      const http = require('http');
-      const apiUrl = new URL('/api/admin/system-info', remoteUrl);
-
-      return await new Promise((resolve, reject) => {
-        const req = http.request(apiUrl, {
-          method: 'GET',
-          headers: { 'x-admin-password': remotePassword },
-          timeout: 10000,
-        }, (res) => {
-          let data = '';
-          res.on('data', chunk => data += chunk);
-          res.on('end', () => {
-            try {
-              const json = JSON.parse(data);
-              if (json.error) {
-                resolve({ error: json.error });
-              } else {
-                resolve(json);
-              }
-            } catch(e) {
-              resolve({ error: '服务器响应格式错误' });
-            }
-          });
-        });
-        req.on('error', (e) => resolve({ error: e.message }));
-        req.on('timeout', () => { req.destroy(); resolve({ error: '连接超时' }); });
-        req.end();
-      });
+      return await remoteGet('/api/admin/system-info');
     } catch (err) {
       return { error: err.message };
     }
@@ -1137,7 +1242,6 @@ async function createVersion(data) {
       // 使用multipart/form-data上传APK文件
       const fs = require('fs');
       const path = require('path');
-      const http = require('http');
 
       if (!data.apkFilePath || !data.version || !data.buildNumber) {
         return { error: '参数不完整' };
@@ -1173,31 +1277,15 @@ async function createVersion(data) {
 
       const body = Buffer.concat(parts);
 
-      return new Promise((resolve, reject) => {
-        const apiUrl = new URL('/api/admin/app-version', remoteUrl);
-        const req = http.request(apiUrl, {
-          method: 'POST',
-          headers: {
-            'x-admin-password': remotePassword,
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length,
-          },
-          timeout: 300000, // 5分钟超时（大文件上传）
-        }, (res) => {
-          let responseData = '';
-          res.on('data', chunk => responseData += chunk);
-          res.on('end', () => {
-            try {
-              resolve(JSON.parse(responseData));
-            } catch(e) {
-              resolve({ error: '服务器响应格式错误' });
-            }
-          });
-        });
-        req.on('error', (err) => resolve({ error: err.message }));
-        req.on('timeout', () => { req.destroy(); resolve({ error: '上传超时' }); });
-        req.write(body);
-        req.end();
+      // 使用统一的remoteRequest上传（自动选择http/https）
+      return await remoteRequest('/api/admin/app-version', {
+        method: 'POST',
+        body: body,
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': body.length,
+        },
+        timeout: 300000, // 5分钟超时（大文件上传）
       });
     } catch (err) {
       return { error: err.message };
@@ -1210,7 +1298,7 @@ async function createVersion(data) {
 async function updateVersion(id, data) {
   if (remoteMode && remoteUrl) {
     try {
-      return await remotePost(`/api/admin/app-version/${id}`, {
+      return await remotePut(`/api/admin/app-version/${id}`, {
         version: data.version,
         build_number: data.buildNumber,
         update_notes: data.updateNotes,
@@ -1227,28 +1315,7 @@ async function updateVersion(id, data) {
 async function deleteVersion(id) {
   if (remoteMode && remoteUrl) {
     try {
-      return new Promise((resolve, reject) => {
-        const http = require('http');
-        const apiUrl = new URL(`/api/admin/app-version/${id}`, remoteUrl);
-        const req = http.request(apiUrl, {
-          method: 'DELETE',
-          headers: { 'x-admin-password': remotePassword },
-          timeout: 10000,
-        }, (res) => {
-          let data = '';
-          res.on('data', chunk => data += chunk);
-          res.on('end', () => {
-            try {
-              resolve(JSON.parse(data));
-            } catch(e) {
-              resolve({ error: '服务器响应格式错误' });
-            }
-          });
-        });
-        req.on('error', (err) => resolve({ error: err.message }));
-        req.on('timeout', () => { req.destroy(); resolve({ error: '连接超时' }); });
-        req.end();
-      });
+      return await remoteDelete(`/api/admin/app-version/${id}`);
     } catch (err) {
       return { error: err.message };
     }

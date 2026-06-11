@@ -214,6 +214,17 @@ db.exec(`
     update_notes TEXT DEFAULT '',
     force_update INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  -- 用户反馈表 - 记录App用户提交的意见建议和反馈信息
+  CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    user_email TEXT,
+    content TEXT NOT NULL,
+    contact TEXT,
+    device_info TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
   )
 `);
 
@@ -1226,6 +1237,197 @@ app.delete('/api/admin/app-version/:id', adminMiddleware, (req, res) => {
 
     db.prepare('DELETE FROM app_versions WHERE id = ?').run(id);
     res.json({ success: true, message: '版本删除成功' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 管理员用户列表API（支持分页与搜索）
+// ============================================================
+app.get('/api/admin/users', adminMiddleware, (req, res) => {
+  const { page = 1, pageSize = 20, search = '' } = req.query;
+  const offset = (page - 1) * pageSize;
+
+  try {
+    let total;
+    let rows;
+    if (search) {
+      total = db.prepare('SELECT COUNT(*) as count FROM users WHERE email LIKE ? AND (is_deleted IS NULL OR is_deleted = 0)').get('%' + search + '%').count;
+      rows = db.prepare('SELECT id, email, password_hash, created_at FROM users WHERE email LIKE ? AND (is_deleted IS NULL OR is_deleted = 0) ORDER BY id LIMIT ? OFFSET ?').all('%' + search + '%', Number(pageSize), Number(offset));
+    } else {
+      total = db.prepare('SELECT COUNT(*) as count FROM users WHERE is_deleted IS NULL OR is_deleted = 0').get().count;
+      rows = db.prepare('SELECT id, email, password_hash, created_at FROM users WHERE is_deleted IS NULL OR is_deleted = 0 ORDER BY id LIMIT ? OFFSET ?').all(Number(pageSize), Number(offset));
+    }
+
+    // 为每个用户计算各数据表记录数
+    const dataTables = [
+      { table: 'heart_rate_sessions', key: 'heartRate' },
+      { table: 'network_speed_records', key: 'networkSpeed' },
+      { table: 'convert_history', key: 'convert' },
+      { table: 'dice_records', key: 'dice' },
+      { table: 'period_records', key: 'period' },
+    ];
+
+    const usersWithData = rows.map(user => {
+      const dataCount = {};
+      for (const { table, key } of dataTables) {
+        try {
+          const r = db.prepare('SELECT COUNT(*) as count FROM ' + table + ' WHERE user_id = ?').get(user.id);
+          dataCount[key] = r.count;
+        } catch (e) {
+          dataCount[key] = 0;
+        }
+      }
+      return { ...user, dataCount };
+    });
+
+    res.json({ rows: usersWithData, total, page: Number(page), pageSize: Number(pageSize) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 管理员数据表查询API（通用：支持分页和用户过滤）
+// ============================================================
+const VALID_DATA_TABLES = ['heart_rate_sessions', 'network_speed_records', 'convert_history', 'dice_records', 'period_records'];
+
+app.get('/api/admin/table/:tableName', adminMiddleware, (req, res) => {
+  const { tableName } = req.params;
+  const { page = 1, pageSize = 20, userId = '' } = req.query;
+
+  if (!VALID_DATA_TABLES.includes(tableName)) {
+    return res.status(400).json({ error: '无效的表名' });
+  }
+
+  const offset = (page - 1) * pageSize;
+
+  try {
+    let total;
+    let rows;
+    if (userId) {
+      total = db.prepare('SELECT COUNT(*) as count FROM ' + tableName + ' WHERE user_id = ?').get(Number(userId)).count;
+      rows = db.prepare('SELECT * FROM ' + tableName + ' WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?').all(Number(userId), Number(pageSize), Number(offset));
+    } else {
+      total = db.prepare('SELECT COUNT(*) as count FROM ' + tableName).get().count;
+      rows = db.prepare('SELECT * FROM ' + tableName + ' ORDER BY id DESC LIMIT ? OFFSET ?').all(Number(pageSize), Number(offset));
+    }
+
+    res.json({ rows, total, page: Number(page), pageSize: Number(pageSize) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 管理员更新记录API（通用：更新任意数据表的记录）
+// ============================================================
+app.put('/api/admin/table/:tableName/:id', adminMiddleware, (req, res) => {
+  const { tableName, id } = req.params;
+  const data = req.body || {};
+
+  if (!VALID_DATA_TABLES.includes(tableName)) {
+    return res.status(400).json({ error: '无效的表名' });
+  }
+
+  try {
+    const cols = Object.keys(data);
+    if (cols.length === 0) {
+      return res.status(400).json({ error: '没有提供更新字段' });
+    }
+    const setClause = cols.map(c => c + ' = ?').join(', ');
+    const vals = [...Object.values(data), Number(id)];
+    db.prepare('UPDATE ' + tableName + ' SET ' + setClause + ' WHERE id = ?').run(...vals);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 管理员删除记录API（通用：删除任意数据表的记录）
+// ============================================================
+app.delete('/api/admin/table/:tableName/:id', adminMiddleware, (req, res) => {
+  const { tableName, id } = req.params;
+
+  if (!VALID_DATA_TABLES.includes(tableName)) {
+    return res.status(400).json({ error: '无效的表名' });
+  }
+
+  try {
+    db.prepare('DELETE FROM ' + tableName + ' WHERE id = ?').run(Number(id));
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 用户反馈API
+// ============================================================
+// 已登录用户提交反馈
+app.post('/api/feedback/submit', authMiddleware, (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userEmail = req.user.email;
+    const { content, contact, deviceInfo } = req.body || {};
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({ error: '反馈内容不能为空' });
+    }
+    if (content.length > 2000) {
+      return res.status(400).json({ error: '反馈内容过长（最多2000字）' });
+    }
+
+    db.prepare('INSERT INTO feedback (user_id, user_email, content, contact, device_info) VALUES (?, ?, ?, ?, ?)').run(
+      userId,
+      userEmail,
+      content.trim(),
+      contact || '',
+      deviceInfo || ''
+    );
+
+    res.json({ success: true, message: '反馈提交成功，感谢您的建议！' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 未登录用户/访客提交反馈（可选，如有需要可使用）
+app.post('/api/feedback/submit-guest', (req, res) => {
+  try {
+    const { content, contact, deviceInfo, userEmail } = req.body || {};
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({ error: '反馈内容不能为空' });
+    }
+    if (content.length > 2000) {
+      return res.status(400).json({ error: '反馈内容过长（最多2000字）' });
+    }
+
+    db.prepare('INSERT INTO feedback (user_email, content, contact, device_info) VALUES (?, ?, ?, ?)').run(
+      userEmail || '',
+      content.trim(),
+      contact || '',
+      deviceInfo || ''
+    );
+
+    res.json({ success: true, message: '反馈提交成功，感谢您的建议！' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 管理员查看所有反馈
+app.get('/api/admin/feedbacks', adminMiddleware, (req, res) => {
+  const { page = 1, pageSize = 20 } = req.query;
+  const offset = (page - 1) * pageSize;
+
+  try {
+    const total = db.prepare('SELECT COUNT(*) as count FROM feedback').get().count;
+    const rows = db.prepare('SELECT * FROM feedback ORDER BY id DESC LIMIT ? OFFSET ?').all(Number(pageSize), Number(offset));
+    res.json({ rows, total, page: Number(page), pageSize: Number(pageSize) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

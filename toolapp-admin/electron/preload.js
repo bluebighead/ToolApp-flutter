@@ -48,4 +48,7 @@ contextBridge.exposeInMainWorld('api', {
   updateAppVersion: (id, data) => ipcRenderer.invoke('version:update', { id, data }),
   deleteAppVersion: (id) => ipcRenderer.invoke('version:delete', id),
   selectApkFile: () => ipcRenderer.invoke('dialog:selectApkFile'),
+
+  // 用户反馈
+  getFeedbacks: (params) => ipcRenderer.invoke('feedback:getList', params),
 });

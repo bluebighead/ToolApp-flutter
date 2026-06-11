@@ -331,6 +331,11 @@ ipcMain.handle('version:delete', async (event, id) => {
   return await sendToWorker('version:delete', id);
 });
 
+// 用户反馈
+ipcMain.handle('feedback:getList', async (event, params) => {
+  return await sendToWorker('feedback:getList', params);
+});
+
 // ============ 应用生命周期 ============
 app.whenReady().then(async () => {
   console.log('✓ Electron 已就绪');

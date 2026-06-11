@@ -3,6 +3,8 @@
 // 入口：首页 AppBar 右上角圆形问号按钮。
 import 'package:flutter/material.dart';
 
+import '../services/auth_service.dart';
+import '../services/feedback_service.dart';
 import '../services/update_service.dart';
 import '../utils/app_info.dart';
 import '../utils/app_logger.dart';
@@ -141,6 +143,13 @@ class AboutPage extends StatelessWidget {
                 onPressed: () => _checkForUpdate(context),
               ),
               const SizedBox(height: 12),
+              // 意见反馈按钮
+              OutlinedButton.icon(
+                icon: const Icon(Icons.feedback_outlined),
+                label: const Text('意见反馈'),
+                onPressed: () => _openFeedbackDialog(context),
+              ),
+              const SizedBox(height: 12),
               // 调试入口：进入日志查看页面
               OutlinedButton.icon(
                 icon: const Icon(Icons.bug_report_outlined),
@@ -195,5 +204,124 @@ class AboutPage extends StatelessWidget {
         SnackBar(content: Text(updateInfo.message ?? '已是最新版本')),
       );
     }
+  }
+
+  // 打开意见反馈对话框
+  Future<void> _openFeedbackDialog(BuildContext context) async {
+    AppLogger.i('AboutPage', '打开意见反馈对话框');
+
+    // 检查登录状态
+    if (!AuthService.instance.isLoggedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请先登录后再提交反馈')),
+      );
+      return;
+    }
+
+    final contentController = TextEditingController();
+    final contactController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    await showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('意见反馈'),
+        content: Form(
+          key: formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '欢迎提出您的宝贵意见和建议，我们会认真阅读每一条反馈。',
+                style: TextStyle(fontSize: 13, color: Colors.grey),
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: contentController,
+                minLines: 5,
+                maxLines: 10,
+                maxLength: 2000,
+                decoration: const InputDecoration(
+                  labelText: '反馈内容 *',
+                  hintText: '请描述您遇到的问题或改进建议...',
+                  border: OutlineInputBorder(),
+                  alignLabelWithHint: true,
+                ),
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                    return '请填写反馈内容';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: contactController,
+                maxLength: 100,
+                decoration: const InputDecoration(
+                  labelText: '联系方式（可选）',
+                  hintText: '邮箱或其他联系方式',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              if (!formKey.currentState!.validate()) return;
+
+              // 关闭对话框
+              Navigator.pop(dialogContext);
+
+              // 显示加载提示
+              if (context.mounted) {
+                showDialog(
+                  context: context,
+                  barrierDismissible: false,
+                  builder: (ctx) => const AlertDialog(
+                    content: Row(
+                      children: [
+                        CircularProgressIndicator(),
+                        SizedBox(width: 16),
+                        Text('正在提交...'),
+                      ],
+                    ),
+                  ),
+                );
+              }
+
+              final result = await FeedbackService.instance.submitFeedback(
+                content: contentController.text,
+                contact: contactController.text,
+              );
+
+              // 关闭加载提示
+              if (context.mounted) Navigator.pop(context);
+
+              // 显示结果
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(result.message),
+                    backgroundColor: result.success ? Colors.green : Colors.red,
+                  ),
+                );
+              }
+            },
+            child: const Text('提交'),
+          ),
+        ],
+      ),
+    );
+
+    contentController.dispose();
+    contactController.dispose();
   }
 }

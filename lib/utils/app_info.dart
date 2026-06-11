@@ -92,11 +92,19 @@ class AppInfo {
   //   - 游客模式下数据仅保存在本地，登录后自动同步到服务器
   //   - 首页抽屉区分游客/已登录状态，游客模式下显示"登录账号"入口
   //   - 设置页账号与同步区域适配游客模式
-  static const String version = '1.32.0';
+  // v1.33.0+ 升级说明（用户反馈 + 远程模式修复 + 取消在线监控）：
+  //   - 软件说明页面新增"意见反馈"按钮，用户可提交想法和建议
+  //   - PC管理端新增"用户反馈"页面，查看所有用户提交的反馈信息
+  //   - 服务器端新增 feedback 表和反馈提交/查询 API
+  //   - PC管理端取消"在线监控"板块
+  //   - 修复远程模式下用户列表不显示的问题（缺失 /api/admin/users 接口）
+  //   - 修复从远程模式切回本地模式后用户信息仍不显示的bug
+  //   - 补全服务器端数据表查询/更新/删除 API，修复 db_worker.js 远程模式支持
+  static const String version = '1.33.0';
 
   // 当前构建号（整数，每次发版递增）
   // 每次发版时同步更新 pubspec.yaml 中 version 字段的 + 号后的数字
-  static const int buildNumber = 152;
+  static const int buildNumber = 153;
 
   // 开发者署名
   static const String developer = 'SuperYH';

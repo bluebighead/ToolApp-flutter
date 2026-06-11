@@ -26,9 +26,9 @@
           <el-icon><Coin /></el-icon>
           <template #title>数据中心</template>
         </el-menu-item>
-        <el-menu-item index="/online-monitor">
-          <el-icon><Monitor /></el-icon>
-          <template #title>在线监控</template>
+        <el-menu-item index="/feedback">
+          <el-icon><ChatDotSquare /></el-icon>
+          <template #title>用户反馈</template>
         </el-menu-item>
         <el-divider v-if="!isCollapsed" content-position="left">系统工具</el-divider>
         <el-menu-item index="/backup">

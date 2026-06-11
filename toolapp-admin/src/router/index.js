@@ -47,14 +47,14 @@ const routes = [
     component: () => import('@/views/DataCenterView.vue'),
   },
   {
-    path: '/online-monitor',
-    name: 'onlineMonitor',
-    component: () => import('@/views/OnlineMonitorView.vue'),
-  },
-  {
     path: '/backup',
     name: 'backup',
     component: () => import('@/views/BackupView.vue'),
+  },
+  {
+    path: '/feedback',
+    name: 'feedback',
+    component: () => import('@/views/FeedbackView.vue'),
   },
   {
     path: '/settings',
