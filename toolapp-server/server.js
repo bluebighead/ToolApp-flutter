@@ -226,7 +226,7 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 // APK文件静态下载路由（必须在认证中间件之前，允许匿名下载）
-const fs = require('fs');
+
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
 // 确保downloads目录存在
 if (!fs.existsSync(DOWNLOADS_DIR)) {
