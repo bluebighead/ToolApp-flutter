@@ -1814,6 +1814,19 @@ function handleWsMessage(ws, msg) {
     case 'close_room':
       handleCloseRoom(ws);
       break;
+
+    // ============================================================
+    // 心跳相关消息（不需要房间，直接处理即可）
+    // ============================================================
+    case 'app_heartbeat':
+      // App端主动心跳（保持连接活跃，无需特殊处理）
+      // lastActiveTime已在ws.on('message')中自动更新
+      break;
+    case 'heartbeat_ack':
+      // 客户端响应服务端心跳
+      // lastActiveTime已在ws.on('message')中自动更新
+      break;
+
     default:
       // 游戏消息转发（需要ws在房间中）
       const clientInfo = wsClients.get(ws);
