@@ -1,6 +1,6 @@
 {
   "name": "toolapp-admin",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "ToolApp 数据库管理桌面端",
   "main": "electron/main.js",
   "scripts": {
@@ -37,6 +37,7 @@
     "better-sqlite3": "^12.10.0",
     "echarts": "^5.5.0",
     "element-plus": "^2.7.0",
+    "leaflet": "^1.9.4",
     "pinia": "^2.1.0",
     "sqlite3": "^6.0.1",
     "vue": "^3.4.0",

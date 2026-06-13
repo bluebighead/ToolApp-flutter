@@ -8,6 +8,9 @@ import '../widgets/tool_card.dart';
 import 'dice_page.dart';
 import 'mahjong_page.dart';
 import 'period_page.dart';
+import 'wheel_lottery_page.dart';
+import 'scoreboard_page.dart';
+import 'serious_page.dart';
 
 class FunToolsPage extends StatelessWidget {
   const FunToolsPage({super.key});
@@ -31,6 +34,25 @@ class FunToolsPage extends StatelessWidget {
       icon: Icons.favorite,
       color: Colors.pink,
       pageBuilder: (_) => const PeriodPage(),
+    ),
+    ToolItem(
+      name: '转盘抽奖',
+      icon: Icons.circle_outlined,
+      color: Colors.orange,
+      pageBuilder: (_) => const WheelLotteryPage(),
+    ),
+    ToolItem(
+      name: '计分板',
+      icon: Icons.scoreboard,
+      color: Colors.indigo,
+      pageBuilder: (_) => const ScoreboardPage(),
+    ),
+    ToolItem(
+      name: '一本正经',
+      icon: Icons.book,
+      color: Colors.brown,
+      subtitle: '秘密阅读器',
+      pageBuilder: (_) => const SeriousPage(),
     ),
   ];
 

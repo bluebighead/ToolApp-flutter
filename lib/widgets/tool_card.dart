@@ -78,6 +78,20 @@ class ToolCard extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
+                // 二级入口副标题（如 "骰子 · 麻将 · 经期"）
+                if (tool.subtitle != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    tool.subtitle!,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 9,
+                      color: Colors.grey.shade500,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
               ],
             ),
           ),

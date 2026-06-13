@@ -67,6 +67,23 @@ if not errorlevel 1 (
 )
 
 echo.
+echo ========================================
+echo   网络信息 / Network Info
+echo ========================================
+echo.
+echo 主机名: %COMPUTERNAME%
+echo.
+echo 局域网 IP 地址:
+for /f "tokens=2 delims=:" %%A in ('ipconfig ^| findstr /i "IPv4"') do (
+    for /f "tokens=* delims= " %%B in ("%%A") do echo    - %%B
+)
+echo.
+echo 完整网卡信息:
+ipconfig | findstr /i /c:"适配器" /c:"IPv4" /c:"子网掩码" /c:"默认网关"
+echo.
+echo ========================================
+echo.
+
 echo Starting ToolApp Server...
 echo Server URL: http://localhost:3000
 echo.
@@ -74,7 +91,7 @@ echo Keep this window open. Close it to stop the server.
 echo ========================================
 echo.
 
-node server.js
+node server.js 2>&1
 
 echo.
 if %errorlevel% neq 0 (

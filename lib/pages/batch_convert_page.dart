@@ -142,6 +142,15 @@ class _BatchConvertPageState extends State<BatchConvertPage> {
       return;
     }
     try {
+      // v1.35.0+ 优先使用原生选择器，每次询问用户选择打开方式
+      const storageChannel = MethodChannel('com.example.toolapp/storage');
+      try {
+        final opened = await storageChannel.invokeMethod<bool>(
+          'openContainingFolder',
+          {'filePath': task.outputPath},
+        );
+        if (opened == true) return;
+      } catch (_) {}
       final result = await OpenFilex.open(task.outputPath);
       if (result.type != ResultType.done) {
         _snack('未找到可打开此文件的应用');

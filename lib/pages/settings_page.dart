@@ -1,14 +1,22 @@
-// 应用设置页面
+// 应用设置页面 v1.35.0+
 // 提供多项开关/选项：
 //   - 屏幕旋转、暗色模式（基础偏好）
-//   - 视频保存位置（自定义 SAF 目录）
-//   - 转换加速模式、批量并行数量、更换默认打开方式（v1.6.43+ 新增）
+//   - 转换加速模式、批量并行数量（v1.6.43+ 新增）
+//   - 存储空间管理（v1.35.0+ 优化：详细文件占用信息）
+//   - 服务器地址（v1.35.0+ 加入管理员锁保护）
+//   - 数据同步、账号管理
+// v1.35.0+ 移除：默认打开方式卡片、视频保存位置卡片（移至对应工具）
+// v1.35.0+ 新增：转换加速模式检测后同步数据到服务器
 // 入口：首页左侧抽屉菜单 -> "设置"
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 
 import '../services/auth_service.dart';
 import '../services/sync_service.dart';
+import '../utils/app_info.dart';
 import '../utils/app_logger.dart';
 import '../utils/app_settings.dart';
 import '../utils/app_storage.dart';
@@ -17,6 +25,7 @@ import '../utils/codec_detector.dart';
 import '../utils/convert_speed_settings.dart';
 import '../utils/saf_directory_helper.dart';
 import '../utils/video_save_settings.dart';
+import 'account/account_page.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -26,26 +35,23 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  /// 当前视频保存设置（页面打开时重读一次）
-  VideoSaveSettingsSnapshot _videoSave = (
-    mode: VideoSaveMode.defaultSandbox,
-    customSafTreeUri: null,
-    customDisplayName: null,
-  );
+  // v1.35.0+ 移除：视频保存位置卡片，该设置项只出现在对应工具页
 
   // v1.6.58+ 优化：使用 StorageDetailInfo 替代分散的状态变量
-  StorageDetailInfo? _storageInfo;
-  bool _isCalculating = false;
-  bool _userDataExpanded = false; // 用户数据详情展开状态
+  StorageDetailInfo? _storageInfo;  // 存储空间详情
+  bool _isCalculating = false;       // 是否正在计算存储空间
+  bool _userDataExpanded = false;    // 用户数据详情展开状态
 
   // 编解码器检测结果（null 表示尚未检测）
   CodecCapability? _codecCapability;
   bool _isDetecting = false; // 是否正在检测中
 
+  // v1.35.0+ 新增：服务器地址管理员锁状态
+  bool _serverUrlUnlocked = false;
+
   @override
   void initState() {
     super.initState();
-    _reloadVideoSave();
     _loadStorageInfo();
     _loadCachedCodecCapability();
   }
@@ -60,15 +66,6 @@ class _SettingsPageState extends State<SettingsPage> {
       });
       AppLogger.i('SettingsPage', '已加载缓存的编解码器检测结果');
     }
-  }
-
-  /// 从 SharedPreferences 加载视频保存设置
-  Future<void> _reloadVideoSave() async {
-    final s = await VideoSaveSettings.load();
-    if (!mounted) return;
-    setState(() {
-      _videoSave = s;
-    });
   }
 
   /// v1.6.58+ 优化：加载存储空间详细信息
@@ -172,188 +169,6 @@ class _SettingsPageState extends State<SettingsPage> {
         onChanged: onChanged,
       ),
     );
-  }
-
-  /// 视频保存位置卡片：展示当前模式 + 选择 / 重置按钮
-  Widget _buildVideoSaveCard(BuildContext context) {
-    final theme = Theme.of(context);
-    final isCustom = _videoSave.mode == VideoSaveMode.customSaf &&
-        _videoSave.customSafTreeUri != null;
-    final displayName = isCustom
-        ? (_videoSave.customDisplayName ?? '已选自定义目录')
-        : 'App 私有目录（ToolApp/videos/converted/）';
-    final locked = _isConverting;
-    return Card(
-      elevation: 1,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.primary.withValues(alpha: 0.12),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    locked
-                        ? Icons.lock
-                        : (isCustom
-                            ? Icons.folder_special_outlined
-                            : Icons.folder_outlined),
-                    color: locked ? Colors.grey : theme.colorScheme.primary,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    '视频保存位置',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                      color: locked ? Colors.grey : null,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            if (locked) ...[
-              const SizedBox(height: 8),
-              _buildLockedBanner(),
-            ],
-            const SizedBox(height: 10),
-            // 当前路径展示
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainerHighest
-                    .withValues(alpha: 0.4),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    isCustom ? Icons.folder_open : Icons.lock_outline,
-                    size: 16,
-                    color: Colors.grey.shade700,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      displayName,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey.shade800,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              isCustom
-                  ? '视频转换完成后会自动复制一份到该目录。'
-                  : '视频只保存在 App 私有目录，卸载 App 时会一并删除。',
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.tonalIcon(
-                    // v1.6.55+ 修复：转换进行中禁止修改保存位置
-                    onPressed: locked ? null : () => _onPickCustomDir(),
-                    icon: const Icon(Icons.create_new_folder_outlined, size: 18),
-                    label: Text(isCustom ? '重新选择' : '选择目录'),
-                  ),
-                ),
-                if (isCustom) ...[
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: FilledButton.tonalIcon(
-                      onPressed: locked ? null : () => _onResetCustomDir(),
-                      icon: const Icon(Icons.restore, size: 18),
-                      label: const Text('恢复默认'),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 用户点击"选择目录"：调起 SAF 选目录
-  Future<void> _onPickCustomDir() async {
-    AppLogger.i('SettingsPage', '点击选择自定义视频保存目录');
-    try {
-      // 引导 SAF 选目录时优先定位到 Download（用户最常用的目录）
-      final treeUri = await SafDirectoryHelper.pickDirectory(
-        initialUri: SafInitialUris.primaryDownload.contentUri,
-      );
-      if (treeUri == null || treeUri.isEmpty) {
-        AppLogger.i('SettingsPage', '用户取消选择目录');
-        return;
-      }
-      AppLogger.i('SettingsPage', '已选目录：$treeUri');
-      // 解析目录显示名（用 URI 末段做兜底展示）
-      final displayName = _extractDirDisplayName(treeUri);
-      await VideoSaveSettings.save(
-        mode: VideoSaveMode.customSaf,
-        customSafTreeUri: treeUri,
-        customDisplayName: displayName,
-      );
-      await _reloadVideoSave();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已设置自定义目录：$displayName')),
-      );
-    } catch (e, st) {
-      AppLogger.e('SettingsPage', '选择自定义目录失败：$e', e, st);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('选择失败：$e')),
-      );
-    }
-  }
-
-  /// 恢复默认（清空自定义）
-  Future<void> _onResetCustomDir() async {
-    AppLogger.i('SettingsPage', '恢复默认视频保存目录');
-    await VideoSaveSettings.clearCustom();
-    await _reloadVideoSave();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已恢复默认：App 私有目录')),
-    );
-  }
-
-  /// 从 SAF tree URI 中尽量提取友好的目录名
-  /// 例如：
-  ///   content://.../tree/primary%3ADownload/child%3AToolApp
-  ///   → "Download/ToolApp"
-  String _extractDirDisplayName(String treeUri) {
-    try {
-      // 截取 /tree/ 之后的内容，URL decode 后用 / 拼接
-      final idx = treeUri.indexOf('/tree/');
-      if (idx < 0) return treeUri;
-      final tail = treeUri.substring(idx + '/tree/'.length);
-      // 把 %3A 还原为 :
-      final decoded = Uri.decodeComponent(tail);
-      return decoded.replaceAll(':', '/');
-    } catch (_) {
-      return treeUri;
-    }
   }
 
   // ------------------------------------------------------------------
@@ -619,6 +434,9 @@ class _SettingsPageState extends State<SettingsPage> {
       // 缓存检测结果到 SharedPreferences，下次打开设置页无需重新检测
       await ConvertSpeedSettings.saveCodecCapability(capability);
 
+      // v1.35.0+ 同步编解码器检测数据到服务器数据库
+      _syncCodecInfoToServer(capability);
+
       // 如果当前选中的模式不再支持，自动回退到"关闭"
       if (capability != null) {
         final currentMode = await ConvertSpeedSettings.load();
@@ -653,7 +471,35 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  /// 显示检测结果提示框
+  /// v1.35.0+ 将编解码器检测数据同步到服务器数据库
+  Future<void> _syncCodecInfoToServer(CodecCapability capability) async {
+    try {
+      // 异步发送，不阻塞UI
+      final url = Uri.parse('${appSettings.serverUrl}/api/device-codec-info');
+      final response = await http
+          .post(
+            url,
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer ${AuthService.instance.token}',
+            },
+            body: jsonEncode({
+              'deviceToken': AuthService.instance.deviceToken,
+              'appVersion': AppInfo.fullVersion,
+              'supportsHardwareEncoding': capability.supportsHardwareEncoding,
+              'supportsUltrafast': capability.supportsUltrafast,
+              'detectedAt': DateTime.now().toIso8601String(),
+            }),
+          )
+          .timeout(const Duration(seconds: 8));
+      AppLogger.i('SettingsPage', '编解码器检测数据同步结果: ${response.statusCode}');
+    } catch (e) {
+      // 静默失败，不影响主流程
+      AppLogger.e('SettingsPage', '同步编解码器数据到服务器失败: $e');
+    }
+  }
+
+  /// v1.6.43+ 新增：显示检测结果提示框
   void _showDetectionResultDialog(CodecCapability capability) {
     // 构建检测结果内容
     final List<Widget> items = [];
@@ -1024,19 +870,37 @@ class _SettingsPageState extends State<SettingsPage> {
               // 用户数据详情（展开时显示）
               if (_userDataExpanded) ...[
                 const SizedBox(height: 4),
+                // 压缩器数据分区
+                _buildCategoryHeader('压缩器数据', Colors.orange),
+                _buildSubStorageRow(
+                  icon: Icons.videocam,
+                  label: '视频压缩输出',
+                  size: info.compressVideoSize,
+                  color: Colors.deepOrange,
+                  description: '压缩器视频输出文件',
+                ),
+                _buildSubStorageRow(
+                  icon: Icons.audiotrack,
+                  label: '音频压缩输出',
+                  size: info.compressAudioSize,
+                  color: Colors.amber,
+                  description: '压缩器音频输出文件',
+                ),
+                _buildSubStorageRow(
+                  icon: Icons.image,
+                  label: '图片压缩输出',
+                  size: info.compressImageSize,
+                  color: Colors.orange,
+                  description: '压缩器图片输出文件',
+                ),
+                // 转换器数据分区
+                _buildCategoryHeader('转换器数据', Colors.purple),
                 _buildSubStorageRow(
                   icon: Icons.video_file,
                   label: '视频输出文件',
                   size: info.videosSize,
                   color: Colors.purple,
-                  description: '转换后保存的视频文件',
-                ),
-                _buildSubStorageRow(
-                  icon: Icons.content_copy,
-                  label: 'M3U8 复制内容',
-                  size: info.m3u8CopySize,
-                  color: Colors.indigo,
-                  description: '转换前复制的 M3U8 源文件及分片',
+                  description: '格式转换后保存的视频文件',
                 ),
                 _buildSubStorageRow(
                   icon: Icons.save_outlined,
@@ -1045,6 +909,17 @@ class _SettingsPageState extends State<SettingsPage> {
                   color: Colors.cyan,
                   description: '用于恢复中断转换的进度文件',
                 ),
+                // M3U8 数据分区
+                _buildCategoryHeader('M3U8 数据', Colors.indigo),
+                _buildSubStorageRow(
+                  icon: Icons.content_copy,
+                  label: 'M3U8 复制内容',
+                  size: info.m3u8CopySize,
+                  color: Colors.indigo,
+                  description: 'M3U8 源文件及分片、临时数据',
+                ),
+                // 其他数据分区
+                _buildCategoryHeader('其他数据', Colors.teal),
                 _buildSubStorageRow(
                   icon: Icons.description,
                   label: '日志文件',
@@ -1052,11 +927,18 @@ class _SettingsPageState extends State<SettingsPage> {
                   color: Colors.teal,
                   description: '调试日志导出文件',
                 ),
-                if (info.otherDataSize > 0)
+                _buildSubStorageRow(
+                  icon: Icons.qr_code,
+                  label: '扫码传信保存',
+                  size: info.codesSize,
+                  color: Colors.blueGrey,
+                  description: '扫码传信保存的码内容',
+                ),
+                if (info.outputDataSize > 0)
                   _buildSubStorageRow(
                     icon: Icons.help_outline,
                     label: '其他数据',
-                    size: info.otherDataSize,
+                    size: info.outputDataSize,
                     color: Colors.grey,
                     description: '其他业务数据文件',
                   ),
@@ -1202,6 +1084,34 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// 用户数据分类标题行（v1.51.0+）
+  Widget _buildCategoryHeader(String title, Color color) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 28, top: 8, bottom: 4),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 14,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1386,99 +1296,15 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   // ------------------------------------------------------------------
-  // v1.6.43+ 新增：更换默认打开方式卡片
-  // ------------------------------------------------------------------
-
-  /// 更换默认打开方式设置卡片
-  Widget _buildOpenWithCard(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      elevation: 1,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.primary.withValues(alpha: 0.12),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(Icons.open_in_new, color: theme.colorScheme.primary),
-                ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text(
-                    '更换默认打开方式',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            // 标注提示
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.amber.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.warning_amber, size: 18, color: Colors.amber),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      '此设置仅改变本 App 内视频的打开方式，与其他工具的打开方式设置无关',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.amber.shade800,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 10),
-            FilledButton.tonalIcon(
-              onPressed: () async {
-                // v1.6.55+ 修复：使用原生 Intent.createChooser 弹出播放器选择器
-                // 之前用 OpenFilex.open('/dev/null') 在 Android 上无效
-                try {
-                  const channel = MethodChannel('com.example.toolapp/storage');
-                  await channel.invokeMethod<bool>('showVideoPlayerChooser');
-                } catch (e) {
-                  if (!mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('未找到可播放视频的应用：$e')),
-                  );
-                }
-              },
-              icon: const Icon(Icons.open_in_browser, size: 18),
-              label: const Text('选择打开方式'),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '点击后弹出系统选择器，每次打开视频时都会弹出选择',
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   // ============================================================
   // v1.23.0+ 新增：账号与同步相关卡片
+  // v1.35.0+ 服务器地址加入管理员锁
   // ============================================================
 
-  /// 服务器地址设置卡片
+  /// 管理员密码
+  static const String _adminPassword = '666666';
+
+  /// 服务器地址设置卡片（v1.35.0+ 加入管理员锁保护）
   Widget _buildServerUrlCard(BuildContext context) {
     final theme = Theme.of(context);
     return Card(
@@ -1495,12 +1321,16 @@ class _SettingsPageState extends State<SettingsPage> {
                   width: 40,
                   height: 40,
                   decoration: BoxDecoration(
-                    color: theme.colorScheme.primary.withValues(alpha: 0.12),
+                    color: _serverUrlUnlocked
+                        ? Colors.orange.withValues(alpha: 0.12)
+                        : theme.colorScheme.primary.withValues(alpha: 0.12),
                     shape: BoxShape.circle,
                   ),
                   child: Icon(
-                    Icons.dns_outlined,
-                    color: theme.colorScheme.primary,
+                    _serverUrlUnlocked ? Icons.lock_open : Icons.lock_outline,
+                    color: _serverUrlUnlocked
+                        ? Colors.orange
+                        : theme.colorScheme.primary,
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -1510,8 +1340,56 @@ class _SettingsPageState extends State<SettingsPage> {
                     style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
                   ),
                 ),
+                // v1.35.0+ 管理员锁按钮
+                SizedBox(
+                  height: 32,
+                  child: OutlinedButton.icon(
+                    onPressed: _serverUrlUnlocked
+                        ? () => setState(() => _serverUrlUnlocked = false)
+                        : () => _onUnlockServerSettings(context),
+                    icon: Icon(
+                      _serverUrlUnlocked ? Icons.lock_reset : Icons.lock,
+                      size: 16,
+                    ),
+                    label: Text(
+                      _serverUrlUnlocked ? '锁定' : '解锁',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      minimumSize: Size.zero,
+                    ),
+                  ),
+                ),
               ],
             ),
+            const SizedBox(height: 10),
+            // 未解锁时显示提示
+            if (!_serverUrlUnlocked) ...[
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.lock, size: 16, color: Colors.orange),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '服务器地址已锁定，点击"解锁"按钮并输入管理员密码后可修改',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.orange.shade800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 10),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1543,7 +1421,9 @@ class _SettingsPageState extends State<SettingsPage> {
               children: [
                 Expanded(
                   child: FilledButton.tonalIcon(
-                    onPressed: () => _showEditServerUrlDialog(context),
+                    onPressed: _serverUrlUnlocked
+                        ? () => _showEditServerUrlDialog(context)
+                        : null,
                     icon: const Icon(Icons.edit_outlined, size: 18),
                     label: const Text('修改服务器地址'),
                   ),
@@ -1551,14 +1431,21 @@ class _SettingsPageState extends State<SettingsPage> {
                 const SizedBox(width: 8),
                 // 重置为默认地址按钮
                 FilledButton.tonalIcon(
-                  onPressed: () async {
-                    await appSettings.setServerUrl(AppSettings.defaultServerUrl);
-                    if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('已重置为默认地址: ${AppSettings.defaultServerUrl}')),
-                      );
-                    }
-                  },
+                  onPressed: _serverUrlUnlocked
+                      ? () async {
+                          await appSettings
+                              .setServerUrl(AppSettings.defaultServerUrl);
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  '已重置为默认地址: ${AppSettings.defaultServerUrl}',
+                                ),
+                              ),
+                            );
+                          }
+                        }
+                      : null,
                   icon: const Icon(Icons.restore, size: 18),
                   label: const Text('重置'),
                 ),
@@ -1568,6 +1455,101 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
       ),
     );
+  }
+
+  /// v1.35.0+ 管理员解锁验证
+  Future<void> _onUnlockServerSettings(BuildContext context) async {
+    final controller = TextEditingController();
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.lock, color: Colors.orange),
+            SizedBox(width: 8),
+            Text('管理员验证', style: TextStyle(fontSize: 16)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              '请输入管理员密码以解锁服务器地址设置：',
+              style: TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: '管理员密码',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.key),
+              ),
+              onSubmitted: (v) => Navigator.pop(ctx, v == _adminPassword),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text == _adminPassword),
+            child: const Text('验证'),
+          ),
+        ],
+      ),
+    );
+    if (result == true && mounted) {
+      setState(() => _serverUrlUnlocked = true);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已解锁服务器地址设置，修改完成后请重新锁定')),
+      );
+    } else if (result == false && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('密码错误，验证失败')),
+      );
+    }
+    controller.dispose();
+  }
+
+  /// 显示编辑服务器地址对话框
+  Future<void> _showEditServerUrlDialog(BuildContext context) async {
+    final urlController = TextEditingController(text: appSettings.serverUrl);
+    final newUrl = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('修改服务器地址'),
+        content: TextField(
+          controller: urlController,
+          decoration: const InputDecoration(
+            labelText: '服务器地址',
+            hintText: '请输入服务器地址，如 http://192.168.1.100:3000',
+            border: OutlineInputBorder(),
+            prefixIcon: Icon(Icons.dns_outlined),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, urlController.text.trim()),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    urlController.dispose();
+    if (newUrl != null && newUrl.isNotEmpty && newUrl != appSettings.serverUrl && mounted) {
+      await appSettings.setServerUrl(newUrl);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('服务器地址已更新为: $newUrl，请重启 App 生效')),
+      );
+    }
   }
 
   /// 同步数据卡片
@@ -1616,7 +1598,12 @@ class _SettingsPageState extends State<SettingsPage> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton.tonalIcon(
-                  onPressed: () => _onGuestLogin(),
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const AccountPage()),
+                    );
+                  },
                   icon: const Icon(Icons.login, size: 18),
                   label: const Text('登录账号'),
                 ),
@@ -1905,43 +1892,63 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  /// 修改服务器地址弹窗
-  void _showEditServerUrlDialog(BuildContext context) {
-    final controller = TextEditingController(text: appSettings.serverUrl);
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('修改服务器地址'),
-        content: TextField(
-          controller: controller,
-          keyboardType: TextInputType.url,
-          decoration: const InputDecoration(
-            labelText: '服务器 URL',
-            hintText: 'http://192.168.x.x:8000',
-            border: OutlineInputBorder(),
+  /// 账号管理入口卡片（跳转到 AccountPage）
+  Widget _buildAccountEntryCard(BuildContext context) {
+    final theme = Theme.of(context);
+    final isLoggedIn = AuthService.instance.isLoggedIn;
+    final isGuest = AuthService.instance.isGuestMode;
+
+    return Card(
+      elevation: 1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const AccountPage()),
+          );
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: isLoggedIn
+                      ? theme.colorScheme.primary.withValues(alpha: 0.12)
+                      : (isGuest ? Colors.orange.withValues(alpha: 0.12) : Colors.grey.withValues(alpha: 0.12)),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  isLoggedIn ? Icons.person : (isGuest ? Icons.person_outline : Icons.person_off_outlined),
+                  color: isLoggedIn ? theme.colorScheme.primary : (isGuest ? Colors.orange : Colors.grey),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '账号与安全',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                    ),
+                    Text(
+                      isLoggedIn
+                          ? (AuthService.instance.userEmail ?? '已登录')
+                          : (isGuest ? '游客模式 - 点击登录' : '未登录 - 点击登录'),
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right, color: Colors.grey),
+            ],
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              final url = controller.text.trim();
-              if (url.isNotEmpty) {
-                await appSettings.setServerUrl(url);
-                if (ctx.mounted) Navigator.pop(ctx);
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('服务器地址已更新，请重启 App 生效')),
-                  );
-                }
-              }
-            },
-            child: const Text('保存'),
-          ),
-        ],
       ),
     );
   }
@@ -2088,19 +2095,29 @@ class _SettingsPageState extends State<SettingsPage> {
                       ),
                     ),
                   ),
-                  // 3. 视频保存位置
-                  _buildVideoSaveCard(context),
-                  const SizedBox(height: 8),
-                  // v1.6.43+ 新增：4. 转换加速模式
+                  // v1.35.0+ 移除：视频保存位置卡片（已移至对应工具页）
+                  // 转换加速模式
                   _buildConvertSpeedCard(context),
                   const SizedBox(height: 8),
-                  // v1.6.43+ 新增：5. 批量并行数量
+                  // 批量并行数量
                   _buildBatchParallelCard(context),
-                  const SizedBox(height: 8),
-                  // v1.6.43+ 新增：6. 更换默认打开方式
-                  _buildOpenWithCard(context),
-                  const SizedBox(height: 8),
-                  // v1.6.56+ 新增：7. 存储空间管理
+                  const SizedBox(height: 20),
+                  // 分组标题：存储管理
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 8,
+                    ),
+                    child: Text(
+                      '存储管理',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                  ),
+                  // 存储空间管理
                   _buildStorageCard(context),
                   const SizedBox(height: 20),
                   // 分组标题：账号与同步
@@ -2124,8 +2141,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   // 9. 同步数据
                   _buildSyncCard(context),
                   const SizedBox(height: 8),
-                  // 10. 登出按钮
-                  _buildLogoutCard(context),
+                  // 10. 账号管理入口（跳转到 AccountPage）
+                  _buildAccountEntryCard(context),
                   const SizedBox(height: 16),
                   // 提示信息
                   Container(

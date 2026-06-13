@@ -7,6 +7,11 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import App from './App.vue'
 import router from './router'
 
+// v1.52.6+ 导入 Leaflet 本地依赖（替代CDN，避免不可达导致地图空白）
+import 'leaflet/dist/leaflet.css'
+import L from 'leaflet'
+window.L = L
+
 const app = createApp(App)
 
 // 注册所有 Element Plus 图标

@@ -19,6 +19,7 @@ import 'services/update_service.dart';
 import 'utils/app_info.dart';
 import 'utils/app_logger.dart';
 import 'utils/app_settings.dart';
+import 'utils/app_storage.dart';
 import 'utils/convert_coordinator.dart';
 import 'utils/convert_notification.dart';
 import 'utils/saf_directory_helper.dart';
@@ -53,6 +54,9 @@ void main() async {
 
   // 迁移旧版数据到用户隔离格式（仅首次升级时执行）
   await UserDataManager.instance.migrateLegacyData();
+
+  // 后台智能清理临时文件和过期数据（v1.51.2+）
+  unawaited(AppStorage.smartClean());
 
   // 初始化视频转换后台通知服务
   // 注意：必须在 runApp 之前完成，否则 video_convert_page 第一次弹通知可能失败

@@ -186,6 +186,22 @@ class NetworkSpeedHistory {
     await prefs.remove(_key);
   }
 
+  /// 合并服务器下载的数据（去重：以 timestamp 为准，本地已有的不覆盖）
+  static Future<int> mergeFromServer(List<PingRecord> serverRecords) async {
+    final localList = await loadAll();
+    final localTimestamps = localList.map((e) => e.timestamp.toIso8601String()).toSet();
+    final newRecords = serverRecords.where((r) => !localTimestamps.contains(r.timestamp.toIso8601String())).toList();
+    if (newRecords.isEmpty) return 0;
+    localList.addAll(newRecords);
+    localList.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    final trimmed = localList.take(_maxRecords).toList();
+    final prefs = await SharedPreferences.getInstance();
+    final jsonList = trimmed.map((r) => r.toJson()).toList();
+    await prefs.setString(_key, jsonEncode(jsonList));
+    AppLogger.i('NetworkSpeedHistory', '从服务器合并网速历史 ${newRecords.length} 条');
+    return newRecords.length;
+  }
+
   /// 从原始样本计算统计指标
   /// 返回 (min, avg, max, jitter, lossRate)
   /// 全部为 null 时所有统计项均返回 0，lossRate 返回 1.0

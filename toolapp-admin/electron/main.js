@@ -10,6 +10,7 @@ console.log('=== ToolApp Admin 启动 ===');
 let dbWorker = null;
 let requestIdCounter = 0;
 const pendingRequests = new Map();
+const requestTimeouts = new Map(); // 跟踪超时定时器，用于上传进度刷新时重置
 let isWorkerReady = false;
 let workerReadyPromise = null;
 
@@ -130,11 +131,42 @@ function handleWorkerMessage(msg) {
     const pending = pendingRequests.get(id);
     if (pending) {
       pendingRequests.delete(id);
+      // 清理对应的超时定时器
+      const timeoutId = requestTimeouts.get(id);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        requestTimeouts.delete(id);
+      }
       if (msg.type === 'result') {
         pending.resolve(msg.result);
       } else {
         pending.reject(new Error(msg.error?.message || '未知错误'));
       }
+    }
+  } else if (msg.type === 'uploadProgress') {
+    // 将上传进度事件转发到渲染进程
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('version:uploadProgress', {
+        loaded: msg.loaded,
+        total: msg.total,
+        speed: msg.speed,
+        retryAttempt: msg.retryAttempt,
+        maxRetries: msg.maxRetries,
+      });
+    }
+    // 收到进度消息时重置超时定时器，防止上传中被误判为超时
+    const timeoutId = requestTimeouts.get(msg.id);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      const newTimeoutId = setTimeout(() => {
+        const pending = pendingRequests.get(msg.id);
+        if (pending) {
+          pendingRequests.delete(msg.id);
+          requestTimeouts.delete(msg.id);
+          pending.reject(new Error('请求超时'));
+        }
+      }, 600000); // 10分钟
+      requestTimeouts.set(msg.id, newTimeoutId);
     }
   }
 }
@@ -157,13 +189,22 @@ function sendToWorker(method, params) {
       }
     });
     
-    // 超时处理（30秒）
-    setTimeout(() => {
+    // 根据操作类型设置不同的超时时间
+    // 版本创建（APK上传）需要更长时间（10分钟），上传进度会刷新此超时
+    const timeout = method === 'version:create' ? 600000 : 30000; // 10分钟 vs 30秒
+    
+    const timeoutId = setTimeout(() => {
       if (pendingRequests.has(id)) {
         pendingRequests.delete(id);
+        requestTimeouts.delete(id);
         reject(new Error('请求超时'));
       }
-    }, 30000);
+    }, timeout);
+    
+    // 只有 version:create 需要跟踪超时定时器以便刷新
+    if (method === 'version:create') {
+      requestTimeouts.set(id, timeoutId);
+    }
   });
 }
 
@@ -233,9 +274,12 @@ ipcMain.handle('db:getTableData', (event, table, params) => sendToWorker('getTab
 
 // 在线状态 & 会话监控
 ipcMain.handle('db:getOnlineStatus', () => sendToWorker('getOnlineStatus'));
+ipcMain.handle('db:getAdminWsToken', () => sendToWorker('getAdminWsToken'));
 ipcMain.handle('db:getUserSessions', (event, params) => sendToWorker('getUserSessions', params));
 ipcMain.handle('db:getUserActivity', (event, params) => sendToWorker('getUserActivity', params));
 ipcMain.handle('db:getUserDeviceInfo', (event, params) => sendToWorker('getUserDeviceInfo', params));
+ipcMain.handle('db:getUserLoginDevices', (event, params) => sendToWorker('getUserLoginDevices', params));
+ipcMain.handle('db:kickUserDevice', (event, params) => sendToWorker('kickUserDevice', params));
 
 // 系统信息
 ipcMain.handle('db:getSystemInfo', () => sendToWorker('getSystemInfo'));
@@ -299,6 +343,22 @@ ipcMain.handle('file:saveExport', (event, { data, filePath }) => {
   }
 });
 
+// 保存抓拍图片（Base64 → 文件）
+ipcMain.handle('file:saveSnapshotImage', async (event, { base64Data, saveDir, filename }) => {
+  try {
+    // 确保目录存在
+    if (!fs.existsSync(saveDir)) {
+      fs.mkdirSync(saveDir, { recursive: true });
+    }
+    const filePath = path.join(saveDir, filename);
+    const buffer = Buffer.from(base64Data, 'base64');
+    fs.writeFileSync(filePath, buffer);
+    return { success: true, path: filePath };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 // ============ 版本管理 IPC ============
 
 // 选择APK文件
@@ -308,7 +368,38 @@ ipcMain.handle('dialog:selectApkFile', async () => {
     filters: [{ name: 'Android 安装包', extensions: ['apk'] }],
     properties: ['openFile'],
   });
-  return (canceled || filePaths.length === 0) ? null : filePaths[0];
+  if (canceled || filePaths.length === 0) return null;
+  
+  const apkPath = filePaths[0];
+  
+  // 自动从项目 pubspec.yaml 中读取版本号
+  let versionInfo = null;
+  try {
+    // 从 APK 所在目录向上查找 pubspec.yaml
+    let dir = path.dirname(apkPath);
+    for (let i = 0; i < 5; i++) {
+      const pubspecPath = path.join(dir, 'pubspec.yaml');
+      if (fs.existsSync(pubspecPath)) {
+        const content = fs.readFileSync(pubspecPath, 'utf8');
+        // 匹配 version: x.y.z+n 格式
+        const match = content.match(/^version:\s*(\d+\.\d+\.\d+)\+(\d+)/m);
+        if (match) {
+          versionInfo = {
+            version: match[1],
+            buildNumber: parseInt(match[2]),
+          };
+        }
+        break;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch (e) {
+    console.log('读取 pubspec.yaml 版本号失败:', e.message);
+  }
+  
+  return { filePath: apkPath, versionInfo };
 });
 
 // 获取版本列表

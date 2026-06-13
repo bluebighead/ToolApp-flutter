@@ -182,6 +182,23 @@ class DiceHistory {
     AppLogger.i(_logTag, '批量删除掷骰子历史 ${ids.length} 条');
   }
 
+  /// 合并服务器下载的数据（去重：以 id 为准，本地已有的不覆盖）
+  static Future<int> mergeFromServer(List<DiceRecord> serverRecords) async {
+    final localList = await loadAll();
+    final localIds = localList.map((e) => e.id).toSet();
+    final newRecords = serverRecords.where((r) => !localIds.contains(r.id)).toList();
+    if (newRecords.isEmpty) return 0;
+    localList.addAll(newRecords);
+    localList.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    if (localList.length > maxEntries) {
+      localList.removeRange(maxEntries, localList.length);
+    }
+    _cache = localList;
+    await _persist(localList);
+    AppLogger.i(_logTag, '从服务器合并骰子历史 ${newRecords.length} 条');
+    return newRecords.length;
+  }
+
   /// 随机掷骰子
   static int roll(DiceType type) {
     return 1 + Random().nextInt(type.sides);

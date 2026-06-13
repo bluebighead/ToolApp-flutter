@@ -3,8 +3,10 @@
 // 供开发者针对不同设备进行优化
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
+import 'package:flutter/services.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -14,18 +16,24 @@ import '../utils/app_logger.dart';
 import '../utils/app_settings.dart';
 import 'auth_service.dart';
 
-/// 设备详细信息数据结构
+/// 设备详细信息数据结构（v1.51.2+ 增加 totalMemory/totalStorage/screenInches/deviceName）
 class DeviceDetailedInfo {
   final String? deviceToken;
   final String platform;
   final String model;
   final String brand;
+  final String? deviceName; // 设备名称（用户自定义名称）
+  final String? manufacturer; // 制造商
   final String osVersion;
   final int? sdkVersion;
   final int? screenWidth;
   final int? screenHeight;
+  final double? screenInches; // 屏幕对角线尺寸（英寸）
   final String cpuArch;
+  final int? cpuCores; // CPU 核心数
   final bool isPhysicalDevice;
+  final int? totalMemory; // 总内存 (MB)
+  final int? totalStorage; // 总存储 (MB)
   final String appVersion;
 
   DeviceDetailedInfo({
@@ -33,12 +41,18 @@ class DeviceDetailedInfo {
     required this.platform,
     required this.model,
     required this.brand,
+    this.deviceName,
+    this.manufacturer,
     required this.osVersion,
     this.sdkVersion,
     this.screenWidth,
     this.screenHeight,
+    this.screenInches,
     required this.cpuArch,
+    this.cpuCores,
     required this.isPhysicalDevice,
+    this.totalMemory,
+    this.totalStorage,
     required this.appVersion,
   });
 
@@ -47,12 +61,18 @@ class DeviceDetailedInfo {
         'platform': platform,
         'model': model,
         'brand': brand,
+        'deviceName': deviceName,
+        'manufacturer': manufacturer,
         'osVersion': osVersion,
         'sdkVersion': sdkVersion,
         'screenWidth': screenWidth,
         'screenHeight': screenHeight,
+        'screenInches': screenInches,
         'cpuArch': cpuArch,
+        'cpuCores': cpuCores,
         'isPhysicalDevice': isPhysicalDevice,
+        'totalMemory': totalMemory,
+        'totalStorage': totalStorage,
         'appVersion': appVersion,
       };
 }
@@ -79,7 +99,7 @@ class DeviceInfoService {
   // 防止同时触发多次上传
   bool _isUploading = false;
 
-  /// 采集设备详细参数
+  /// 采集设备详细参数（v1.51.2+ 增加总内存/总存储/屏幕尺寸/CPU核心数/设备名称）
   Future<DeviceDetailedInfo> collectDeviceInfo({BuildContext? context}) async {
     final deviceInfo = DeviceInfoPlugin();
     final appVersion = AppInfo.fullVersion;
@@ -87,42 +107,72 @@ class DeviceInfoService {
 
     if (Platform.isAndroid) {
       final android = await deviceInfo.androidInfo;
-      final mediaSize = context != null
-          ? MediaQuery.sizeOf(context)
-          : null;
+      final mediaSize = context != null ? MediaQuery.sizeOf(context) : null;
+
+      // 通过平台通道获取硬件信息（总内存/总存储/CPU核心数/屏幕尺寸）
+      int? totalMemory;
+      int? totalStorage;
+      int? cpuCores;
+      double? screenInches;
+      try {
+        final channel = MethodChannel('com.example.toolapp/device_info');
+        totalMemory = await channel.invokeMethod<int>('getTotalMemory');
+        totalStorage = await channel.invokeMethod<int>('getTotalStorage');
+        cpuCores = await channel.invokeMethod<int>('getCpuCores');
+        screenInches = await channel.invokeMethod<double>('getScreenInches');
+      } catch (_) {}
+
+      // fallback：使用 MediaQuery 估算屏幕英寸（不含调起源码时的上下文，无法获取精确 DPI）
+      if (screenInches == null && mediaSize != null && context != null) {
+        final pixelRatio = MediaQuery.of(context!).devicePixelRatio;
+        final dpWidth = mediaSize.width;
+        final dpHeight = mediaSize.height;
+        // 粗略估算：假设 mdpi (160) 基准，实际值根据 pixelRatio 调整
+        // 通常 pixelRatio 2.0 -> 320dpi, 3.0 -> 480dpi
+        final estimate = math.sqrt(dpWidth * dpWidth + dpHeight * dpHeight);
+        screenInches = double.parse((estimate / 160).toStringAsFixed(1));
+      }
 
       return DeviceDetailedInfo(
         deviceToken: deviceToken,
         platform: 'Android',
         model: android.model,
         brand: android.brand,
+        deviceName: android.model,
+        manufacturer: android.manufacturer,
         osVersion: android.version.release,
         sdkVersion: android.version.sdkInt,
-        screenWidth: mediaSize != null ? mediaSize.width.toInt() : null,
-        screenHeight: mediaSize != null ? mediaSize.height.toInt() : null,
-        cpuArch: android.supportedAbis.isNotEmpty
-            ? android.supportedAbis.first
-            : 'unknown',
+        screenWidth: mediaSize?.width.toInt(),
+        screenHeight: mediaSize?.height.toInt(),
+        screenInches: screenInches,
+        cpuArch: android.supportedAbis.isNotEmpty ? android.supportedAbis.first : 'unknown',
+        cpuCores: cpuCores,
         isPhysicalDevice: android.isPhysicalDevice,
+        totalMemory: totalMemory,
+        totalStorage: totalStorage,
         appVersion: appVersion,
       );
     } else if (Platform.isIOS) {
       final ios = await deviceInfo.iosInfo;
-      final mediaSize = context != null
-          ? MediaQuery.sizeOf(context)
-          : null;
+      final mediaSize = context != null ? MediaQuery.sizeOf(context) : null;
 
       return DeviceDetailedInfo(
         deviceToken: deviceToken,
         platform: 'iOS',
         model: ios.model,
         brand: 'Apple',
+        deviceName: ios.name,
+        manufacturer: 'Apple',
         osVersion: ios.systemVersion,
         sdkVersion: null,
-        screenWidth: mediaSize != null ? mediaSize.width.toInt() : null,
-        screenHeight: mediaSize != null ? mediaSize.height.toInt() : null,
+        screenWidth: mediaSize?.width.toInt(),
+        screenHeight: mediaSize?.height.toInt(),
+        screenInches: null,
         cpuArch: ios.utsname.machine,
+        cpuCores: null,
         isPhysicalDevice: ios.isPhysicalDevice,
+        totalMemory: null,
+        totalStorage: null,
         appVersion: appVersion,
       );
     }
@@ -133,12 +183,18 @@ class DeviceInfoService {
       platform: Platform.operatingSystem,
       model: 'Unknown',
       brand: 'Unknown',
+      deviceName: null,
+      manufacturer: null,
       osVersion: Platform.operatingSystemVersion,
       sdkVersion: null,
       screenWidth: null,
       screenHeight: null,
+      screenInches: null,
       cpuArch: 'unknown',
+      cpuCores: null,
       isPhysicalDevice: true,
+      totalMemory: null,
+      totalStorage: null,
       appVersion: appVersion,
     );
   }

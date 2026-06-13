@@ -15,6 +15,7 @@ import '../utils/dice_history.dart';
 import '../utils/heart_rate_history.dart';
 import '../utils/network_speed_history.dart';
 import '../utils/period_model.dart';
+import '../utils/ffmpeg_service.dart' show VideoFormat, VideoQuality;
 import 'auth_service.dart';
 
 class SyncService {
@@ -152,6 +153,275 @@ class SyncService {
       return SyncResult(error: e.toString());
     } finally {
       _isSyncing = false;
+    }
+  }
+
+  /// 从服务器下载所有数据并合并到本地
+  /// 登录后调用，将服务器上的数据拉取到本地
+  Future<SyncResult> downloadAll() async {
+    if (!AuthService.instance.isLoggedIn) {
+      AppLogger.w('SyncService', '未登录，无法下载数据');
+      return SyncResult(error: '未登录');
+    }
+
+    _isSyncing = true;
+    int downloaded = 0;
+    int failed = 0;
+    final errors = <String>[];
+
+    try {
+      AppLogger.i('SyncService', '开始从服务器下载数据...');
+
+      // 1. 下载心率历史
+      final hrResult = await _downloadHeartRate();
+      downloaded += hrResult.uploaded;
+      failed += hrResult.failed;
+      if (hrResult.error != null) errors.add('心率: ${hrResult.error}');
+
+      // 2. 下载网速历史
+      final nsResult = await _downloadNetworkSpeed();
+      downloaded += nsResult.uploaded;
+      failed += nsResult.failed;
+      if (nsResult.error != null) errors.add('网速: ${nsResult.error}');
+
+      // 3. 下载转换历史
+      final cvResult = await _downloadConvertHistory();
+      downloaded += cvResult.uploaded;
+      failed += cvResult.failed;
+      if (cvResult.error != null) errors.add('转换: ${cvResult.error}');
+
+      // 4. 下载骰子历史
+      final dcResult = await _downloadDiceHistory();
+      downloaded += dcResult.uploaded;
+      failed += dcResult.failed;
+      if (dcResult.error != null) errors.add('骰子: ${dcResult.error}');
+
+      // 5. 下载经期记录
+      final pdResult = await _downloadPeriodRecords();
+      downloaded += pdResult.uploaded;
+      failed += pdResult.failed;
+      if (pdResult.error != null) errors.add('经期: ${pdResult.error}');
+
+      AppLogger.i('SyncService', '下载完成 - 新增: $downloaded, 失败: $failed');
+      return SyncResult(
+        uploaded: downloaded,
+        failed: failed,
+        errors: errors,
+      );
+    } catch (e) {
+      AppLogger.e('SyncService', '下载异常: $e');
+      return SyncResult(error: e.toString());
+    } finally {
+      _isSyncing = false;
+    }
+  }
+
+  // 通用下载方法：从服务器获取指定表的数据
+  Future<List<Map<String, dynamic>>> _downloadTable(String table) async {
+    try {
+      final response = await http.get(
+        Uri.parse('$_baseUrl/api/sync/$table'),
+        headers: _authHeaders,
+      ).timeout(const Duration(seconds: 30));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        return (data['rows'] as List<dynamic>?)
+                ?.map((e) => e as Map<String, dynamic>)
+                .toList() ??
+            [];
+      }
+      AppLogger.e('SyncService', '下载 $table 失败: HTTP ${response.statusCode}');
+      return [];
+    } catch (e) {
+      AppLogger.e('SyncService', '下载 $table 异常: $e');
+      return [];
+    }
+  }
+
+  // ============================================================
+  // 心率历史下载
+  // ============================================================
+  Future<_TableSyncResult> _downloadHeartRate() async {
+    try {
+      final rows = await _downloadTable('heart_rate_sessions');
+      if (rows.isEmpty) return _TableSyncResult(uploaded: 0);
+      final records = rows.map((r) => HeartRateRecord(
+        id: (r['id'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch,
+        startTimeMs: _parseTimeToMs(r['start_time']),
+        endTimeMs: _parseTimeToMs(r['end_time']),
+        maxBpm: (r['max_hr'] as num?)?.toInt() ?? 0,
+        minBpm: (r['min_hr'] as num?)?.toInt() ?? 0,
+        avgBpm: (r['avg_hr'] as num?)?.toInt() ?? 0,
+        samples: (r['samples'] as num?)?.toInt() ?? 0,
+        connectionMode: _parseHeartRateMode(r['connection_mode'] as String?),
+      )).toList();
+      final merged = await HeartRateHistory.mergeFromServer(records);
+      return _TableSyncResult(uploaded: merged);
+    } catch (e) {
+      AppLogger.e('SyncService', '心率下载失败: $e');
+      return _TableSyncResult(failed: 1, error: e.toString());
+    }
+  }
+
+  // ============================================================
+  // 网速历史下载
+  // ============================================================
+  Future<_TableSyncResult> _downloadNetworkSpeed() async {
+    try {
+      final rows = await _downloadTable('network_speed_records');
+      if (rows.isEmpty) return _TableSyncResult(uploaded: 0);
+      final records = rows.map((r) => PingRecord(
+        timestamp: DateTime.tryParse(r['test_time'] as String? ?? '') ?? DateTime.now(),
+        server: r['server_url'] as String? ?? '',
+        samples: const [],
+        min: (r['min_latency'] as num?)?.toInt() ?? 0,
+        avg: (r['avg_latency'] as num?)?.toInt() ?? 0,
+        max: (r['max_latency'] as num?)?.toInt() ?? 0,
+        jitter: (r['jitter'] as num?)?.toInt() ?? 0,
+        lossRate: (r['loss_rate'] as num?)?.toDouble() ?? 0,
+      )).toList();
+      final merged = await NetworkSpeedHistory.mergeFromServer(records);
+      return _TableSyncResult(uploaded: merged);
+    } catch (e) {
+      AppLogger.e('SyncService', '网速下载失败: $e');
+      return _TableSyncResult(failed: 1, error: e.toString());
+    }
+  }
+
+  // ============================================================
+  // 转换历史下载
+  // ============================================================
+  Future<_TableSyncResult> _downloadConvertHistory() async {
+    try {
+      final rows = await _downloadTable('convert_history');
+      if (rows.isEmpty) return _TableSyncResult(uploaded: 0);
+      final records = rows.map((r) => ConvertHistoryEntry(
+        id: (r['id'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch,
+        timestampMs: (r['timestamp_ms'] as num?)?.toInt() ?? 0,
+        input: r['input_file'] as String? ?? '',
+        isNetwork: false,
+        outputPath: r['output_file'] as String?,
+        outputSize: (r['output_size'] as num?)?.toInt(),
+        format: _parseConvertFormat(r['format'] as String?),
+        quality: _parseConvertQuality(r['quality'] as String?),
+        status: _parseConvertStatus(r['status'] as String?),
+      )).toList();
+      final merged = await ConvertHistory.mergeFromServer(records);
+      return _TableSyncResult(uploaded: merged);
+    } catch (e) {
+      AppLogger.e('SyncService', '转换历史下载失败: $e');
+      return _TableSyncResult(failed: 1, error: e.toString());
+    }
+  }
+
+  // ============================================================
+  // 骰子历史下载
+  // ============================================================
+  Future<_TableSyncResult> _downloadDiceHistory() async {
+    try {
+      final rows = await _downloadTable('dice_records');
+      if (rows.isEmpty) return _TableSyncResult(uploaded: 0);
+      final records = rows.map((r) => DiceRecord(
+        id: (r['id'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch,
+        diceType: DiceType.fromName(r['dice_type'] as String? ?? 'd6'),
+        result: (r['result'] as num?)?.toInt() ?? 1,
+        timestamp: (r['timestamp_ms'] as num?)?.toInt() ?? 0,
+      )).toList();
+      final merged = await DiceHistory.mergeFromServer(records);
+      return _TableSyncResult(uploaded: merged);
+    } catch (e) {
+      AppLogger.e('SyncService', '骰子下载失败: $e');
+      return _TableSyncResult(failed: 1, error: e.toString());
+    }
+  }
+
+  // ============================================================
+  // 经期记录下载
+  // ============================================================
+  Future<_TableSyncResult> _downloadPeriodRecords() async {
+    try {
+      final rows = await _downloadTable('period_records');
+      if (rows.isEmpty) return _TableSyncResult(uploaded: 0);
+      final records = rows.map((r) {
+        // symptoms 字段：服务器存的是逗号分隔字符串，需要转为 List<String>
+        final symptomsRaw = r['symptoms'];
+        List<String> symptoms = [];
+        if (symptomsRaw is String && symptomsRaw.isNotEmpty) {
+          symptoms = symptomsRaw.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+        } else if (symptomsRaw is List) {
+          symptoms = symptomsRaw.map((s) => s.toString()).toList();
+        }
+        return PeriodRecord(
+          id: r['local_id'] as String? ?? '',
+          startDate: DateTime.tryParse(r['start_date'] as String? ?? '') ?? DateTime.now(),
+          endDate: r['end_date'] != null ? DateTime.tryParse(r['end_date'] as String) : null,
+          mode: r['record_mode'] as String? ?? 'period',
+          flowLevel: (r['flow_level'] as num?)?.toInt() ?? 2,
+          symptoms: symptoms,
+          notes: r['notes'] as String? ?? '',
+        );
+      }).toList();
+      final merged = await PeriodStorage.mergeRecordsFromServer(records);
+      return _TableSyncResult(uploaded: merged);
+    } catch (e) {
+      AppLogger.e('SyncService', '经期下载失败: $e');
+      return _TableSyncResult(failed: 1, error: e.toString());
+    }
+  }
+
+  // ============================================================
+  // 辅助解析方法
+  // ============================================================
+
+  // 将 ISO8601 时间字符串转为毫秒时间戳
+  static int _parseTimeToMs(dynamic value) {
+    if (value == null) return 0;
+    if (value is num) return value.toInt();
+    if (value is String) {
+      final dt = DateTime.tryParse(value);
+      return dt?.millisecondsSinceEpoch ?? 0;
+    }
+    return 0;
+  }
+
+  // 解析心率连接方式
+  static HeartRateConnectionMode _parseHeartRateMode(String? s) {
+    switch (s) {
+      case 'ble': return HeartRateConnectionMode.ble;
+      case 'udp': return HeartRateConnectionMode.udp;
+      default: return HeartRateConnectionMode.ble;
+    }
+  }
+
+  // 解析转换格式
+  static VideoFormat _parseConvertFormat(String? s) {
+    switch (s) {
+      case 'mp4': return VideoFormat.mp4;
+      case 'mkv': return VideoFormat.mkv;
+      case 'mov': return VideoFormat.mov;
+      default: return VideoFormat.mp4;
+    }
+  }
+
+  // 解析转换质量
+  static VideoQuality _parseConvertQuality(String? s) {
+    switch (s) {
+      case 'original': return VideoQuality.original;
+      case 'high': return VideoQuality.high;
+      case 'standard': return VideoQuality.standard;
+      case 'low': return VideoQuality.low;
+      default: return VideoQuality.standard;
+    }
+  }
+
+  // 解析转换状态
+  static ConvertStatus _parseConvertStatus(String? s) {
+    switch (s) {
+      case 'success': return ConvertStatus.success;
+      case 'failed': return ConvertStatus.failed;
+      case 'cancelled': return ConvertStatus.cancelled;
+      default: return ConvertStatus.success;
     }
   }
 

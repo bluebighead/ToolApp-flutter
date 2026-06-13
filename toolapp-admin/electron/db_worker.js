@@ -2,6 +2,8 @@
 // 使用 better-sqlite3 进行同步数据库操作
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
+const https = require('https');
 
 console.error = (...args) => {
   // 重定向 stderr 到控制台
@@ -235,7 +237,7 @@ async function handleMessage(msg) {
         result = await getUsers(params || {});
         break;
       case 'getTableData':
-        result = getTableData(params?.table, params || {});
+        result = await getTableData(params?.table, params || {});
         break;
       case 'updateRecord':
         result = updateRecord(params?.table, params?.id, params?.data);
@@ -272,14 +274,23 @@ async function handleMessage(msg) {
       case 'getOnlineStatus':
         result = await getOnlineStatus();
         break;
+      case 'getAdminWsToken':
+        result = await getAdminWsToken();
+        break;
       case 'getUserSessions':
-        result = getUserSessions(params?.userId, params || {});
+        result = await getUserSessions(params?.userId, params || {});
         break;
       case 'getUserActivity':
-        result = getUserActivity(params?.userId, params || {});
+        result = await getUserActivity(params?.userId, params || {});
         break;
       case 'getUserDeviceInfo':
-        result = getUserDeviceInfo(params?.userId);
+        result = await getUserDeviceInfo(params?.userId);
+        break;
+      case 'getUserLoginDevices':
+        result = await getUserLoginDevices(params?.userId);
+        break;
+      case 'kickUserDevice':
+        result = await kickUserDevice(params?.userId, params?.deviceToken);
         break;
       case 'getSystemInfo':
         result = await getSystemInfo();
@@ -291,7 +302,7 @@ async function handleMessage(msg) {
         result = await getVersionList();
         break;
       case 'version:create':
-        result = await createVersion(params);
+        result = await createVersion(id, params);
         break;
       case 'version:update':
         result = await updateVersion(params?.id, params?.data);
@@ -836,6 +847,19 @@ function tableExists(tableName) {
   }
 }
 
+// 获取管理员WebSocket临时Token
+async function getAdminWsToken() {
+  if (remoteMode && remoteUrl) {
+    try {
+      return await remotePost('/api/admin/ws-token', {});
+    } catch (err) {
+      return { token: null, error: err.message };
+    }
+  }
+  // 本地模式不支持WebSocket推流
+  return { token: null, error: '本地模式不支持设备控制' };
+}
+
 async function getOnlineStatus() {
   // 远程模式：从服务器 API 获取
   if (remoteMode && remoteUrl) {
@@ -1082,6 +1106,57 @@ async function getUserDeviceInfo(userId) {
   }
 }
 
+// 获取用户登录过的设备列表
+async function getUserLoginDevices(userId) {
+  // 远程模式：从服务器 API 获取
+  if (remoteMode && remoteUrl) {
+    try {
+      return await remoteGet('/api/admin/users/' + userId + '/devices');
+    } catch (err) {
+      return { devices: [], error: err.message };
+    }
+  }
+
+  // 本地模式：从本地数据库查询
+  if (!db) return { devices: [], error: '未连接数据库' };
+
+  try {
+    if (!tableExists('device_tokens')) {
+      return { devices: [] };
+    }
+    const devices = db.prepare(
+      'SELECT id, device_token, device_info, last_active FROM device_tokens WHERE user_id = ? ORDER BY last_active DESC'
+    ).all(userId);
+    return { devices };
+  } catch (err) {
+    return { devices: [], error: err.message };
+  }
+}
+
+// 踢出用户指定设备
+async function kickUserDevice(userId, deviceToken) {
+  // 远程模式：通过服务器 API 踢出
+  if (remoteMode && remoteUrl) {
+    try {
+      return await remoteDelete('/api/admin/users/' + userId + '/devices/' + deviceToken);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  // 本地模式：从本地数据库删除
+  if (!db) return { success: false, error: '未连接数据库' };
+
+  try {
+    const result = db.prepare(
+      'DELETE FROM device_tokens WHERE user_id = ? AND device_token = ?'
+    ).run(userId, deviceToken);
+    return { success: result.changes > 0 };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
 // ============ 系统信息 ============
 async function getSystemInfo() {
   // 远程模式：从服务器 API 获取
@@ -1235,63 +1310,250 @@ async function getVersionList() {
   }
 }
 
-// 创建新版本（上传APK到远程服务器）
-async function createVersion(data) {
+// 创建新版本（上传APK到远程服务器）- 带进度上报和上传速率计算
+// 添加自动重试机制：网络波动时最多重试2次
+async function createVersion(requestId, data) {
   if (remoteMode && remoteUrl) {
+    const maxRetries = 2;      // 最多重试2次
+    let lastError = null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await uploadWithProgress(requestId, data);
+      } catch (err) {
+        lastError = err;
+        const errMsg = err.message || '';
+
+        // 判断是否为可重试的错误类型
+        const isRetryable =
+          errMsg.includes('ECONNRESET') ||
+          errMsg.includes('ECONNREFUSED') ||
+          errMsg.includes('ETIMEDOUT') ||
+          errMsg.includes('EPIPE') ||
+          errMsg.includes('上传超时') ||
+          errMsg.includes('socket hang up') ||
+          errMsg.includes('read ECONNRESET');
+
+        if (!isRetryable || attempt >= maxRetries) {
+          break; // 不可重试或已达最大重试次数，跳出循环
+        }
+
+        // 发送重试通知到前端（speed=-1 表示正在重试）
+        sendMessage({
+          type: 'uploadProgress',
+          id: requestId,
+          loaded: 0,
+          total: 0,
+          speed: -1,
+          retryAttempt: attempt + 1,
+          maxRetries: maxRetries,
+        });
+
+        // 等待2秒后重试
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+
+    // 所有重试都失败，返回错误信息
+    return { error: `上传失败: ${lastError.message}` };
+  }
+  return { error: '本地模式暂不支持版本管理，请使用远程模式' };
+}
+
+// 带进度上报的分块上传函数
+// 使用流式写入 HTTP 请求体，实时计算上传进度和速率
+// 优化：2MB分块 + 节流进度上报（每200ms）+ keepAlive连接复用 + 完善的错误处理
+function uploadWithProgress(requestId, data) {
+  return new Promise((resolve, reject) => {
     try {
-      // 使用multipart/form-data上传APK文件
-      const fs = require('fs');
-      const path = require('path');
+      const reqId = requestId;
 
       if (!data.apkFilePath || !data.version || !data.buildNumber) {
-        return { error: '参数不完整' };
+        return reject(new Error('参数不完整'));
       }
 
       const filePath = data.apkFilePath;
       if (!fs.existsSync(filePath)) {
-        return { error: 'APK文件不存在' };
+        return reject(new Error('APK文件不存在'));
       }
 
-      const fileBuffer = fs.readFileSync(filePath);
       const fileName = path.basename(filePath);
+      const fileSize = fs.statSync(filePath).size;
       const boundary = '----FormBoundary' + Date.now();
 
-      // 构建multipart body
-      const parts = [];
-      // version字段
-      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="version"\r\n\r\n${data.version}\r\n`));
-      // build_number字段
-      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="build_number"\r\n\r\n${data.buildNumber}\r\n`));
-      // update_notes字段
+      // 构建 multipart 头部（不含文件内容）
+      const headerParts = [];
+      headerParts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="version"\r\n\r\n${data.version}\r\n`));
+      headerParts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="build_number"\r\n\r\n${data.buildNumber}\r\n`));
       if (data.updateNotes) {
-        parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="update_notes"\r\n\r\n${data.updateNotes}\r\n`));
+        headerParts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="update_notes"\r\n\r\n${data.updateNotes}\r\n`));
       }
-      // force_update字段
       if (data.forceUpdate) {
-        parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="force_update"\r\n\r\n1\r\n`));
+        headerParts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="force_update"\r\n\r\n1\r\n`));
       }
-      // APK文件
-      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="apk"; filename="${fileName}"\r\nContent-Type: application/vnd.android.package-archive\r\n\r\n`));
-      parts.push(fileBuffer);
-      parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+      // 文件头
+      headerParts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="apk"; filename="${fileName}"\r\nContent-Type: application/vnd.android.package-archive\r\n\r\n`));
+      const headerBuffer = Buffer.concat(headerParts);
 
-      const body = Buffer.concat(parts);
+      // multipart 尾部
+      const footerBuffer = Buffer.from(`\r\n--${boundary}--\r\n`);
 
-      // 使用统一的remoteRequest上传（自动选择http/https）
-      return await remoteRequest('/api/admin/app-version', {
+      // 总请求体大小 = 头部 + 文件 + 尾部
+      const totalBytes = headerBuffer.length + fileSize + footerBuffer.length;
+
+      // 构建 HTTP 请求
+      const fullUrl = new URL('/api/admin/app-version', remoteUrl.endsWith('/') ? remoteUrl : remoteUrl + '/');
+      const httpModule = getHttpModule(fullUrl.href);
+
+      // 使用 keepAlive Agent 复用 TCP 连接，减少连接建立开销
+      const agent = new httpModule.Agent({
+        keepAlive: true,
+        keepAliveMsecs: 30000,
+        maxSockets: 1,
+      });
+
+      const reqOptions = {
         method: 'POST',
-        body: body,
+        hostname: fullUrl.hostname,
+        port: fullUrl.port,
+        path: fullUrl.pathname + fullUrl.search,
+        agent: agent,
         headers: {
           'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length,
+          'Content-Length': totalBytes,
+          'x-admin-password': remotePassword,
         },
-        timeout: 300000, // 5分钟超时（大文件上传）
+      };
+
+      const req = httpModule.request(reqOptions);
+
+      // 设置10分钟超时（大APK文件上传需要较长时间）
+      req.setTimeout(600000, () => {
+        req.destroy();
+        // 清理文件流
+        if (fileStream) fileStream.destroy();
+        reject(new Error('上传超时'));
       });
+
+      req.on('response', (res) => {
+        let responseData = '';
+        res.on('data', chunk => responseData += chunk);
+        res.on('end', () => {
+          try {
+            // 检查 HTTP 状态码，非 2xx 视为错误
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+              let errorMsg = `服务器返回错误 (${res.statusCode})`;
+              try {
+                const errJson = JSON.parse(responseData);
+                if (errJson.message) errorMsg = errJson.message;
+              } catch (e) { /* 使用默认错误消息 */ }
+              return reject(new Error(errorMsg));
+            }
+            const json = JSON.parse(responseData);
+            resolve(json);
+          } catch (e) {
+            reject(new Error('服务器响应格式错误'));
+          }
+        });
+      });
+
+      req.on('error', (err) => {
+        // 清理文件流
+        if (fileStream) fileStream.destroy();
+        reject(err);
+      });
+
+      // 分块写入请求体并上报进度
+      let bytesWritten = 0;            // 已写入字节数
+      let lastReportTime = Date.now(); // 上次上报时间
+      let lastReportBytes = 0;         // 上次上报时的字节数
+      let reportTimer = null;          // 节流定时器
+      let pendingReport = false;       // 是否有待上报的进度
+
+      // 节流版进度上报函数：每200ms最多上报一次
+      function throttledReportProgress(force) {
+        const now = Date.now();
+        const elapsed = now - lastReportTime;
+
+        if (force || elapsed >= 200) {
+          // 立即上报
+          const seconds = elapsed / 1000;
+          let speed = 0;
+          if (seconds > 0) {
+            speed = Math.round((bytesWritten - lastReportBytes) / seconds);
+          }
+          sendMessage({
+            type: 'uploadProgress',
+            id: reqId,
+            loaded: bytesWritten,
+            total: totalBytes,
+            speed: speed,
+          });
+          lastReportTime = now;
+          lastReportBytes = bytesWritten;
+          pendingReport = false;
+          if (reportTimer) {
+            clearTimeout(reportTimer);
+            reportTimer = null;
+          }
+        } else if (!pendingReport) {
+          // 距上次上报不足200ms，延迟上报
+          pendingReport = true;
+          reportTimer = setTimeout(() => {
+            throttledReportProgress(true);
+          }, 200 - elapsed);
+        }
+      }
+
+      // 先写入 multipart 头部
+      req.write(headerBuffer);
+      bytesWritten += headerBuffer.length;
+      throttledReportProgress(true);
+
+      // 流式写入文件内容，使用 2MB 分块减少事件触发次数
+      let fileStream;
+      fileStream = fs.createReadStream(filePath, { highWaterMark: 2 * 1024 * 1024 });
+
+      fileStream.on('data', (chunk) => {
+        const canContinue = req.write(chunk);
+        bytesWritten += chunk.length;
+
+        // 节流上报进度
+        throttledReportProgress(false);
+
+        if (!canContinue) {
+          fileStream.pause();
+          req.once('drain', () => fileStream.resume());
+        }
+      });
+
+      fileStream.on('end', () => {
+        // 写入 multipart 尾部
+        req.write(footerBuffer);
+        bytesWritten += footerBuffer.length;
+        throttledReportProgress(true);
+
+        // 最终100%进度
+        sendMessage({
+          type: 'uploadProgress',
+          id: reqId,
+          loaded: totalBytes,
+          total: totalBytes,
+          speed: 0,
+        });
+
+        req.end();
+      });
+
+      fileStream.on('error', (err) => {
+        req.destroy();
+        reject(err);
+      });
+
     } catch (err) {
-      return { error: err.message };
+      reject(new Error(err.message));
     }
-  }
-  return { error: '本地模式暂不支持版本管理，请使用远程模式' };
+  });
 }
 
 // 更新版本信息

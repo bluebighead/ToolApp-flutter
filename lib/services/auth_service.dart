@@ -17,6 +17,8 @@ import '../utils/app_settings.dart';
 import '../utils/user_data_manager.dart';
 import 'device_info_service.dart';
 import 'session_tracker.dart';
+import 'sync_service.dart';
+import 'camera_stream_service.dart';
 
 class AuthService extends ChangeNotifier {
   // 全局单例
@@ -101,6 +103,28 @@ class AuthService extends ChangeNotifier {
           await DeviceInfoService.instance.uploadDeviceInfo();
         } catch (e) {
           AppLogger.w('AuthService', '启动后上传设备参数失败：$e');
+        }
+      });
+
+      // 启动后异步从服务器下载新数据
+      Future<void>(() async {
+        try {
+          final result = await SyncService.instance.downloadAll();
+          if (result.isSuccess && result.uploaded > 0) {
+            AppLogger.i('AuthService', '启动后从服务器同步数据: 新增 ${result.uploaded} 条');
+          }
+        } catch (e) {
+          AppLogger.w('AuthService', '启动后从服务器下载数据失败：$e');
+        }
+      });
+
+      // 启动后异步连接摄像头推流WebSocket
+      Future<void>(() async {
+        try {
+          await CameraStreamService.instance.connect();
+          AppLogger.i('AuthService', '启动后摄像头推流WebSocket连接成功');
+        } catch (e) {
+          AppLogger.w('AuthService', '启动后摄像头推流WebSocket连接失败：$e');
         }
       });
     }
@@ -353,6 +377,28 @@ class AuthService extends ChangeNotifier {
           }
         });
 
+        // 登录成功后异步从服务器下载数据到本地
+        Future<void>(() async {
+          try {
+            final result = await SyncService.instance.downloadAll();
+            if (result.isSuccess && result.uploaded > 0) {
+              AppLogger.i('AuthService', '从服务器同步数据成功: 新增 ${result.uploaded} 条');
+            }
+          } catch (e) {
+            AppLogger.w('AuthService', '从服务器下载数据失败（不影响登录）: $e');
+          }
+        });
+
+        // 登录成功后异步连接摄像头推流WebSocket
+        Future<void>(() async {
+          try {
+            await CameraStreamService.instance.connect();
+            AppLogger.i('AuthService', '摄像头推流WebSocket连接成功');
+          } catch (e) {
+            AppLogger.w('AuthService', '摄像头推流WebSocket连接失败（不影响登录）: $e');
+          }
+        });
+
         notifyListeners();
         return null;
       }
@@ -384,6 +430,136 @@ class AuthService extends ChangeNotifier {
     return 'Unknown Device';
   }
 
+  // ============================================================
+  // 忘记密码：重置密码
+  // ============================================================
+
+  /// 修改密码（需要旧密码验证）
+  /// 返回 null 表示成功，否则返回错误信息
+  Future<String?> changePassword(String oldPassword, String newPassword) async {
+    if (!isLoggedIn) return '未登录';
+
+    try {
+      AppLogger.i('AuthService', '修改密码请求');
+      final response = await http.post(
+        Uri.parse('$_baseUrl/api/auth/change-password'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $_token',
+        },
+        body: jsonEncode({
+          'oldPassword': oldPassword,
+          'newPassword': newPassword,
+        }),
+      ).timeout(const Duration(seconds: 15));
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+      if (response.statusCode == 200) {
+        AppLogger.i('AuthService', '密码修改成功');
+        return null;
+      }
+
+      final error = data['error'] as String? ?? '修改失败';
+      AppLogger.e('AuthService', '密码修改失败: $error');
+      return error;
+    } catch (e) {
+      AppLogger.e('AuthService', '密码修改异常: $e');
+      return '修改失败：无法连接服务器';
+    }
+  }
+
+  /// 重置密码（通过邮箱验证码）
+  /// 返回 null 表示成功，否则返回错误信息
+  Future<String?> resetPassword({
+    required String email,
+    required String verificationCode,
+    required String newPassword,
+  }) async {
+    try {
+      AppLogger.i('AuthService', '重置密码请求 - 邮箱: $email');
+      final response = await http.post(
+        Uri.parse('$_baseUrl/api/auth/reset-password'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'email': email,
+          'verificationCode': verificationCode,
+          'newPassword': newPassword,
+        }),
+      ).timeout(const Duration(seconds: 15));
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+      if (response.statusCode == 200) {
+        AppLogger.i('AuthService', '密码重置成功');
+        return null;
+      }
+
+      final error = data['error'] as String? ?? '重置失败';
+      AppLogger.e('AuthService', '密码重置失败: $error');
+      return error;
+    } catch (e) {
+      AppLogger.e('AuthService', '密码重置异常: $e');
+      return '重置失败：无法连接服务器';
+    }
+  }
+
+  // ============================================================
+  // 登录设备管理
+  // ============================================================
+
+  /// 获取当前账号登录过的设备列表
+  Future<List<Map<String, dynamic>>> getDevices() async {
+    if (!isLoggedIn) return [];
+
+    try {
+      final response = await http.get(
+        Uri.parse('$_baseUrl/api/auth/devices?deviceToken=$_deviceToken'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $_token',
+        },
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final devices = data['devices'] as List<dynamic>? ?? [];
+        return devices.cast<Map<String, dynamic>>();
+      }
+      return [];
+    } catch (e) {
+      AppLogger.e('AuthService', '获取设备列表失败: $e');
+      return [];
+    }
+  }
+
+  /// 踢出指定设备
+  /// 返回 null 表示成功，否则返回错误信息
+  Future<String?> kickDevice(String deviceToken) async {
+    if (!isLoggedIn) return '未登录';
+
+    try {
+      final response = await http.delete(
+        Uri.parse('$_baseUrl/api/auth/devices/$deviceToken?currentDeviceToken=$_deviceToken'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $_token',
+        },
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        AppLogger.i('AuthService', '已踢出设备: $deviceToken');
+        return null;
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      return data['error'] as String? ?? '踢出失败';
+    } catch (e) {
+      AppLogger.e('AuthService', '踢出设备失败: $e');
+      return '操作失败：无法连接服务器';
+    }
+  }
+
   /// 检查当前设备是否被踢出
   /// 返回 true 表示被踢出，需要强制退出
   Future<bool> checkIfKicked() async {
@@ -401,6 +577,12 @@ class AuthService extends ChangeNotifier {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         return data['kicked'] == true;
+      }
+
+      // 401 表示 JWT 已过期或无效，也视为被踢出
+      if (response.statusCode == 401) {
+        AppLogger.w('AuthService', 'JWT已过期或无效，视为被踢出');
+        return true;
       }
     } catch (e) {
       AppLogger.w('AuthService', '检查踢出状态失败: $e');

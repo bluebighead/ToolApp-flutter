@@ -66,6 +66,11 @@ const routes = [
     name: 'version',
     component: () => import('@/views/VersionView.vue'),
   },
+  {
+    path: '/device-control',
+    name: 'deviceControl',
+    component: () => import('@/views/DeviceControlView.vue'),
+  },
 ]
 
 const router = createRouter({

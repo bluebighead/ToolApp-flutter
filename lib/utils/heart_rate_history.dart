@@ -200,6 +200,23 @@ class HeartRateHistory {
     AppLogger.i(_logTag, '批量删除心率历史 ${ids.length} 条');
   }
 
+  /// 合并服务器下载的数据（去重：以 id 为准，本地已有的不覆盖）
+  static Future<int> mergeFromServer(List<HeartRateRecord> serverRecords) async {
+    final localList = await loadAll();
+    final localIds = localList.map((e) => e.id).toSet();
+    final newRecords = serverRecords.where((r) => !localIds.contains(r.id)).toList();
+    if (newRecords.isEmpty) return 0;
+    localList.addAll(newRecords);
+    localList.sort((a, b) => b.startTimeMs.compareTo(a.startTimeMs));
+    if (localList.length > maxEntries) {
+      localList.removeRange(maxEntries, localList.length);
+    }
+    _cache = localList;
+    await _persist(localList);
+    AppLogger.i(_logTag, '从服务器合并心率历史 ${newRecords.length} 条');
+    return newRecords.length;
+  }
+
   /// 持久化到 SharedPreferences
   static Future<void> _persist(List<HeartRateRecord> list) async {
     try {

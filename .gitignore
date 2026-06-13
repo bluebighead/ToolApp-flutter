@@ -43,6 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+/android/build/
 
 # ToolApp Admin - 桌面管理端
 /toolapp-admin/node_modules/
@@ -63,3 +64,11 @@ app.*.map.json
 /toolapp-server/data/*.db-shm
 /toolapp-server/data/*.db-wal
 /toolapp-server/*.log
+
+# v1.52.8+ Trae IDE 配置及内部规划文档（不提交到GitHub）
+.superpowers/
+.trae/.ignore
+/docs/superpowers/
+
+# v1.52.8+ 备份文件（不提交）
+*.bak

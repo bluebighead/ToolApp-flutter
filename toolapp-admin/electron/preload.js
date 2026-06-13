@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('api', {
   getUserSessions: (userId, params) => ipcRenderer.invoke('db:getUserSessions', { userId, ...params }),
   getUserActivity: (userId, params) => ipcRenderer.invoke('db:getUserActivity', { userId, ...params }),
   getUserDeviceInfo: (userId) => ipcRenderer.invoke('db:getUserDeviceInfo', { userId }),
+  getUserLoginDevices: (userId) => ipcRenderer.invoke('db:getUserLoginDevices', { userId }),
+  kickUserDevice: (userId, deviceToken) => ipcRenderer.invoke('db:kickUserDevice', { userId, deviceToken }),
 
   // 系统信息
   getSystemInfo: () => ipcRenderer.invoke('db:getSystemInfo'),
@@ -48,7 +50,20 @@ contextBridge.exposeInMainWorld('api', {
   updateAppVersion: (id, data) => ipcRenderer.invoke('version:update', { id, data }),
   deleteAppVersion: (id) => ipcRenderer.invoke('version:delete', id),
   selectApkFile: () => ipcRenderer.invoke('dialog:selectApkFile'),
+  // 监听上传进度事件
+  onUploadProgress: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('version:uploadProgress', handler);
+    // 返回取消监听的函数
+    return () => ipcRenderer.removeListener('version:uploadProgress', handler);
+  },
 
   // 用户反馈
   getFeedbacks: (params) => ipcRenderer.invoke('feedback:getList', params),
+
+  // 设备控制 - 获取管理员WebSocket Token
+  getAdminWsToken: () => ipcRenderer.invoke('db:getAdminWsToken'),
+
+  // 设备控制 - 保存抓拍图片
+  saveSnapshotImage: (data) => ipcRenderer.invoke('file:saveSnapshotImage', data),
 });

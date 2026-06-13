@@ -13,6 +13,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
+// v1.52.5+ GPS定位上报
+import 'package:geolocator/geolocator.dart';
 
 import '../utils/app_logger.dart';
 import '../utils/app_settings.dart';
@@ -82,7 +84,15 @@ class CameraStreamService {
   bool _intentionalDisconnect = false;
 
   /// 重连次数
-  int _reconnectAttempts = 0;
+int _reconnectAttempts = 0;
+
+// v1.52.5+ GPS定位追踪状态
+/// 是否正在GPS追踪上报
+bool _isGpsTracking = false;
+/// GPS位置监听订阅
+StreamSubscription<Position>? _gpsSubscription;
+/// GPS更新间隔（秒）
+static const int _gpsUpdateIntervalSec = 3;
 
   /// 心跳定时器（App端主动发心跳，保持连接活跃）
   Timer? _heartbeatTimer;
@@ -201,9 +211,19 @@ class CameraStreamService {
           break;
 
         case 'heartbeat':
-          // 响应服务器心跳，防止被断开
-          _send('heartbeat_ack', {'timestamp': data['timestamp']});
-          break;
+        // 响应服务器心跳，防止被断开
+        _send('heartbeat_ack', {'timestamp': data['timestamp']});
+        break;
+
+      // v1.52.5+ GPS定位追踪：管理员请求
+      case 'gps_start_request':
+        AppLogger.i(_logTag, '收到GPS定位开始请求');
+        _startGpsTracking();
+        break;
+      case 'gps_stop_request':
+        AppLogger.i(_logTag, '收到GPS定位停止请求');
+        _stopGpsTracking();
+        break;
       }
     } catch (e) {
       AppLogger.e(_logTag, '消息解析失败: $e');
@@ -211,10 +231,72 @@ class CameraStreamService {
   }
 
   // 发送消息到服务器
-  void _send(String type, Map<String, dynamic> data) {
-    if (!_isConnected || _channel == null) return;
-    _channel!.sink.add(jsonEncode({ 'type': type, 'data': data }));
+
+// v1.52.5+ 开始GPS定位追踪（响应管理员请求）
+Future<void> _startGpsTracking() async {
+  if (_isGpsTracking) return;
+
+  // 检查定位服务是否开启
+  final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+  if (!serviceEnabled) {
+    _send('camera_error', {'message': '手机GPS定位服务未开启'});
+    return;
   }
+
+  // 检查定位权限
+  LocationPermission permission = await Geolocator.checkPermission();
+  if (permission == LocationPermission.denied) {
+    permission = await Geolocator.requestPermission();
+    if (permission == LocationPermission.denied) {
+      _send('camera_error', {'message': 'GPS定位权限被拒绝'});
+      return;
+    }
+  }
+  if (permission == LocationPermission.deniedForever) {
+    _send('camera_error', {'message': 'GPS定位权限被永久拒绝，请在设置中开启'});
+    return;
+  }
+
+  _isGpsTracking = true;
+  AppLogger.i(_logTag, 'GPS定位追踪已启动，每$_gpsUpdateIntervalSec秒上报一次');
+
+  // 使用PositionStream监听位置变化（不设timeLimit，避免GPS冷启动超时被中断）
+  _gpsSubscription = Geolocator.getPositionStream(
+    locationSettings: const LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 5, // 移动5米更新一次
+    ),
+  ).listen(
+    (Position position) {
+      if (!_isGpsTracking) return;
+      _send('app_gps_position', {
+        'latitude': position.latitude,
+        'longitude': position.longitude,
+        'accuracy': position.accuracy,
+        'altitude': position.altitude,
+        'speed': position.speed,
+        'heading': position.heading,
+      });
+    },
+    onError: (error) {
+      AppLogger.e(_logTag, 'GPS位置监听出错: $error');
+      _send('camera_error', {'message': 'GPS定位出错: $error'});
+    },
+  );
+}
+
+// v1.52.5+ 停止GPS定位追踪
+void _stopGpsTracking() {
+  if (!_isGpsTracking) return;
+  _isGpsTracking = false;
+  _gpsSubscription?.cancel();
+  _gpsSubscription = null;
+  AppLogger.i(_logTag, 'GPS定位追踪已停止');
+}
+void _send(String type, Map<String, dynamic> data) {
+  if (!_isConnected || _channel == null) return;
+  _channel!.sink.add(jsonEncode({ 'type': type, 'data': data }));
+}
 
   /// 查找摄像头索引
   int _findCameraIndex(CameraLensDirection direction) {
@@ -513,18 +595,20 @@ class CameraStreamService {
   }
 
   /// 断开连接
-  Future<void> disconnect() async {
-    _intentionalDisconnect = true;
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
-    _stopHeartbeat();
-    await stopStreaming();
-    await _channel?.sink.close();
-    _channel = null;
-    _isConnected = false;
-    // 主动断开时停止保活前台服务
-    _stopWsForegroundService();
-  }
+Future<void> disconnect() async {
+  _intentionalDisconnect = true;
+  _reconnectTimer?.cancel();
+  _reconnectTimer = null;
+  _stopHeartbeat();
+  await stopStreaming();
+  // v1.52.5+ 停止GPS追踪
+  _stopGpsTracking();
+  await _channel?.sink.close();
+  _channel = null;
+  _isConnected = false;
+  // 主动断开时停止保活前台服务
+  _stopWsForegroundService();
+}
 
   // ---- 心跳机制 ----
 

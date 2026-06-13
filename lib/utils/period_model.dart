@@ -707,6 +707,19 @@ class PeriodStorage {
     await saveRecords(records);
   }
 
+  /// 合并服务器下载的数据（去重：以 id 为准，本地已有的不覆盖）
+  static Future<int> mergeRecordsFromServer(List<PeriodRecord> serverRecords) async {
+    final localList = await loadRecords();
+    final localIds = localList.map((e) => e.id).toSet();
+    final newRecords = serverRecords.where((r) => !localIds.contains(r.id)).toList();
+    if (newRecords.isEmpty) return 0;
+    localList.addAll(newRecords);
+    localList.sort((a, b) => a.startDate.compareTo(b.startDate));
+    await saveRecords(localList);
+    AppLogger.i('PeriodStorage', '从服务器合并经期记录 ${newRecords.length} 条');
+    return newRecords.length;
+  }
+
   /// 加载排卵日标记（优先从 SharedPreferences，失败时从文件备份恢复）
   static Future<List<OvulationMark>> loadOvulationMarks() async {
     final prefs = await SharedPreferences.getInstance();

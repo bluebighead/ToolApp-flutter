@@ -12,7 +12,7 @@ import android.provider.DocumentsContract
 import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
@@ -59,7 +59,7 @@ import java.io.IOException
  *   Scoped Storage 静默拒掉。
  *   所以**自行启动 SAF Intent**才是稳定可靠的方案。
  */
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
 
     private val channelName = "com.example.toolapp/saf_helper"
 
@@ -181,7 +181,8 @@ class MainActivity : FlutterActivity() {
     private fun writeFileToSafTree(
         treeUri: String,
         fileName: String,
-        srcPath: String
+        srcPath: String,
+        mimeType: String = "video/*"
     ): String {
         val src = File(srcPath)
         if (!src.exists()) {
@@ -206,7 +207,7 @@ class MainActivity : FlutterActivity() {
         }
         // 2) 创建目标 DocumentFile
         val createdDoc = if (targetDoc == null) {
-            tree.createFile("video/*", finalName)
+            tree.createFile(mimeType, finalName)
                 ?: throw IOException("无法在 SAF 目录中创建文件: $finalName")
         } else {
             targetDoc
@@ -389,6 +390,7 @@ class MainActivity : FlutterActivity() {
                         val treeUri = call.argument<String>("treeUri")
                         val fileName = call.argument<String>("fileName")
                         val srcPath = call.argument<String>("srcPath")
+                        val mimeType = call.argument<String>("mimeType") ?: "video/*"
                         if (treeUri == null || fileName == null || srcPath == null) {
                             result.error("ARG_ERROR", "treeUri / fileName / srcPath 不能为空", null)
                             return@setMethodCallHandler
@@ -396,7 +398,7 @@ class MainActivity : FlutterActivity() {
                         // 写入涉及 I/O，丢到后台线程避免阻塞 UI
                         Thread {
                             try {
-                                val written = writeFileToSafTree(treeUri, fileName, srcPath)
+                                val written = writeFileToSafTree(treeUri, fileName, srcPath, mimeType)
                                 runOnUiThread { result.success(written) }
                             } catch (e: Throwable) {
                                 Log.e(TAG, "writeFileToSafTree 失败", e)
@@ -605,6 +607,116 @@ class MainActivity : FlutterActivity() {
                         } catch (e: Throwable) {
                             Log.e(TAG, "getCpuInfo 检测失败", e)
                             result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // v1.35.0+ 注册指纹检测通道（用于设备检修工具中的指纹功能检测）
+        // 通过 Android FingerprintManager API 获取指纹硬件信息及已注册指纹状态
+        val fingerprintChannelName = "com.example.toolapp/fingerprint"
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, fingerprintChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getFingerprintInfo" -> {
+                        try {
+                            val info = getFingerprintInfo()
+                            Log.i(TAG, "getFingerprintInfo: $info")
+                            result.success(info)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "getFingerprintInfo 失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    "getEnrolledFingerprints" -> {
+                        try {
+                            val count = getEnrolledFingerprints()
+                            Log.i(TAG, "getEnrolledFingerprints: $count")
+                            result.success(count)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "getEnrolledFingerprints 失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    "captureFingerprintData" -> {
+                        try {
+                            val data = captureFingerprintData()
+                            Log.i(TAG, "captureFingerprintData: 数据大小=${data.size}")
+                            result.success(data)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "captureFingerprintData 失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    "getSdkVersion" -> {
+                        try {
+                            result.success(Build.VERSION.SDK_INT)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "getSdkVersion 失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    "getDeviceModel" -> {
+                        try {
+                            result.success(Build.MODEL)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "getDeviceModel 失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // 注册设备信息通道（v1.51.2+ 提供设备详细硬件信息）
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.toolapp/device_info")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getTotalMemory" -> {
+                        try {
+                            val actManager = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+                            val memInfo = android.app.ActivityManager.MemoryInfo()
+                            actManager.getMemoryInfo(memInfo)
+                            val totalMemMB = (memInfo.totalMem / (1024 * 1024)).toInt()
+                            result.success(totalMemMB)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "getTotalMemory 失败", e)
+                            result.success(null)
+                        }
+                    }
+                    "getTotalStorage" -> {
+                        try {
+                            val stat = android.os.StatFs(android.os.Environment.getExternalStorageDirectory().path)
+                            val totalBytes = stat.blockCountLong * stat.blockSizeLong
+                            val totalMB = (totalBytes / (1024 * 1024)).toInt()
+                            result.success(totalMB)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "getTotalStorage 失败", e)
+                            result.success(null)
+                        }
+                    }
+                    "getCpuCores" -> {
+                        try {
+                            val cores = Runtime.getRuntime().availableProcessors()
+                            result.success(cores)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "getCpuCores 失败", e)
+                            result.success(null)
+                        }
+                    }
+                    "getScreenInches" -> {
+                        try {
+                            val metrics = resources.displayMetrics
+                            val widthInches = metrics.widthPixels / (metrics.xdpi.coerceAtLeast(1f))
+                            val heightInches = metrics.heightPixels / (metrics.ydpi.coerceAtLeast(1f))
+                            val diagonal = Math.sqrt(
+                                (widthInches * widthInches + heightInches * heightInches).toDouble()
+                            )
+                            result.success(diagonal)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "getScreenInches 失败", e)
+                            result.success(null)
                         }
                     }
                     else -> result.notImplemented()
@@ -1587,6 +1699,110 @@ class MainActivity : FlutterActivity() {
         }
 
         return info
+    }
+
+    /**
+     * v1.35.0+ 获取指纹硬件信息
+     * 通过 Android FingerprintManager API 查询设备指纹传感器状态
+     */
+    private fun getFingerprintInfo(): Map<String, Any> {
+        val info = mutableMapOf<String, Any>()
+        info["sdkVersion"] = Build.VERSION.SDK_INT
+        info["manufacturer"] = Build.MANUFACTURER
+        info["model"] = Build.MODEL
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val fingerprintManager = getSystemService(android.hardware.fingerprint.FingerprintManager::class.java)
+                info["hasHardware"] = fingerprintManager?.isHardwareDetected ?: false
+                info["hasEnrolledFingerprints"] = fingerprintManager?.hasEnrolledFingerprints() ?: false
+
+                // 传感器类型推测（Android 标准API无法直接获取传感器类型，通过硬件信息推测）
+                val hasHardware = fingerprintManager?.isHardwareDetected ?: false
+                info["sensorType"] = when {
+                    hasHardware && Build.MANUFACTURER.lowercase().contains("samsung") -> "超声波"
+                    hasHardware && Build.MANUFACTURER.lowercase().contains("xiaomi") -> "光学"
+                    hasHardware -> "电容式（推测）"
+                    else -> "无"
+                }
+            } else {
+                info["hasHardware"] = false
+                info["sensorType"] = "不支持（SDK < 23）"
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "获取指纹硬件信息失败", e)
+            info["error"] = e.message ?: "unknown"
+        }
+
+        return info
+    }
+
+    /**
+     * v1.35.0+ 获取已注册的指纹数量
+     * 注意：Android 9+ 不再暴露具体数量，只返回是否已注册
+     */
+    private fun getEnrolledFingerprints(): Int {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val fingerprintManager = getSystemService(android.hardware.fingerprint.FingerprintManager::class.java)
+                if (fingerprintManager?.hasEnrolledFingerprints() == true) {
+                    1 // 至少注册了1个指纹
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "获取指纹注册数量失败", e)
+            0
+        }
+    }
+
+    /**
+     * v1.35.0+ 捕获指纹相关数据（供学习研究用）
+     * 采集的是指纹硬件元数据和哈希特征值，不采集原始指纹图像
+     * 本功能仅用于个人学习研究，不传播推广，不涉及违法犯罪
+     */
+    private fun captureFingerprintData(): Map<String, Any> {
+        val data = mutableMapOf<String, Any>()
+
+        try {
+            // 获取指纹硬件基本信息
+            val hardwareInfo = getFingerprintInfo()
+            data.putAll(hardwareInfo)
+
+            // 添加设备标识信息（脱敏处理）
+            data["deviceFingerprint"] = Build.FINGERPRINT.takeLast(16) // 只取后16位
+            data["board"] = Build.BOARD
+            data["bootloader"] = Build.BOOTLOADER
+            data["brand"] = Build.BRAND
+            data["device"] = Build.DEVICE
+            data["display"] = Build.DISPLAY
+            data["hardware"] = Build.HARDWARE
+            data["product"] = Build.PRODUCT
+
+            // 添加时间戳
+            data["capturedAt"] = System.currentTimeMillis()
+
+            // 添加安全相关参数（用于学习生物识别认证流程）
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try {
+                    val keyguardManager = getSystemService(android.app.KeyguardManager::class.java)
+                    data["isKeyguardSecure"] = keyguardManager?.isKeyguardSecure ?: false
+                    data["isDeviceSecure"] = keyguardManager?.isDeviceSecure ?: false
+                } catch (e: Exception) {
+                    Log.w(TAG, "获取Keyguard信息失败: ${e.message}")
+                }
+            }
+
+            Log.i(TAG, "指纹数据捕获完成（仅硬件元数据，不含原始指纹图像）")
+        } catch (e: Exception) {
+            Log.e(TAG, "捕获指纹数据失败", e)
+            data["error"] = e.message ?: "unknown"
+        }
+
+        return data
     }
 
     /**

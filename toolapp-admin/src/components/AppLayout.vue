@@ -31,6 +31,10 @@
           <template #title>用户反馈</template>
         </el-menu-item>
         <el-divider v-if="!isCollapsed" content-position="left">系统工具</el-divider>
+        <el-menu-item index="/device-control">
+          <el-icon><Monitor /></el-icon>
+          <template #title>设备控制</template>
+        </el-menu-item>
         <el-menu-item index="/backup">
           <el-icon><FolderOpened /></el-icon>
           <template #title>数据备份</template>

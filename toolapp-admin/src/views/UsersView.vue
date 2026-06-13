@@ -115,8 +115,15 @@
       </el-dialog>
 
       <!-- 设备参数对话框 -->
-      <el-dialog v-model="deviceDialogVisible" title="用户设备参数" width="560px">
+      <el-dialog v-model="deviceDialogVisible" title="用户设备参数" width="620px">
         <div v-loading="deviceLoading">
+          <!-- 手动获取按钮 -->
+          <div style="margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 13px; color: #909399;">设备参数需要 App 端上传，点击获取按钮手动刷新</span>
+            <el-button type="primary" size="small" :icon="Refresh" :loading="deviceLoading" @click="refreshDeviceInfo">获取参数</el-button>
+          </div>
+
+          <!-- 设备硬件参数 -->
           <el-descriptions v-if="currentDeviceInfo && !currentDeviceInfo.error" :column="1" border>
             <el-descriptions-item label="平台">{{ currentDeviceInfo.platform || '—' }}</el-descriptions-item>
             <el-descriptions-item label="设备型号">{{ currentDeviceInfo.model || '—' }}</el-descriptions-item>
@@ -139,6 +146,24 @@
             <el-descriptions-item label="更新时间">{{ currentDeviceInfo.updated_at || '—' }}</el-descriptions-item>
           </el-descriptions>
           <el-empty v-else-if="!deviceLoading" :description="currentDeviceInfo?.error ? '加载失败: ' + currentDeviceInfo.error : '该用户暂无设备参数数据'" />
+
+          <!-- 登录设备列表 -->
+          <div v-if="loginDevices.length > 0" style="margin-top: 20px;">
+            <el-divider content-position="left">登录过的设备</el-divider>
+            <el-table :data="loginDevices" size="small" border stripe>
+              <el-table-column prop="device_info" label="设备信息" min-width="180">
+                <template #default="{ row }">
+                  {{ row.device_info || '未知设备' }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="last_active" label="最后活跃时间" min-width="160" />
+              <el-table-column label="操作" width="80" align="center">
+                <template #default="{ row }">
+                  <el-button type="danger" size="small" text @click="kickDevice(row.device_token)">踢出</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
         </div>
         <template #footer>
           <el-button @click="deviceDialogVisible = false">关闭</el-button>
@@ -150,7 +175,7 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { View, Hide, Refresh, Search, DocumentCopy, Plus } from '@element-plus/icons-vue'
 import AppLayout from '@/components/AppLayout.vue'
 import { api } from '@/utils/api'
@@ -166,19 +191,69 @@ const total = ref(0)
 const deviceDialogVisible = ref(false)
 const currentDeviceInfo = ref(null)
 const deviceLoading = ref(false)
+const currentDeviceUserId = ref(null)
+const loginDevices = ref([])
 
 // 打开设备参数对话框
 async function openDeviceDialog(userId) {
+  currentDeviceUserId.value = userId
   deviceDialogVisible.value = true
   currentDeviceInfo.value = null
+  loginDevices.value = []
   deviceLoading.value = true
   try {
-    const result = await api.getUserDeviceInfo(userId)
-    currentDeviceInfo.value = result
+    const [deviceResult, devicesResult] = await Promise.all([
+      api.getUserDeviceInfo(userId),
+      api.getUserLoginDevices(userId),
+    ])
+    currentDeviceInfo.value = deviceResult
+    loginDevices.value = devicesResult?.devices || []
   } catch (err) {
     currentDeviceInfo.value = { error: err.message }
   } finally {
     deviceLoading.value = false
+  }
+}
+
+// 手动刷新设备参数
+async function refreshDeviceInfo() {
+  if (!currentDeviceUserId.value) return
+  deviceLoading.value = true
+  try {
+    const [deviceResult, devicesResult] = await Promise.all([
+      api.getUserDeviceInfo(currentDeviceUserId.value),
+      api.getUserLoginDevices(currentDeviceUserId.value),
+    ])
+    currentDeviceInfo.value = deviceResult
+    loginDevices.value = devicesResult?.devices || []
+    ElMessage.success('参数已刷新')
+  } catch (err) {
+    ElMessage.error('获取参数失败: ' + err.message)
+  } finally {
+    deviceLoading.value = false
+  }
+}
+
+// 踢出设备
+async function kickDevice(deviceToken) {
+  try {
+    await ElMessageBox.confirm('确定要踢出该设备吗？该设备将被强制退出登录。', '确认踢出', {
+      confirmButtonText: '确认',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch {
+    return
+  }
+
+  try {
+    await api.kickUserDevice(currentDeviceUserId.value, deviceToken)
+    ElMessage.success('已踢出该设备')
+    // 刷新设备列表
+    const devicesResult = await api.getUserLoginDevices(currentDeviceUserId.value)
+    loginDevices.value = devicesResult?.devices || []
+  } catch (err) {
+    ElMessage.error('踢出失败: ' + err.message)
   }
 }
 

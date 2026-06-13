@@ -98,18 +98,30 @@ class AppInfo {
   //   - 设备参数上传增加 24 小时最小间隔和并发控制，避免频繁请求
   //   - App 启动后检测已有登录态时自动在后台上传设备参数
   //   - PC 管理端"用户设备参数"对话框正常显示数据
-  static const String version = '1.34.0';
+  // v1.51.0+ 升级说明（Bug修复 + 新增工具）：
+  //   - 修复指纹检测 FragmentActivity 错误，MainActivity 改用 FlutterFragmentActivity
+  //   - 修复麦克风检测波形异常（99% 音量）和录音无效问题
+  //   - 修复安装包免压查看器点击大文件卡死问题（增加1MB预览限制）
+  //   - 修复设置页存储空间显示异常大数字（字节格式化计算错误）
+  //   - 管理员密码默认改为 666666
+  //   - 新增电子元件计算工具（色环电阻/贴片电阻/电容换算/电感色码）
+  //   - 新增转盘抽奖工具（自定义转盘/旋转动画/概率设置/历史记录）
+  //   - 新增计分板小工具（全屏加减分/长按连续加减）
+  // v1.52.4+ 升级说明（Bug修复 - 转盘抽奖概率定位）：
+  //   - 修复转盘抽奖概率设置不生效的Bug：旋转角度计算未考虑上次旋转的残留角度，
+  //     导致后续旋转时选中项无法精确指向顶部指针，视觉上概率分布与设置不符
+  static const String version = '1.52.8';
 
   // 当前构建号（整数，每次发版递增）
   // 每次发版时同步更新 pubspec.yaml 中 version 字段的 + 号后的数字
-  static const int buildNumber = 154;
+  static const int buildNumber = 189;
 
   // 开发者署名
   static const String developer = 'SuperYH';
 
   // 最近一次发版的更新时间（格式：yyyy-MM-dd）
   // 每次发版时必须更新到当天日期
-  static const String lastUpdate = '2026-06-11';
+  static const String lastUpdate = '2026-06-13';
 
   // 完整版本字符串，UI 上直接显示使用
   static String get fullVersion => '$version (Build $buildNumber)';

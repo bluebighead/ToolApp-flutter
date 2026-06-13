@@ -60,12 +60,28 @@
       </el-form>
 
       <!-- 上传进度 -->
-      <el-progress
-        v-if="uploading"
-        :percentage="uploadProgress"
-        :format="() => `${uploadProgress}%`"
-        style="margin-top: 12px"
-      />
+      <div v-if="uploading" style="margin-top: 16px">
+        <!-- 重试状态提示 -->
+        <el-alert
+          v-if="retryStatus"
+          :title="retryStatus"
+          type="warning"
+          show-icon
+          :closable="false"
+          style="margin-bottom: 8px"
+        />
+        <el-progress
+          :percentage="uploadProgress"
+          :status="retryStatus ? 'warning' : undefined"
+          :format="() => `${uploadProgress}%`"
+          style="margin-bottom: 4px"
+        />
+        <!-- 上传速率和文件大小显示 -->
+        <div style="display: flex; justify-content: space-between; font-size: 12px; color: #909399;">
+          <span v-if="uploadSpeed">上传速率：{{ uploadSpeed }}</span>
+          <span v-if="uploadFileSize">文件大小：{{ uploadFileSize }}</span>
+        </div>
+      </div>
     </el-card>
 
     <!-- 版本列表 -->
@@ -137,7 +153,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import AppLayout from '@/components/AppLayout.vue'
 import { api } from '@/utils/api'
@@ -149,6 +165,10 @@ const versions = ref([])
 const loading = ref(false)
 const uploading = ref(false)
 const uploadProgress = ref(0)
+const uploadSpeed = ref('')        // 当前上传速率文本（如 "2.5 MB/s"）
+const uploadFileSize = ref('')     // 文件总大小文本（如 "128.0 MB"）
+const retryStatus = ref('')        // 重试状态文本（如 "网络波动，正在重试 (1/2)"）
+let removeProgressListener = null  // 取消监听的函数
 
 // 发布表单
 const form = ref({
@@ -168,6 +188,29 @@ const savingEdit = ref(false)
 onMounted(() => {
   loadVersions()
 })
+
+onUnmounted(() => {
+  // 组件销毁时取消进度监听
+  if (removeProgressListener) {
+    removeProgressListener()
+    removeProgressListener = null
+  }
+})
+
+// 格式化文件大小/速率
+function formatSpeed(bytesPerSec) {
+  if (bytesPerSec <= 0) return ''
+  if (bytesPerSec < 1024) return bytesPerSec + ' B/s'
+  if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s'
+  return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s'
+}
+
+function formatFileSize(bytes) {
+  if (!bytes || bytes === 0) return '-'
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
 
 // 加载版本列表
 async function loadVersions() {
@@ -191,12 +234,18 @@ async function loadVersions() {
 // 选择APK文件
 async function selectApkFile() {
   try {
-    const filePath = await api.selectApkFile()
-    if (filePath) {
-      form.value.apkFilePath = filePath
+    const result = await api.selectApkFile()
+    if (result) {
+      form.value.apkFilePath = result.filePath
       // 提取文件名
-      const parts = filePath.replace(/\\/g, '/').split('/')
+      const parts = result.filePath.replace(/\\/g, '/').split('/')
       form.value.apkFileName = parts[parts.length - 1]
+      
+      // 自动填充从pubspec.yaml读取的版本号
+      if (result.versionInfo) {
+        form.value.version = result.versionInfo.version
+        form.value.buildNumber = result.versionInfo.buildNumber
+      }
     }
   } catch (err) {
     ElMessage.error('选择文件失败')
@@ -220,14 +269,33 @@ async function handlePublish() {
 
   uploading.value = true
   uploadProgress.value = 0
+  uploadSpeed.value = ''
+  uploadFileSize.value = ''
+  retryStatus.value = ''
 
-  // 模拟上传进度（实际进度由底层控制）
-  const progressTimer = setInterval(() => {
-    if (uploadProgress.value < 90) {
-      uploadProgress.value += Math.random() * 10
-      if (uploadProgress.value > 90) uploadProgress.value = 90
+  // 注册真实上传进度监听（从底层 db_worker 上报）
+  removeProgressListener = api.onUploadProgress((data) => {
+    const { loaded, total, speed, retryAttempt, maxRetries } = data
+
+    // speed === -1 表示重试状态（网络波动，正在自动重试）
+    if (speed === -1 && retryAttempt !== undefined && maxRetries !== undefined) {
+      retryStatus.value = `网络波动，正在自动重试 (${retryAttempt}/${maxRetries})...`
+      return
     }
-  }, 500)
+
+    // 正常进度上报时清除重试状态
+    retryStatus.value = ''
+
+    // 计算百分比
+    const pct = total > 0 ? Math.round((loaded / total) * 100) : 0
+    uploadProgress.value = Math.min(pct, 100)
+    // 更新速率显示
+    uploadSpeed.value = formatSpeed(speed)
+    // 保存文件总大小（只在首次设置）
+    if (!uploadFileSize.value && total > 0) {
+      uploadFileSize.value = formatFileSize(total)
+    }
+  })
 
   try {
     const result = await api.createAppVersion({
@@ -238,7 +306,7 @@ async function handlePublish() {
       forceUpdate: form.value.forceUpdate,
     })
 
-    clearInterval(progressTimer)
+    // 上传完成，进度设为100%
     uploadProgress.value = 100
 
     if (result.success) {
@@ -258,11 +326,21 @@ async function handlePublish() {
       ElMessage.error(result.error || '发布失败')
     }
   } catch (err) {
-    clearInterval(progressTimer)
     ElMessage.error('发布失败: ' + err.message)
   } finally {
     uploading.value = false
-    uploadProgress.value = 0
+    // 清理进度监听
+    if (removeProgressListener) {
+      removeProgressListener()
+      removeProgressListener = null
+    }
+    // 延迟重置进度显示
+    setTimeout(() => {
+      uploadProgress.value = 0
+      uploadSpeed.value = ''
+      uploadFileSize.value = ''
+      retryStatus.value = ''
+    }, 2000)
   }
 }
 
@@ -311,13 +389,6 @@ async function handleDelete(row) {
   }
 }
 
-// 格式化文件大小
-function formatFileSize(bytes) {
-  if (!bytes || bytes === 0) return '-'
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
-}
 </script>
 
 <style scoped>

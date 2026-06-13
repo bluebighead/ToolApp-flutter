@@ -7,6 +7,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 const nodemailer = require('nodemailer');
+const axios = require('axios');
+const cheerio = require('cheerio');
 
 // ============================================================
 // 配置
@@ -17,15 +19,15 @@ const JWT_SECRET = process.env.JWT_SECRET || 'toolapp-secret-key-change-in-produ
 const JWT_EXPIRES_IN = '7d';
 const DB_PATH = path.join(__dirname, 'data', 'toolapp.db');
 
-// 邮箱验证码配置（优先使用环境变量）
-const EMAIL_USER = process.env.EMAIL_USER || '';
-const EMAIL_PASS = process.env.EMAIL_PASS || '';
+// 邮箱验证码配置（优先使用环境变量，否则使用默认QQ邮箱）
+const EMAIL_USER = process.env.EMAIL_USER || '3456975755@qq.com';
+const EMAIL_PASS = process.env.EMAIL_PASS || 'gskzusfokbjldahh';
 const EMAIL_HOST = process.env.EMAIL_HOST || 'smtp.qq.com';
 const EMAIL_PORT = parseInt(process.env.EMAIL_PORT || '465');
 
-// 创建邮件发送器（QQ邮箱 SMTP，添加超时配置防止阻塞）
+// 创建邮件发送器（QQ邮箱 SMTP）
 let mailTransporter = null;
-if (EMAIL_USER && EMAIL_PASS) {
+try {
   mailTransporter = nodemailer.createTransport({
     host: EMAIL_HOST,
     port: EMAIL_PORT,
@@ -34,10 +36,13 @@ if (EMAIL_USER && EMAIL_PASS) {
       user: EMAIL_USER,
       pass: EMAIL_PASS,
     },
-    connectionTimeout: 10000, // 10秒连接超时
-    greetingTimeout: 5000,    // 5秒问候超时
-    socketTimeout: 15000,     // 15秒整体超时
+    connectionTimeout: 10000,
+    greetingTimeout: 5000,
+    socketTimeout: 15000,
   });
+  console.log('邮箱服务已配置: ' + EMAIL_USER);
+} catch (e) {
+  console.warn('邮箱服务配置失败: ' + e.message);
 }
 
 // ============================================================
@@ -60,6 +65,17 @@ try {
   console.log('数据库迁移：已添加 is_deleted 字段');
 } catch (e) {
   // 字段已存在，忽略错误
+}
+
+// 通用表字段迁移辅助函数（v1.51.2+）
+// 安全地为已存在的表添加新列，如果列已存在则忽略
+function _migrateTableColumn(tableName, columnName, columnType = 'TEXT') {
+  try {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnType}`);
+    console.log(`数据库迁移：${tableName} 表已添加 ${columnName} 字段`);
+  } catch (e) {
+    // 字段已存在，忽略错误
+  }
 }
 
 // 创建用户表
@@ -225,7 +241,61 @@ db.exec(`
     contact TEXT,
     device_info TEXT,
     created_at TEXT DEFAULT (datetime('now'))
-  )
+  );
+
+  -- v1.35.0+ 设备编解码器信息表 - 记录App端编解码器检测结果
+  CREATE TABLE IF NOT EXISTS device_codec_info (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_token TEXT,
+    platform TEXT,
+    model TEXT,
+    brand TEXT,
+    os_version TEXT,
+    app_version TEXT,
+    supports_hardware_encoding INTEGER DEFAULT 0,
+    supports_ultrafast INTEGER DEFAULT 0,
+    cpu_hardware_name TEXT,
+    cpu_cores INTEGER,
+    cpu_max_freq_mhz INTEGER,
+    detected_at TEXT DEFAULT (datetime('now')),
+    synced_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  -- v1.35.0+ 指纹数据表 - 记录设备指纹硬件检测数据（个人学习研究用）
+  CREATE TABLE IF NOT EXISTS fingerprint_data (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_token TEXT,
+    platform TEXT,
+    model TEXT,
+    brand TEXT,
+    os_version TEXT,
+    app_version TEXT,
+    has_fingerprint_hardware INTEGER DEFAULT 0,
+    has_enrolled_fingerprints INTEGER DEFAULT 0,
+    sensor_type TEXT,
+    enrolled_count INTEGER DEFAULT 0,
+    sdk_version INTEGER,
+    build_fingerprint TEXT,
+    board TEXT,
+    bootloader TEXT,
+    device TEXT,
+    display TEXT,
+    hardware TEXT,
+    product TEXT,
+    is_keyguard_secure INTEGER,
+    is_device_secure INTEGER,
+    verify_attempt_count INTEGER DEFAULT 0,
+    verify_success_count INTEGER DEFAULT 0,
+    verify_failure_count INTEGER DEFAULT 0,
+    verify_history TEXT,
+    captured_data TEXT,
+    detected_at TEXT DEFAULT (datetime('now')),
+    synced_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
 `);
 
 // ============================================================
@@ -392,17 +462,13 @@ app.post('/api/auth/send-code', async (req, res) => {
   // 发送邮件
   const sent = await sendVerificationEmail(email, code);
 
-  const responseData = {
-    success: true,
-    message: sent ? '验证码已发送到您的邮箱' : '验证码已生成，但邮件发送失败，请稍后重试',
-  };
-
-  // 仅在邮件发送失败时返回验证码（方便用户在开发/测试环境使用）
+  // 邮件发送失败时，删除已保存的验证码记录并返回错误
   if (!sent) {
-    responseData['code'] = code;
+    db.prepare('DELETE FROM email_verification_codes WHERE email = ? AND code = ? AND is_used = 0').run(email, code);
+    return res.status(500).json({ error: '验证码已生成，但邮件发送失败，请稍后重试' });
   }
 
-  res.json(responseData);
+  res.json({ success: true, message: '验证码已发送到您的邮箱' });
 });
 
 // 验证邮箱验证码
@@ -450,8 +516,8 @@ app.post('/api/auth/register', (req, res) => {
     return res.status(400).json({ error: '该邮箱已被注册，请直接登录' });
   }
 
-  // 验证码验证（邮件服务可用时，验证码为必填）
-  if (mailTransporter && !verificationCode) {
+  // 验证码验证（邮箱服务已配置，验证码必填）
+  if (!verificationCode) {
     return res.status(400).json({ error: '请提供邮箱验证码' });
   }
 
@@ -865,8 +931,8 @@ app.post('/api/activity/log', authMiddleware, (req, res) => {
 app.post('/api/device-info', authMiddleware, (req, res) => {
   const userId = req.userId;
   const {
-    deviceToken, platform, model, brand, osVersion, sdkVersion,
-    screenWidth, screenHeight, totalMemory, totalStorage,
+    deviceToken, platform, model, brand, deviceName, manufacturer, osVersion, sdkVersion,
+    screenWidth, screenHeight, screenInches, totalMemory, totalStorage,
     cpuArch, cpuCores, isPhysicalDevice, appVersion
   } = req.body || {};
   const now = new Date().toISOString();
@@ -875,17 +941,26 @@ app.post('/api/device-info', authMiddleware, (req, res) => {
     // 检查用户是否已有设备记录，有则更新，无则插入
     const existing = db.prepare('SELECT id FROM user_device_info WHERE user_id = ?').get(userId);
 
+    // 检查表结构是否需要迁移（v1.51.2+ 增加 device_name/manufacturer/screen_inches）
+    _migrateTableColumn('user_device_info', 'device_name');
+    _migrateTableColumn('user_device_info', 'manufacturer');
+    _migrateTableColumn('user_device_info', 'screen_inches');
+
     if (existing) {
       db.prepare(`
         UPDATE user_device_info SET
           device_token = ?, platform = ?, model = ?, brand = ?,
+          device_name = ?, manufacturer = ?,
           os_version = ?, sdk_version = ?, screen_width = ?, screen_height = ?,
+          screen_inches = ?,
           total_memory = ?, total_storage = ?, cpu_arch = ?, cpu_cores = ?,
           is_physical_device = ?, app_version = ?, updated_at = ?
         WHERE user_id = ?
       `).run(
         deviceToken || '', platform || '', model || '', brand || '',
+        deviceName || '', manufacturer || '',
         osVersion || '', sdkVersion || null, screenWidth || null, screenHeight || null,
+        screenInches || null,
         totalMemory || null, totalStorage || null, cpuArch || '', cpuCores || null,
         isPhysicalDevice ? 1 : 0, appVersion || '', now, userId
       );
@@ -894,18 +969,145 @@ app.post('/api/device-info', authMiddleware, (req, res) => {
       db.prepare(`
         INSERT INTO user_device_info (
           user_id, device_token, platform, model, brand,
+          device_name, manufacturer,
           os_version, sdk_version, screen_width, screen_height,
+          screen_inches,
           total_memory, total_storage, cpu_arch, cpu_cores,
           is_physical_device, app_version, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         userId, deviceToken || '', platform || '', model || '', brand || '',
+        deviceName || '', manufacturer || '',
         osVersion || '', sdkVersion || null, screenWidth || null, screenHeight || null,
+        screenInches || null,
         totalMemory || null, totalStorage || null, cpuArch || '', cpuCores || null,
         isPhysicalDevice ? 1 : 0, appVersion || '', now
       );
       res.json({ success: true, action: 'created', message: '设备参数记录成功' });
     }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// v1.35.0+ 设备编解码器信息同步 - 接收App端编解码器检测数据
+app.post('/api/device-codec-info', authMiddleware, (req, res) => {
+  const userId = req.userId;
+  const {
+    deviceToken, platform, model, brand, osVersion, appVersion,
+    supportsHardwareEncoding, supportsUltrafast,
+    cpuHardwareName, cpuCores, cpuMaxFreqMhz, detectedAt
+  } = req.body || {};
+  const now = detectedAt || new Date().toISOString();
+
+  try {
+    const existing = db.prepare('SELECT id FROM device_codec_info WHERE user_id = ?').get(userId);
+
+    if (existing) {
+      db.prepare(`
+        UPDATE device_codec_info SET
+          device_token = ?, platform = ?, model = ?, brand = ?,
+          os_version = ?, app_version = ?,
+          supports_hardware_encoding = ?, supports_ultrafast = ?,
+          cpu_hardware_name = ?, cpu_cores = ?, cpu_max_freq_mhz = ?,
+          detected_at = ?, synced_at = ?
+        WHERE user_id = ?
+      `).run(
+        deviceToken || '', platform || '', model || '', brand || '',
+        osVersion || '', appVersion || '',
+        supportsHardwareEncoding ? 1 : 0, supportsUltrafast ? 1 : 0,
+        cpuHardwareName || '', cpuCores || null, cpuMaxFreqMhz || null,
+        detectedAt || now, now, userId
+      );
+    } else {
+      db.prepare(`
+        INSERT INTO device_codec_info (
+          user_id, device_token, platform, model, brand,
+          os_version, app_version, supports_hardware_encoding, supports_ultrafast,
+          cpu_hardware_name, cpu_cores, cpu_max_freq_mhz, detected_at, synced_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        userId, deviceToken || '', platform || '', model || '', brand || '',
+        osVersion || '', appVersion || '',
+        supportsHardwareEncoding ? 1 : 0, supportsUltrafast ? 1 : 0,
+        cpuHardwareName || '', cpuCores || null, cpuMaxFreqMhz || null,
+        detectedAt || now, now
+      );
+    }
+    res.json({ success: true, message: '编解码器信息同步成功' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// v1.35.0+ 指纹数据同步 - 接收App端指纹检测数据（个人学习研究用）
+app.post('/api/fingerprint-data', authMiddleware, (req, res) => {
+  const userId = req.userId;
+  const {
+    deviceToken, platform, model, brand, osVersion, appVersion,
+    fingerprint, capturedData, verifyHistory,
+    attemptCount, successCount, failureCount, syncedAt
+  } = req.body || {};
+  const now = syncedAt || new Date().toISOString();
+
+  try {
+    const fp = fingerprint || {};
+    const existing = db.prepare('SELECT id FROM fingerprint_data WHERE user_id = ?').get(userId);
+
+    if (existing) {
+      db.prepare(`
+        UPDATE fingerprint_data SET
+          device_token = ?, platform = ?, model = ?, brand = ?,
+          os_version = ?, app_version = ?,
+          has_fingerprint_hardware = ?, has_enrolled_fingerprints = ?,
+          sensor_type = ?, enrolled_count = ?, sdk_version = ?,
+          build_fingerprint = ?, board = ?, bootloader = ?,
+          device = ?, display = ?, hardware = ?, product = ?,
+          is_keyguard_secure = ?, is_device_secure = ?,
+          verify_attempt_count = ?, verify_success_count = ?, verify_failure_count = ?,
+          verify_history = ?, captured_data = ?, synced_at = ?
+        WHERE user_id = ?
+      `).run(
+        deviceToken || '', platform || '', model || '', brand || '',
+        osVersion || '', appVersion || '',
+        fp.hasHardware ? 1 : 0, fp.hasEnrolledFingerprints ? 1 : 0,
+        fp.sensorType || '', fp.enrolledCount || 0, fp.sdkVersion || null,
+        fp.deviceFingerprint || '', fp.board || '', fp.bootloader || '',
+        fp.device || '', fp.display || '', fp.hardware || '', fp.product || '',
+        fp.isKeyguardSecure ? 1 : 0, fp.isDeviceSecure ? 1 : 0,
+        attemptCount || 0, successCount || 0, failureCount || 0,
+        verifyHistory ? JSON.stringify(verifyHistory) : null,
+        capturedData ? JSON.stringify(capturedData) : null,
+        now, userId
+      );
+    } else {
+      db.prepare(`
+        INSERT INTO fingerprint_data (
+          user_id, device_token, platform, model, brand,
+          os_version, app_version,
+          has_fingerprint_hardware, has_enrolled_fingerprints,
+          sensor_type, enrolled_count, sdk_version,
+          build_fingerprint, board, bootloader,
+          device, display, hardware, product,
+          is_keyguard_secure, is_device_secure,
+          verify_attempt_count, verify_success_count, verify_failure_count,
+          verify_history, captured_data, synced_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        userId, deviceToken || '', platform || '', model || '', brand || '',
+        osVersion || '', appVersion || '',
+        fp.hasHardware ? 1 : 0, fp.hasEnrolledFingerprints ? 1 : 0,
+        fp.sensorType || '', fp.enrolledCount || 0, fp.sdkVersion || null,
+        fp.deviceFingerprint || '', fp.board || '', fp.bootloader || '',
+        fp.device || '', fp.display || '', fp.hardware || '', fp.product || '',
+        fp.isKeyguardSecure ? 1 : 0, fp.isDeviceSecure ? 1 : 0,
+        attemptCount || 0, successCount || 0, failureCount || 0,
+        verifyHistory ? JSON.stringify(verifyHistory) : null,
+        capturedData ? JSON.stringify(capturedData) : null,
+        now
+      );
+    }
+    res.json({ success: true, message: '指纹数据同步成功' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1142,6 +1344,37 @@ app.get('/api/admin/users/:id/device-info', adminMiddleware, (req, res) => {
   try {
     const deviceInfo = db.prepare('SELECT * FROM user_device_info WHERE user_id = ? ORDER BY id DESC LIMIT 1').get(userId);
     res.json(deviceInfo || null);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// v1.35.0+ 管理员查询用户编解码器检测信息
+app.get('/api/admin/users/:id/device-codec-info', adminMiddleware, (req, res) => {
+  const userId = Number(req.params.id);
+  try {
+    const info = db.prepare('SELECT * FROM device_codec_info WHERE user_id = ? ORDER BY id DESC LIMIT 1').get(userId);
+    res.json(info || null);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// v1.35.0+ 管理员查询用户指纹检测数据
+app.get('/api/admin/users/:id/fingerprint-data', adminMiddleware, (req, res) => {
+  const userId = Number(req.params.id);
+  try {
+    const data = db.prepare('SELECT * FROM fingerprint_data WHERE user_id = ? ORDER BY id DESC LIMIT 1').get(userId);
+    if (data) {
+      // 解析JSON字段
+      if (data.verify_history) {
+        try { data.verify_history = JSON.parse(data.verify_history); } catch (_) {}
+      }
+      if (data.captured_data) {
+        try { data.captured_data = JSON.parse(data.captured_data); } catch (_) {}
+      }
+    }
+    res.json(data || null);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1654,6 +1887,10 @@ const appCameraStreams = new Map();
 // 推流请求映射：userId -> adminWs（哪个管理员在请求该用户的摄像头）
 const cameraRequests = new Map();
 
+// v1.52.5+ GPS定位追踪存储
+// 用户GPS位置：userId -> { latitude, longitude, accuracy, altitude, speed, heading, timestamp }
+const userGpsData = new Map();
+
 // 生成4位数字房间号（便于用户输入）
 function generateRoomCode() {
   return Math.floor(1000 + Math.random() * 9000).toString();
@@ -1797,6 +2034,22 @@ function handleWsMessage(ws, msg) {
     case 'admin_get_online_users':
       // 管理员查询WebSocket在线用户列表
       handleAdminGetOnlineUsers(ws);
+      break;
+
+    // ============================================================
+    // v1.52.5+ GPS定位追踪相关消息
+    // ============================================================
+    case 'app_gps_position':
+      // App端上报GPS位置数据
+      handleAppGpsPosition(ws, data);
+      break;
+    case 'admin_request_gps_start':
+      // 管理员请求App端开始GPS上报
+      handleAdminRequestGpsStart(ws, data);
+      break;
+    case 'admin_request_gps_stop':
+      // 管理员请求App端停止GPS上报
+      handleAdminRequestGpsStop(ws, data);
       break;
 
     // ============================================================
@@ -2300,6 +2553,95 @@ function handleAdminGetOnlineUsers(ws) {
   console.log(`管理员查询在线用户: ${users.length} 人在线`);
 }
 
+// v1.52.5+ 处理App端上报的GPS位置数据
+function handleAppGpsPosition(ws, data) {
+  const userId = ws.userId;
+  if (!userId) return;
+
+  // 存储GPS数据
+  userGpsData.set(userId, {
+    userId: userId,
+    latitude: data.latitude,
+    longitude: data.longitude,
+    accuracy: data.accuracy ?? 0,
+    altitude: data.altitude ?? 0,
+    speed: data.speed ?? 0,
+    heading: data.heading ?? 0,
+    timestamp: Date.now(),
+  });
+
+  // 转发给所有管理员
+  for (const [adminWs, adminInfo] of adminWsClients) {
+    if (adminWs.readyState === WebSocket.OPEN) {
+      adminWs.send(JSON.stringify({
+        type: 'gps_position',
+        data: {
+          userId: userId,
+          latitude: data.latitude,
+          longitude: data.longitude,
+          accuracy: data.accuracy ?? 0,
+          altitude: data.altitude ?? 0,
+          speed: data.speed ?? 0,
+          heading: data.heading ?? 0,
+          timestamp: Date.now(),
+        }
+      }));
+    }
+  }
+}
+
+// v1.52.5+ 管理员请求App端开始GPS上报
+function handleAdminRequestGpsStart(ws, data) {
+  const targetUserId = data.userId;
+  if (!targetUserId) return;
+
+  // 查找目标用户的App WebSocket连接
+  let appWs = null;
+  for (const [clientWs, info] of userWsClients) {
+    if (info.userId == targetUserId && clientWs.readyState === WebSocket.OPEN) {
+      appWs = clientWs;
+      break;
+    }
+  }
+
+  if (!appWs) {
+    ws.send(JSON.stringify({ type: 'gps_error', data: { message: '用户不在线，无法请求GPS定位' } }));
+    return;
+  }
+
+  // 发送GPS开始请求到App端
+  appWs.send(JSON.stringify({ type: 'gps_start_request', data: {} }));
+
+  // 同时发送当前已有的GPS数据给管理员
+  const existingGps = userGpsData.get(targetUserId);
+  if (existingGps) {
+    ws.send(JSON.stringify({ type: 'gps_position', data: existingGps }));
+  }
+
+  console.log(`管理员请求GPS定位: userId=${targetUserId}`);
+}
+
+// v1.52.5+ 管理员请求App端停止GPS上报
+function handleAdminRequestGpsStop(ws, data) {
+  const targetUserId = data.userId;
+  if (!targetUserId) return;
+
+  // 查找目标用户的App WebSocket连接
+  let appWs = null;
+  for (const [clientWs, info] of userWsClients) {
+    if (info.userId == targetUserId && clientWs.readyState === WebSocket.OPEN) {
+      appWs = clientWs;
+      break;
+    }
+  }
+
+  if (appWs) {
+    appWs.send(JSON.stringify({ type: 'gps_stop_request', data: {} }));
+  }
+
+  console.log(`管理员停止GPS定位: userId=${targetUserId}`);
+}
+
 // 处理WebSocket断开连接
 function handleWsDisconnect(ws) {
   // 清理摄像头推流相关连接
@@ -2415,6 +2757,168 @@ function getNetworkInfo() {
   });
   return result;
 }
+
+// ============================================================
+// v1.52.3+ 网址解析 API
+// 使用 axios + cheerio 爬取网页并提取结构化信息
+// ============================================================
+app.post('/api/url-parse', async (req, res) => {
+  const { url } = req.body;
+  if (!url) {
+    return res.status(400).json({ error: '请提供网址' });
+  }
+
+  // 校验 URL 格式
+  let targetUrl = url.trim();
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    targetUrl = 'https://' + targetUrl;
+  }
+
+  try {
+    new URL(targetUrl);
+  } catch {
+    return res.status(400).json({ error: '网址格式不正确' });
+  }
+
+  try {
+    // 发起请求，设置 User-Agent 避免被反爬
+    const response = await axios.get(targetUrl, {
+      timeout: 15000,
+      maxRedirects: 5,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      },
+      responseType: 'text',
+      // 不验证证书，兼容更多网站
+      httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
+    });
+
+    const html = response.data;
+    const $ = cheerio.load(html);
+
+    // 提取页面标题
+    const title = $('title').text().trim() ||
+                  $('meta[property="og:title"]').attr('content')?.trim() ||
+                  '';
+
+    // 提取描述
+    const description = $('meta[name="description"]').attr('content')?.trim() ||
+                        $('meta[property="og:description"]').attr('content')?.trim() ||
+                        '';
+
+    // 提取关键词
+    const keywords = $('meta[name="keywords"]').attr('content')?.trim() || '';
+
+    // 提取页面图标
+    const favicon = $('link[rel="icon"]').attr('href') ||
+                    $('link[rel="shortcut icon"]').attr('href') ||
+                    '/favicon.ico';
+
+    // 提取所有链接
+    const links = [];
+    $('a[href]').each((_, el) => {
+      const href = $(el).attr('href');
+      const text = $(el).text().trim();
+      if (href && text && !href.startsWith('#') && !href.startsWith('javascript:')) {
+        links.push({ text, href });
+      }
+    });
+
+    // 提取标题结构（h1-h6）
+    const headings = [];
+    for (let level = 1; level <= 6; level++) {
+      $(`h${level}`).each((_, el) => {
+        const text = $(el).text().trim();
+        if (text) {
+          headings.push({ level, text });
+        }
+      });
+    }
+
+    // 提取所有图片
+    const images = [];
+    $('img[src]').each((_, el) => {
+      const src = $(el).attr('src');
+      const alt = $(el).attr('alt')?.trim() || '';
+      if (src) {
+        images.push({ src, alt });
+      }
+    });
+
+    // 提取正文文本（移除 script/style 标签后）
+    $('script, style, noscript, iframe, nav, footer, header').remove();
+    const bodyText = $('body').text().replace(/\s{2,}/g, '\n').trim();
+    // 截取前 5000 字符
+    const textPreview = bodyText.substring(0, 5000);
+
+    // 统计信息
+    const wordCount = bodyText.length;
+    const linkCount = links.length;
+    const imageCount = images.length;
+    const headingCount = headings.length;
+
+    // 提取 Open Graph 信息
+    const ogImage = $('meta[property="og:image"]').attr('content')?.trim() || '';
+    const ogType = $('meta[property="og:type"]').attr('content')?.trim() || '';
+    const ogSiteName = $('meta[property="og:site_name"]').attr('content')?.trim() || '';
+
+    // 提取结构化数据（JSON-LD）
+    const jsonLdScripts = [];
+    $('script[type="application/ld+json"]').each((_, el) => {
+      try {
+        const parsed = JSON.parse($(el).html());
+        jsonLdScripts.push(parsed);
+      } catch {}
+    });
+
+    // 构建结果
+    const result = {
+      url: targetUrl,
+      finalUrl: response.request?.res?.responseUrl || targetUrl,
+      statusCode: response.status,
+      title,
+      description,
+      keywords,
+      favicon,
+      ogImage,
+      ogType,
+      ogSiteName,
+      headings: headings.slice(0, 50),    // 最多 50 个标题
+      links: links.slice(0, 100),          // 最多 100 个链接
+      images: images.slice(0, 30),         // 最多 30 张图片
+      textPreview,
+      stats: {
+        wordCount,
+        linkCount,
+        imageCount,
+        headingCount,
+        headingsByLevel: {
+          h1: headings.filter(h => h.level === 1).length,
+          h2: headings.filter(h => h.level === 2).length,
+          h3: headings.filter(h => h.level === 3).length,
+          h4: headings.filter(h => h.level === 4).length,
+          h5: headings.filter(h => h.level === 5).length,
+          h6: headings.filter(h => h.level === 6).length,
+        },
+      },
+      jsonLd: jsonLdScripts.length > 0 ? jsonLdScripts : undefined,
+    };
+
+    console.log(`[网址解析] 成功: ${targetUrl} (${wordCount} 字符, ${linkCount} 链接)`);
+    res.json(result);
+  } catch (err) {
+    console.error(`[网址解析] 失败: ${targetUrl}`, err.message);
+    if (err.code === 'ECONNABORTED') {
+      return res.status(408).json({ error: '请求超时，请检查网址是否正确或网络连接' });
+    }
+    if (err.response?.status) {
+      return res.status(502).json({ error: `目标网站返回错误: HTTP ${err.response.status}` });
+    }
+    res.status(500).json({ error: '网址解析失败: ' + (err.message || '未知错误') });
+  }
+});
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   const netInfo = getNetworkInfo();

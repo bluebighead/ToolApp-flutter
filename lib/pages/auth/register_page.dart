@@ -32,7 +32,6 @@ class _RegisterPageState extends State<RegisterPage> {
   bool _isSendingCode = false; // 是否正在发送验证码
   int _countdown = 0; // 倒计时秒数
   Timer? _countdownTimer; // 倒计时定时器
-  bool _isCodeVerified = false; // 验证码是否已验证通过
 
   @override
   void dispose() {
@@ -67,13 +66,7 @@ class _RegisterPageState extends State<RegisterPage> {
 
     if (result['success'] == 'true') {
       final message = result['message'] ?? '验证码已发送到您的邮箱';
-      final serverCode = result['code'];
-      if (serverCode != null) {
-        // 服务器返回了验证码，直接显示给用户
-        _showSnackBar('$message (验证码: $serverCode)');
-      } else {
-        _showSnackBar(message);
-      }
+      _showSnackBar(message);
       // 开始60秒倒计时
       _startCountdown();
     } else {
@@ -94,45 +87,24 @@ class _RegisterPageState extends State<RegisterPage> {
     });
   }
 
-  // 验证验证码
-  Future<void> _onVerifyCode() async {
-    final email = _emailController.text.trim();
-    final code = _verificationCodeController.text.trim();
-
-    if (code.isEmpty) {
-      _showSnackBar('请输入验证码');
-      return;
-    }
-
-    setState(() => _isLoading = true);
-
-    final error = await AuthService.instance.verifyCode(email, code);
-
-    if (!mounted) return;
-    setState(() => _isLoading = false);
-
-    if (error != null) {
-      _showSnackBar(error);
-      setState(() => _isCodeVerified = false);
-    } else {
-      _showSnackBar('验证码验证成功');
-      setState(() => _isCodeVerified = true);
-    }
-  }
-
-  // 执行注册
+  // 执行注册（v1.52.0+ 必须携带验证码）
   Future<void> _onRegister() async {
     final email = _emailController.text.trim();
     final password = _passwordController.text;
     final confirmPassword = _confirmPasswordController.text;
+    final code = _verificationCodeController.text.trim();
 
     // 输入校验
     if (email.isEmpty) {
       _showSnackBar('请输入邮箱');
       return;
     }
-    if (!_isCodeVerified) {
-      _showSnackBar('请先验证邮箱验证码');
+    if (!RegExp(r'^[\w-]+(\.[\w-]+)*@[\w-]+(\.[\w-]+)+$').hasMatch(email)) {
+      _showSnackBar('请输入有效的邮箱地址');
+      return;
+    }
+    if (code.isEmpty) {
+      _showSnackBar('请输入验证码');
       return;
     }
     if (password.isEmpty) {
@@ -150,10 +122,11 @@ class _RegisterPageState extends State<RegisterPage> {
 
     setState(() => _isLoading = true);
 
-    // 调用认证服务注册
+    // 调用认证服务注册，携带验证码
     final error = await AuthService.instance.signUp(
       email: email,
       password: password,
+      verificationCode: code,
     );
 
     if (!mounted) return;
@@ -263,42 +236,20 @@ class _RegisterPageState extends State<RegisterPage> {
                 ),
                 const SizedBox(height: 16),
 
-                // 验证码输入框 + 验证按钮
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _verificationCodeController,
-                        keyboardType: TextInputType.number,
-                        maxLength: 6,
-                        decoration: InputDecoration(
-                          labelText: '验证码',
-                          hintText: '请输入6位验证码',
-                          prefixIcon: const Icon(Icons.security),
-                          counterText: '',
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                      ),
+                // 验证码输入框（v1.52.0+ 简化：注册时由服务器验证）
+                TextField(
+                  controller: _verificationCodeController,
+                  keyboardType: TextInputType.number,
+                  maxLength: 6,
+                  decoration: InputDecoration(
+                    labelText: '验证码',
+                    hintText: '请输入邮箱收到的6位验证码',
+                    prefixIcon: const Icon(Icons.security),
+                    counterText: '',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      width: 100,
-                      child: FilledButton(
-                        onPressed: _isCodeVerified ? null : _onVerifyCode,
-                        style: FilledButton.styleFrom(
-                          backgroundColor: _isCodeVerified
-                              ? Colors.green
-                              : null,
-                        ),
-                        child: Text(
-                          _isCodeVerified ? '已验证' : '验证',
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
                 const SizedBox(height: 16),
 

@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
 import '../../utils/app_logger.dart';
 import '../../utils/app_settings.dart';
+import 'forgot_password_page.dart';
 import 'register_page.dart';
 
 class LoginPage extends StatefulWidget {
@@ -544,7 +545,7 @@ class _LoginPageState extends State<LoginPage> {
                 ),
                 const SizedBox(height: 16),
 
-                // 注册入口
+                // 注册入口 + 忘记密码
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -555,6 +556,19 @@ class _LoginPageState extends State<LoginPage> {
                     TextButton(
                       onPressed: _onGoRegister,
                       child: const Text('注册新账号'),
+                    ),
+                    Text(
+                      '|',
+                      style: TextStyle(color: Colors.grey.shade400),
+                    ),
+                    TextButton(
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => const ForgotPasswordPage()),
+                        );
+                      },
+                      child: const Text('忘记密码'),
                     ),
                   ],
                 ),

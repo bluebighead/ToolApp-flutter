@@ -1,6 +1,6 @@
 // 工具箱 App 首页
 // 采用 GridView 展示所有可用工具
-// 后续添加新工具时只需在 _toolList 列表中追加 ToolItem
+// 后续添加新工具时只需在 _dailyTools 或 _geekTools 列表中追加 ToolItem
 // 左上角提供三明治菜单按钮，点击后从左向右滑出抽屉
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,6 +13,7 @@ import '../services/auth_service.dart';
 import '../services/session_tracker.dart';
 import '../utils/app_info.dart';
 import '../utils/app_logger.dart';
+import 'account/account_page.dart';
 import '../utils/app_settings.dart';
 import '../widgets/tool_card.dart';
 import 'about_page.dart';
@@ -22,32 +23,56 @@ import 'settings_page.dart';
 import 'video_convert_page.dart';
 import 'heart_rate_page.dart';
 import 'fun_tools_page.dart';
+import 'device_inspect_page.dart';
+import 'device_inspect/package_viewer_page.dart';
+import 'device_inspect/electronic_calc_page.dart';
+import 'encryptor_page.dart';
+import 'encryptor/url_parser_page.dart';
+import 'compressor_entry_page.dart';
 
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
 
-  // 工具列表：第一期仅含分贝测试仪
-  // 后续添加新工具只需在此处追加一项
-  static final List<ToolItem> _toolList = [
+  // 日常小白区工具列表
+  // 面向普通用户的日常工具，开箱即用
+  static final List<ToolItem> _dailyTools = [
+    // 压缩器入口（包含视频、音频、图片压缩）
+    ToolItem(
+      name: '压缩器',
+      icon: Icons.compress,
+      color: Colors.cyan,
+      category: ToolCategory.daily,
+      subtitle: '视频 · 音频 · 图片',
+      pageBuilder: (_) => const CompressorEntryPage(),
+    ),
     ToolItem(
       name: '分贝测试仪',
       icon: Icons.graphic_eq,
       color: Colors.indigo,
+      category: ToolCategory.daily,
       pageBuilder: (_) => const DecibelPage(),
     ),
     ToolItem(
       name: '网速测试',
       icon: Icons.network_check,
       color: Colors.teal,
+      category: ToolCategory.daily,
       pageBuilder: (_) => const NetworkSpeedPage(),
     ),
+    ToolItem(
+      name: '趣味工具',
+      icon: Icons.toys,
+      color: Colors.deepPurple,
+      category: ToolCategory.daily,
+      subtitle: '骰子 · 麻将 · 经期',
+      pageBuilder: (_) => const FunToolsPage(),
+    ),
+    // 从极客区迁移过来的工具
     ToolItem(
       name: '视频格式转换',
       icon: Icons.video_settings,
       color: Colors.deepOrange,
-      // v1.6.34+ 标记为 Beta：视频格式转换功能还在实验室阶段，
-      //   暂停/取消/状态机还存在一些边界场景未完全收敛，
-      //   标 Beta 提示用户该功能尚未完全稳定
+      category: ToolCategory.daily,
       isBeta: true,
       pageBuilder: (_) => const VideoConvertPage(),
     ),
@@ -55,15 +80,135 @@ class HomePage extends StatelessWidget {
       name: '心率广播接收器',
       icon: Icons.favorite,
       color: Colors.red,
+      category: ToolCategory.daily,
       pageBuilder: (_) => const HeartRatePage(),
     ),
+  ];
+
+  // 极客区工具列表
+  // 面向专业/极客用户的高级工具
+  // v1.35.0+ 新增：安装包免压查看器
+  // v1.52.3+ 新增：网址解析工具
+  static final List<ToolItem> _geekTools = [
     ToolItem(
-      name: '趣味工具',
-      icon: Icons.toys,
+      name: '设备检修工具',
+      icon: Icons.build,
+      color: Colors.blueGrey,
+      category: ToolCategory.geek,
+      subtitle: '摄像头 · 坏点 · 指纹',
+      pageBuilder: (_) => const DeviceInspectPage(),
+    ),
+    ToolItem(
+      name: '加解密工具',
+      icon: Icons.enhanced_encryption,
+      color: Colors.amber,
+      category: ToolCategory.geek,
+      subtitle: '摩斯电码 · 扫码传信 · 解码',
+      pageBuilder: (_) => const EncryptorPage(),
+    ),
+    ToolItem(
+      name: '安装包免压查看',
+      icon: Icons.archive,
       color: Colors.deepPurple,
-      pageBuilder: (_) => const FunToolsPage(),
+      category: ToolCategory.geek,
+      subtitle: 'ZIP · APK · 7z',
+      pageBuilder: (_) => const PackageViewerPage(),
+    ),
+    ToolItem(
+      name: '电子元件计算',
+      icon: Icons.electrical_services,
+      color: Colors.brown,
+      category: ToolCategory.geek,
+      subtitle: '色环电阻 · 贴片 · 电容',
+      pageBuilder: (_) => const ElectronicCalcPage(),
+    ),
+    ToolItem(
+      name: '网址解析',
+      icon: Icons.web,
+      color: Colors.blue,
+      category: ToolCategory.geek,
+      subtitle: '爬取 · 提取 · 分析',
+      pageBuilder: (_) => const UrlParserPage(),
     ),
   ];
+
+  // 构建区块：标题行 + 工具网格
+  // accentColor 为区块标识色，用于标题左侧竖线和文字着色
+  Widget _buildZone({
+    required BuildContext context,
+    required String title,
+    required String subtitle,
+    required Color accentColor,
+    required List<ToolItem> tools,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 区块标题行：左侧彩色竖线 + 标题 + 副标题
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Row(
+            children: [
+              // 左侧彩色竖线标识
+              Container(
+                width: 4,
+                height: 20,
+                decoration: BoxDecoration(
+                  color: accentColor,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(width: 8),
+              // 区块标题
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: accentColor,
+                ),
+              ),
+              const SizedBox(width: 8),
+              // 副标题描述
+              Text(
+                subtitle,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey.shade500,
+                ),
+              ),
+            ],
+          ),
+        ),
+        // 工具卡片网格
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
+            childAspectRatio: 0.85,
+          ),
+          itemCount: tools.length,
+          itemBuilder: (context, index) {
+            final tool = tools[index];
+            return ToolCard(
+              tool: tool,
+              onTap: () {
+                AppLogger.i('HomePage', '点击工具：${tool.name}');
+                SessionTracker.instance.logPageView(tool.name);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: tool.pageBuilder),
+                );
+              },
+            );
+          },
+        ),
+      ],
+    );
+  }
 
   // 构建右上角"软件说明"按钮：圆形背景 + 问号图标
   Widget _buildAboutButton(BuildContext context) {
@@ -121,7 +266,7 @@ class HomePage extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // 抽屉顶部：应用 Logo + 名称 + 用户信息
+            // 抽屉顶部：应用 Logo + 名称 + 用户信息（点击进入账号设置）
             Container(
               padding: const EdgeInsets.fromLTRB(20, 24, 20, 20),
               decoration: BoxDecoration(
@@ -133,65 +278,76 @@ class HomePage extends StatelessWidget {
                   ),
                 ),
               ),
-              child: Row(
-                children: [
-                  // 应用 Logo
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.primary,
-                      shape: BoxShape.circle,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () {
+                  AppLogger.i('HomePage', '点击侧边栏顶部 -> 账号设置');
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const AccountPage()),
+                  );
+                },
+                child: Row(
+                  children: [
+                    // 应用 Logo
+                    Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primary,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        isGuest
+                            ? Icons.person_outline
+                            : Icons.handyman_outlined,
+                        color: Colors.white,
+                        size: 26,
+                      ),
                     ),
-                    child: Icon(
-                      isGuest
-                          ? Icons.person_outline
-                          : Icons.handyman_outlined,
-                      color: Colors.white,
-                      size: 26,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  // 应用名称 + 用户邮箱/游客标识
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '实用工具箱',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                            color: theme.colorScheme.onSurface,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          displayEmail,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isGuest
-                                ? Colors.orange.shade700
-                                : Colors.grey.shade600,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        if (displayHint.isNotEmpty) ...[
-                          const SizedBox(height: 1),
+                    const SizedBox(width: 12),
+                    // 应用名称 + 用户邮箱/游客标识
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
                           Text(
-                            displayHint,
+                            '实用工具箱',
                             style: TextStyle(
-                              fontSize: 10,
-                              color: isGuest
-                                  ? Colors.orange.shade600
-                                  : Colors.grey.shade500,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: theme.colorScheme.onSurface,
                             ),
                           ),
+                          const SizedBox(height: 2),
+                          Text(
+                            displayEmail,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: isGuest
+                                  ? Colors.orange.shade700
+                                  : Colors.grey.shade600,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (displayHint.isNotEmpty) ...[
+                            const SizedBox(height: 1),
+                            Text(
+                              displayHint,
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: isGuest
+                                    ? Colors.orange.shade600
+                                    : Colors.grey.shade500,
+                              ),
+                            ),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
             // 游客模式下显示"登录账号"入口
@@ -333,34 +489,30 @@ class HomePage extends StatelessWidget {
           _buildAboutButton(context),
         ],
       ),
-      // 主体：工具网格视图
-      body: Padding(
+      // 主体：双区块布局 — 日常小白区 + 极客区
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
-        child: GridView.builder(
-          // 每行显示 3 个工具
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
-            crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
-            childAspectRatio: 0.85,
-          ),
-          itemCount: _toolList.length,
-          itemBuilder: (context, index) {
-            final tool = _toolList[index];
-            return ToolCard(
-              tool: tool,
-              onTap: () {
-                // 点击工具卡片：跳转到对应页面
-                AppLogger.i('HomePage', '点击工具：${tool.name}');
-                // 记录页面访问活动
-                SessionTracker.instance.logPageView(tool.name);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: tool.pageBuilder),
-                );
-              },
-            );
-          },
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 日常小白区
+            _buildZone(
+              context: context,
+              title: '日常小白区',
+              subtitle: '简单好用，开箱即用',
+              accentColor: const Color(0xFF6750A4),
+              tools: _dailyTools,
+            ),
+            const SizedBox(height: 24),
+            // 极客区
+            _buildZone(
+              context: context,
+              title: '极客区',
+              subtitle: '专业工具，硬核玩家',
+              accentColor: const Color(0xFFFF6D00),
+              tools: _geekTools,
+            ),
+          ],
         ),
       ),
     );
