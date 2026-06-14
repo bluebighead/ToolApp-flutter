@@ -43,6 +43,43 @@ class LogEntry {
   }
 }
 
+/// 环形缓冲区：O(1) 添加，固定容量，自动覆盖最旧条目
+class _RingBuffer<T> {
+  final List<T?> _buffer;
+  int _head = 0;
+  int _size = 0;
+
+  _RingBuffer(int capacity) : _buffer = List<T?>.filled(capacity, null);
+
+  int get length => _size;
+  int get capacity => _buffer.length;
+
+  void add(T value) {
+    _buffer[_head] = value;
+    _head = (_head + 1) % _buffer.length;
+    if (_size < _buffer.length) _size++;
+  }
+
+  List<T> toList() {
+    final result = <T>[];
+    final start = _size < _buffer.length ? 0 : _head;
+    for (int i = 0; i < _size; i++) {
+      final idx = (start + i) % _buffer.length;
+      final item = _buffer[idx];
+      if (item != null) result.add(item);
+    }
+    return result;
+  }
+
+  void clear() {
+    for (int i = 0; i < _buffer.length; i++) {
+      _buffer[i] = null;
+    }
+    _head = 0;
+    _size = 0;
+  }
+}
+
 /// 应用日志器
 class AppLogger {
   // Flutter 日志中显示的根名称，便于在 Logcat 中过滤
@@ -51,11 +88,11 @@ class AppLogger {
   // 内存中最多缓存的日志条数，超出后丢弃最早的日志
   static const int _maxBufferSize = 500;
 
-  // 内存日志缓存（外部不可直接修改）
-  static final List<LogEntry> _buffer = <LogEntry>[];
+  // 内存日志缓存（环形缓冲区，O(1) 添加）
+  static final _RingBuffer<LogEntry> _buffer = _RingBuffer<LogEntry>(_maxBufferSize);
 
   /// 对外暴露的只读日志列表
-  static List<LogEntry> get buffer => List.unmodifiable(_buffer);
+  static List<LogEntry> get buffer => _buffer.toList();
 
   /// 清空内存日志缓存
   static void clear() {
@@ -79,10 +116,6 @@ class AppLogger {
       stackTrace: stackTrace,
     );
     _buffer.add(entry);
-    // 超出容量上限则丢弃最早日志
-    if (_buffer.length > _maxBufferSize) {
-      _buffer.removeRange(0, _buffer.length - _maxBufferSize);
-    }
 
     // 输出到 dart:developer，便于在 IDE 调试控制台与 Android Logcat 中查看
     developer.log(

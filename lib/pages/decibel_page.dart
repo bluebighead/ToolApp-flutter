@@ -32,6 +32,10 @@ class _DecibelPageState extends State<DecibelPage> {
   // 错误信息（null 表示无错误）
   String? _errorMessage;
 
+  // 节流：限制 UI 刷新频率，避免音频帧（~30Hz）触发过度重建
+  DateTime _lastUiUpdate = DateTime(2000);
+  static const Duration _uiThrottle = Duration(milliseconds: 66); // ~15fps 上限
+
   @override
   void dispose() {
     // 页面销毁时取消订阅，停止采集，防止后台占用麦克风
@@ -102,6 +106,18 @@ class _DecibelPageState extends State<DecibelPage> {
       AppLogger.w('DecibelPage', '收到异常分贝值：$db');
       return;
     }
+    // 节流：限制 UI 刷新频率，避免音频帧（~30Hz）触发过度重建
+    final now = DateTime.now();
+    final shouldUpdate = now.difference(_lastUiUpdate) >= _uiThrottle;
+    if (!shouldUpdate) {
+      // 不在 UI 刷新窗口内，仅保存数据不触发重建
+      _history.add(db);
+      if (_history.length > _maxPoints) {
+        _history.removeAt(0);
+      }
+      return;
+    }
+    _lastUiUpdate = now;
     setState(() {
       _currentDb = db;
       _history.add(db);
@@ -190,21 +206,23 @@ class _DecibelPageState extends State<DecibelPage> {
                 ),
               // 中间：折线图
               Expanded(
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.05),
-                        blurRadius: 10,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
+                child: RepaintBoundary(
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.05),
+                          blurRadius: 10,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    // 传不可变副本以避免图表内部修改状态
+                    child: DecibelChart(data: List.unmodifiable(_history)),
                   ),
-                  // 传不可变副本以避免图表内部修改状态
-                  child: DecibelChart(data: List.unmodifiable(_history)),
                 ),
               ),
               const SizedBox(height: 16),

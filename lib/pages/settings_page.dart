@@ -2079,6 +2079,19 @@ class _SettingsPageState extends State<SettingsPage> {
                       appSettings.setDarkMode(v);
                     },
                   ),
+                  const SizedBox(height: 8),
+                  // 3. AI助手开关
+                  _settingTile(
+                    context,
+                    icon: Icons.auto_awesome,
+                    title: 'AI助手',
+                    subtitle: '开启后显示AI悬浮按钮，可与AI对话获取帮助（默认关闭）',
+                    value: appSettings.aiEnabled,
+                    onChanged: (v) {
+                      AppLogger.i('SettingsPage', '切换AI助手 -> $v');
+                      appSettings.setAiEnabled(v);
+                    },
+                  ),
                   const SizedBox(height: 20),
                   // 分组标题：视频转换
                   Padding(

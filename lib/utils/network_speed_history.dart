@@ -2,10 +2,10 @@
 // 负责 PingRecord 的 JSON 序列化、SharedPreferences 持久化、容量裁剪、统计计算
 // 设计文档：docs/superpowers/specs/2026-06-06-toolapp-networkspeed-design.md
 import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_logger.dart';
 import 'user_data_manager.dart';
+import 'app_settings.dart';
 import '../services/auth_service.dart';
 import '../services/sync_service.dart';
 
@@ -135,7 +135,7 @@ class NetworkSpeedHistory {
 
   /// 保存一条记录：序列化、追加、裁剪、写回
   static Future<void> save(PingRecord record) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     // 读取现有记录
     final existing = await loadAll();
     // 追加新记录
@@ -153,7 +153,7 @@ class NetworkSpeedHistory {
 
   /// 读取全部记录：按 timestamp 倒序（最新在前）
   static Future<List<PingRecord>> loadAll() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final jsonString = prefs.getString(_key);
     if (jsonString == null || jsonString.isEmpty) {
       return [];
@@ -182,7 +182,7 @@ class NetworkSpeedHistory {
 
   /// 清空全部记录
   static Future<void> clear() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.remove(_key);
   }
 
@@ -195,7 +195,7 @@ class NetworkSpeedHistory {
     localList.addAll(newRecords);
     localList.sort((a, b) => b.timestamp.compareTo(a.timestamp));
     final trimmed = localList.take(_maxRecords).toList();
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final jsonList = trimmed.map((r) => r.toJson()).toList();
     await prefs.setString(_key, jsonEncode(jsonList));
     AppLogger.i('NetworkSpeedHistory', '从服务器合并网速历史 ${newRecords.length} 条');

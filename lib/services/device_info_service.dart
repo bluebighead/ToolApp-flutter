@@ -9,7 +9,6 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../utils/app_info.dart';
 import '../utils/app_logger.dart';
@@ -202,7 +201,7 @@ class DeviceInfoService {
   /// 读取上次上传时间（毫秒时间戳）
   Future<int?> _getLastUploadTs() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       return prefs.getInt(_kLastUploadTsKey);
     } catch (_) {
       return null;
@@ -212,7 +211,7 @@ class DeviceInfoService {
   /// 写入本次上传时间
   Future<void> _setLastUploadTs(int ts) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       await prefs.setInt(_kLastUploadTsKey, ts);
     } catch (_) {}
   }

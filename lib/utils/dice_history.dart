@@ -8,10 +8,9 @@
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:shared_preferences/shared_preferences.dart';
-
 import 'app_logger.dart';
 import 'user_data_manager.dart';
+import 'app_settings.dart';
 import '../services/auth_service.dart';
 import '../services/sync_service.dart';
 
@@ -118,7 +117,7 @@ class DiceHistory {
   static Future<List<DiceRecord>> loadAll() async {
     if (_cache != null) return List.of(_cache!);
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       final raw = prefs.getString(_prefsKey);
       if (raw == null || raw.isEmpty) {
         _cache = [];
@@ -159,7 +158,7 @@ class DiceHistory {
   /// 清空所有历史
   static Future<void> clear() async {
     _cache = [];
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.remove(_prefsKey);
     AppLogger.i(_logTag, '清空所有掷骰子历史');
   }
@@ -207,7 +206,7 @@ class DiceHistory {
   /// 持久化到 SharedPreferences
   static Future<void> _persist(List<DiceRecord> list) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       final raw = jsonEncode(list.map((e) => e.toJson()).toList());
       await prefs.setString(_prefsKey, raw);
     } catch (e, st) {

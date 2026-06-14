@@ -770,6 +770,75 @@ class MainActivity : FlutterFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // 注册 BLE 外设模式通道（模拟 BLE 从机广播）
+        val blePeripheralChannel = "com.example.toolapp/ble_peripheral"
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, blePeripheralChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "startAdvertising" -> {
+                        val name = call.argument<String>("name") ?: "ToolApp BLE"
+                        val serviceUuids = call.argument<List<String>>("serviceUuids") ?: emptyList()
+                        val includeDeviceName = call.argument<Boolean>("includeDeviceName") ?: true
+                        try {
+                            val adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
+                            if (adapter == null) {
+                                result.error("NO_BT", "设备不支持蓝牙", null)
+                                return@setMethodCallHandler
+                            }
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                                val advertiser = adapter.bluetoothLeAdvertiser
+                                if (advertiser == null) {
+                                    result.error("NO_LE", "设备不支持 BLE 外设模式", null)
+                                    return@setMethodCallHandler
+                                }
+                                val settings = android.bluetooth.le.AdvertiseSettings.Builder()
+                                    .setAdvertiseMode(android.bluetooth.le.AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
+                                    .setTxPowerLevel(android.bluetooth.le.AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+                                    .setConnectable(false)
+                                    .build()
+                                val dataBuilder = android.bluetooth.le.AdvertiseData.Builder()
+                                    .setIncludeDeviceName(includeDeviceName)
+                                for (uuid in serviceUuids) {
+                                    try {
+                                        dataBuilder.addServiceUuid(android.os.ParcelUuid.fromString(uuid))
+                                    } catch (_: Throwable) {}
+                                }
+                                advertiser.startAdvertising(settings, dataBuilder.build(),
+                                    object : android.bluetooth.le.AdvertiseCallback() {
+                                        override fun onStartSuccess(settingsInEffect: android.bluetooth.le.AdvertiseSettings?) {
+                                            Log.i(TAG, "BLE 外设广播启动成功")
+                                            result.success(true)
+                                        }
+                                        override fun onStartFailure(errorCode: Int) {
+                                            Log.e(TAG, "BLE 外设广播启动失败: errorCode=$errorCode")
+                                            result.error("ADV_FAIL", "广播启动失败: $errorCode", null)
+                                        }
+                                    }
+                                )
+                            } else {
+                                result.error("API_LOW", "Android 5.0+ 才支持 BLE 外设模式", null)
+                            }
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "启动 BLE 外设广播异常", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    "stopAdvertising" -> {
+                        try {
+                            val adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
+                            if (adapter != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                                adapter.bluetoothLeAdvertiser?.stopAdvertising(null)
+                            }
+                            result.success(true)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "停止 BLE 外设广播异常", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
     }
 
     // ----------------------------------------------------------------------

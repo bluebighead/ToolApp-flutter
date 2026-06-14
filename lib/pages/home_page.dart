@@ -26,12 +26,23 @@ import 'fun_tools_page.dart';
 import 'device_inspect_page.dart';
 import 'device_inspect/package_viewer_page.dart';
 import 'device_inspect/electronic_calc_page.dart';
+import 'device_inspect/bluetooth_debug_page.dart';
+import 'device_inspect/nfc_reader_page.dart';
 import 'encryptor_page.dart';
 import 'encryptor/url_parser_page.dart';
 import 'compressor_entry_page.dart';
 
-class HomePage extends StatelessWidget {
+class HomePage extends StatefulWidget {
   const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  // 跟踪水平手势起始位置，用于全屏左滑打开 Drawer
+  double _dragStartX = 0;
+  bool _isDragging = false;
 
   // 日常小白区工具列表
   // 面向普通用户的日常工具，开箱即用
@@ -129,6 +140,23 @@ class HomePage extends StatelessWidget {
       category: ToolCategory.geek,
       subtitle: '爬取 · 提取 · 分析',
       pageBuilder: (_) => const UrlParserPage(),
+    ),
+    ToolItem(
+      name: '蓝牙调试器',
+      icon: Icons.bluetooth,
+      color: Colors.lightBlue,
+      category: ToolCategory.geek,
+      isBeta: true,
+      subtitle: '扫描 · 服务 · 特征值',
+      pageBuilder: (_) => const BluetoothDebugPage(),
+    ),
+    ToolItem(
+      name: 'NFC读写器',
+      icon: Icons.nfc,
+      color: Colors.indigo,
+      category: ToolCategory.geek,
+      subtitle: '读取 · 写入 · 识别',
+      pageBuilder: (_) => const NfcReaderPage(),
     ),
   ];
 
@@ -465,10 +493,11 @@ class HomePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    AppLogger.d('HomePage', '首页 build');
     return Scaffold(
       // 左侧抽屉：菜单从左向右滑出
       drawer: _buildDrawer(context),
+      // 禁用内置边缘滑动手势，改用全屏手势检测
+      drawerEnableOpenDragGesture: false,
       // 顶部应用栏
       appBar: AppBar(
         // 左上角：三明治菜单按钮（Flutter 在指定了 drawer 时自动渲染）
@@ -490,29 +519,54 @@ class HomePage extends StatelessWidget {
         ],
       ),
       // 主体：双区块布局 — 日常小白区 + 极客区
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // 日常小白区
-            _buildZone(
-              context: context,
-              title: '日常小白区',
-              subtitle: '简单好用，开箱即用',
-              accentColor: const Color(0xFF6750A4),
-              tools: _dailyTools,
+      // 使用 Listener 监听原始指针事件，绕过手势竞技场冲突
+      // 外层 Builder 确保 context 是 Scaffold 的后代
+      body: Builder(
+        builder: (bodyContext) => Listener(
+          onPointerDown: (event) {
+            _dragStartX = event.position.dx;
+            _isDragging = true;
+          },
+          onPointerMove: (event) {
+            if (!_isDragging) return;
+            final delta = event.position.dx - _dragStartX;
+            // 滑动超过 100px 时触发打开 Drawer
+            if (delta > 100) {
+              _isDragging = false;
+              Scaffold.of(bodyContext).openDrawer();
+            }
+          },
+          onPointerUp: (_) {
+            _isDragging = false;
+          },
+          onPointerCancel: (_) {
+            _isDragging = false;
+          },
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 日常小白区
+                _buildZone(
+                  context: bodyContext,
+                  title: '日常小白区',
+                  subtitle: '简单好用，开箱即用',
+                  accentColor: const Color(0xFF6750A4),
+                  tools: _dailyTools,
+                ),
+                const SizedBox(height: 24),
+                // 极客区
+                _buildZone(
+                  context: bodyContext,
+                  title: '极客区',
+                  subtitle: '专业工具，硬核玩家',
+                  accentColor: const Color(0xFFFF6D00),
+                  tools: _geekTools,
+                ),
+              ],
             ),
-            const SizedBox(height: 24),
-            // 极客区
-            _buildZone(
-              context: context,
-              title: '极客区',
-              subtitle: '专业工具，硬核玩家',
-              accentColor: const Color(0xFFFF6D00),
-              tools: _geekTools,
-            ),
-          ],
+          ),
         ),
       ),
     );

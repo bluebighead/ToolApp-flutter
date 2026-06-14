@@ -7,7 +7,6 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 
 import '../utils/app_info.dart';
@@ -89,7 +88,7 @@ class SessionTracker extends ChangeNotifier {
         _isTracking = true;
 
         // 保存会话 ID 到本地（用于应用重启后恢复）
-        final prefs = await SharedPreferences.getInstance();
+        final prefs = AppSettings.prefs!;
         if (_sessionId != null) {
           await prefs.setInt('session_id', _sessionId!);
         }
@@ -156,9 +155,7 @@ class SessionTracker extends ChangeNotifier {
       _activityBuffer.clear();
 
       // 清除本地保存的会话 ID
-      SharedPreferences.getInstance().then((prefs) {
-        prefs.remove('session_id');
-      });
+      AppSettings.prefs!.remove('session_id');
     }
   }
 

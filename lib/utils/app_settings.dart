@@ -14,13 +14,17 @@ class AppSettings extends ChangeNotifier {
   static const String _kDarkMode = 'settings_dark_mode';
   static const String _kServerUrl = 'settings_server_url';
   static const String _kAutoSyncInterval = 'settings_auto_sync_interval';
+  static const String _kAiEnabled = 'settings_ai_enabled';
 
   // 默认服务器地址（自建轻量服务器，cpolar内网穿透公网地址）
   static const String defaultServerUrl = 'http://63e160ef.r18.cpolar.top';
   static const String _defaultServerUrl = defaultServerUrl;
 
-  // 内部 SharedPreferences 实例
-  SharedPreferences? _prefs;
+  // 内部 SharedPreferences 实例（缓存，减少重复 getInstance() 调用）
+  static SharedPreferences? _prefs;
+
+  /// 暴露缓存的 SharedPreferences 实例，供全局复用
+  static SharedPreferences? get prefs => _prefs;
 
   // 是否允许屏幕旋转（默认 false：关闭屏幕旋转）
   bool _allowRotation = false;
@@ -38,6 +42,10 @@ class AppSettings extends ChangeNotifier {
   int _autoSyncInterval = 5;
   int get autoSyncInterval => _autoSyncInterval;
 
+  // 是否启用AI助手（默认 false：关闭）
+  bool _aiEnabled = false;
+  bool get aiEnabled => _aiEnabled;
+
   // 可选的自动同步间隔列表（分钟）
   static const List<int> autoSyncIntervalOptions = [0, 5, 10, 15, 20, 30, 45, 60];
 
@@ -50,6 +58,7 @@ class AppSettings extends ChangeNotifier {
       _darkMode = _prefs?.getBool(_kDarkMode) ?? false;
       _serverUrl = _prefs?.getString(_kServerUrl) ?? _defaultServerUrl;
       _autoSyncInterval = _prefs?.getInt(_kAutoSyncInterval) ?? 5;
+      _aiEnabled = _prefs?.getBool(_kAiEnabled) ?? false;
       AppLogger.i(
         'AppSettings',
         '设置已加载 - 屏幕旋转: $_allowRotation, 暗色模式: $_darkMode, 服务器: $_serverUrl',
@@ -105,6 +114,15 @@ class AppSettings extends ChangeNotifier {
     _autoSyncInterval = value;
     AppLogger.i('AppSettings', '自动同步间隔 -> $value 分钟');
     await _prefs?.setInt(_kAutoSyncInterval, value);
+    notifyListeners();
+  }
+
+  // 设置是否启用AI助手
+  Future<void> setAiEnabled(bool value) async {
+    if (_aiEnabled == value) return;
+    _aiEnabled = value;
+    AppLogger.i('AppSettings', 'AI助手 -> $value');
+    await _prefs?.setBool(_kAiEnabled, value);
     notifyListeners();
   }
 

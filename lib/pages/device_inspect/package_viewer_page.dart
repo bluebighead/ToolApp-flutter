@@ -85,6 +85,9 @@ class _PackageViewerPageState extends State<PackageViewerPage> {
   // 文件列表
   List<ArchiveFile> _files = [];
 
+  // 文件总大小缓存（避免 build 中 O(n) 计算）
+  int _totalSize = 0;
+
   // 当前浏览目录路径
   String _currentDir = '';
 
@@ -523,8 +526,8 @@ class _PackageViewerPageState extends State<PackageViewerPage> {
   Widget _buildFileListView() {
     final files = _filteredFiles;
 
-    // 统计信息
-    final totalSize = _files.fold<int>(0, (sum, f) => sum + f.size);
+    // 统计信息（使用缓存值，避免 build 中 O(n) 计算）
+    final totalSize = _totalSize;
 
     return Column(
       children: [
@@ -947,6 +950,7 @@ class _PackageViewerPageState extends State<PackageViewerPage> {
           _isApk = isApk;
           _apkInfo = apkInfo;
           _files = files;
+          _totalSize = files.fold<int>(0, (sum, f) => sum + f.size);
           _loading = false;
           _error = null;
           _currentDir = '';

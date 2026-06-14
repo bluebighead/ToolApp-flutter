@@ -198,6 +198,9 @@ class _DicePainter extends CustomPainter {
   final bool isAnimating;
   final Size diceSize; // 骰子实际尺寸
 
+  // 复用 Random 实例，避免每次 paint 创建新对象造成 GC 压力
+  static final math.Random _random = math.Random();
+
   _DicePainter({
     required this.diceType,
     required this.result,
@@ -233,7 +236,7 @@ class _DicePainter extends CustomPainter {
       _drawDots(canvas, size, result!);
     } else if (isAnimating) {
       // 动画中显示随机点数（模拟快速变化）
-      _drawDots(canvas, size, (math.Random().nextInt(diceType.sides) + 1));
+      _drawDots(canvas, size, (_random.nextInt(diceType.sides) + 1));
     } else {
       // 没有结果时显示问号
       _drawQuestionMark(canvas, center);
@@ -360,6 +363,7 @@ class _DicePainter extends CustomPainter {
   bool shouldRepaint(covariant _DicePainter oldDelegate) {
     return oldDelegate.result != result ||
         oldDelegate.isAnimating != isAnimating ||
-        oldDelegate.diceSize != diceSize;
+        oldDelegate.diceSize != diceSize ||
+        oldDelegate.diceType != diceType;
   }
 }

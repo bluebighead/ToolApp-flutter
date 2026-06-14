@@ -15,11 +15,11 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:html/parser.dart' as html_parser;
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path/path.dart' as p;
 import 'package:gbk_codec/gbk_codec.dart';
 
 import '../utils/app_logger.dart';
+import '../utils/app_settings.dart';
 
 // ============================================================
 // 阅读进度数据模型
@@ -78,7 +78,7 @@ class _SeriousSettings {
 
   /// 从 SharedPreferences 加载
   static Future<_SeriousSettings> load() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     return _SeriousSettings(
       autoSaveEnabled: prefs.getBool(_keyAutoSave) ?? false,
       autoSaveIntervalSeconds: prefs.getInt(_keyAutoSaveInterval) ?? 60,
@@ -87,7 +87,7 @@ class _SeriousSettings {
 
   /// 保存到 SharedPreferences
   Future<void> save() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.setBool(_keyAutoSave, autoSaveEnabled);
     await prefs.setInt(_keyAutoSaveInterval, autoSaveIntervalSeconds);
   }
@@ -201,7 +201,7 @@ class _SeriousPageState extends State<SeriousPage> {
   // ============================================================
   Future<void> _loadProgressList() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       final data = prefs.getStringList('serious_reading_progress') ?? [];
       setState(() {
         _progressList = data
@@ -217,7 +217,7 @@ class _SeriousPageState extends State<SeriousPage> {
 
   /// 保存所有阅读进度到 SharedPreferences
   Future<void> _saveProgressList() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final data = _progressList.map((p) => jsonEncode(p.toJson())).toList();
     await prefs.setStringList('serious_reading_progress', data);
   }

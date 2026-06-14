@@ -34,9 +34,8 @@ import 'package:open_filex/open_filex.dart';
 import 'package:percent_indicator/circular_percent_indicator.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:path/path.dart' as p;
-import 'package:shared_preferences/shared_preferences.dart';
-
 import '../utils/app_logger.dart';
+import '../utils/app_settings.dart';
 import '../utils/app_storage.dart';
 import '../utils/batch_convert_coordinator.dart';
 import '../utils/convert_coordinator.dart';
@@ -137,14 +136,14 @@ class M3u8FolderPrefs {
 
   /// 保存用户选择的 M3U8 目录 treeUri
   static Future<void> save(String treeUri) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.setString(_kKeyTreeUri, treeUri);
     AppLogger.i('M3u8FolderPrefs', '已保存 M3U8 目录：$treeUri');
   }
 
   /// 读取上次保存的 M3U8 目录 treeUri，不存在返回 null
   static Future<String?> load() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final uri = prefs.getString(_kKeyTreeUri);
     if (uri != null && uri.isNotEmpty) {
       AppLogger.i('M3u8FolderPrefs', '恢复 M3U8 目录：$uri');
@@ -154,7 +153,7 @@ class M3u8FolderPrefs {
 
   /// 清除保存的 M3U8 目录（用户手动更换目录时调用）
   static Future<void> clear() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.remove(_kKeyTreeUri);
     AppLogger.i('M3u8FolderPrefs', '已清除 M3U8 目录记录');
   }
@@ -2690,7 +2689,7 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(8),
           color: selected
-              ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.5)
+               ? Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.5)
               : null,
         ),
         child: Row(
@@ -2731,7 +2730,7 @@ class _VideoConvertPageState extends State<VideoConvertPage> {
                               ? Theme.of(context)
                                   .colorScheme
                                   .primary
-                                  .withOpacity(0.12)
+                                  .withValues(alpha: 0.12)
                               : Colors.grey.shade100,
                           borderRadius: BorderRadius.circular(4),
                         ),
@@ -3523,20 +3522,24 @@ class _SourceChoiceCard extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(12),
-        child: Opacity(
-          opacity: enabled ? 1.0 : 0.5,
-          child: Container(
-            decoration: BoxDecoration(
-              border: Border.all(
-                color: enabled
-                    ? Theme.of(context).colorScheme.outlineVariant
-                    : Colors.grey.shade300,
-                width: 1,
-              ),
-              borderRadius: BorderRadius.circular(12),
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: enabled
+                  ? Theme.of(context).colorScheme.outlineVariant
+                  : Colors.grey.shade300,
+              width: 1,
             ),
-            padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
-            child: Column(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+          foregroundDecoration: enabled
+              ? null
+              : BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+          child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 // 圆形彩色图标
@@ -3603,7 +3606,6 @@ class _SourceChoiceCard extends StatelessWidget {
               ],
             ),
           ),
-        ),
       ),
     );
   }

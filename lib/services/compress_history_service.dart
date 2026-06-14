@@ -1,8 +1,8 @@
 // 压缩历史记录持久化服务
 // 使用 shared_preferences 存储历史记录列表（JSON 格式）
 import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../models/compress_history.dart';
+import '../utils/app_settings.dart';
 
 class CompressHistoryService {
   static const String _key = 'compress_history_list';
@@ -10,7 +10,7 @@ class CompressHistoryService {
 
   /// 加载所有历史记录（按时间倒序）
   static Future<List<CompressHistory>> loadAll() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final jsonStr = prefs.getString(_key);
     if (jsonStr == null || jsonStr.isEmpty) return [];
     try {
@@ -45,13 +45,13 @@ class CompressHistoryService {
 
   /// 清空所有记录
   static Future<void> clear() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.remove(_key);
   }
 
   /// 保存列表到 SharedPreferences
   static Future<void> _save(List<CompressHistory> list) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final jsonStr =
         jsonEncode(list.map((e) => e.toJson()).toList());
     await prefs.setString(_key, jsonStr);

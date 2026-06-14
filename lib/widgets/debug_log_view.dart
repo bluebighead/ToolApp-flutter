@@ -32,29 +32,16 @@ class DebugLogView extends StatefulWidget {
 class _DebugLogViewState extends State<DebugLogView> {
   bool _expanded = false;
 
-  /// 获取筛选后的日志文本
-  String _getFilteredLogText() {
-    final entries = AppLogger.buffer
-        .where((e) => widget.filterTags.contains(e.tag))
-        .toList()
-        .reversed
-        .take(widget.maxEntries)
-        .toList()
-        .reversed;
-    return entries.map((e) => e.format()).join('\n');
-  }
-
-  /// 获取筛选后的日志条目数
-  int _getFilteredCount() {
+  List<LogEntry> _filtered() {
     return AppLogger.buffer
         .where((e) => widget.filterTags.contains(e.tag))
-        .length;
+        .toList();
   }
 
   /// 复制日志到剪贴板
   Future<void> _copyLogs() async {
-    final logText = _getFilteredLogText();
-    if (logText.isEmpty) {
+    final filtered = _filtered();
+    if (filtered.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('暂无日志可复制')),
@@ -62,6 +49,12 @@ class _DebugLogViewState extends State<DebugLogView> {
       }
       return;
     }
+    final logText = filtered.reversed
+        .take(widget.maxEntries)
+        .toList()
+        .reversed
+        .map((e) => e.format())
+        .join('\n');
     await Clipboard.setData(ClipboardData(text: logText));
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -75,7 +68,8 @@ class _DebugLogViewState extends State<DebugLogView> {
 
   @override
   Widget build(BuildContext context) {
-    final count = _getFilteredCount();
+    final filtered = _expanded ? _filtered() : <LogEntry>[];
+    final count = filtered.length;
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: Column(
@@ -166,9 +160,14 @@ class _DebugLogViewState extends State<DebugLogView> {
                 child: SingleChildScrollView(
                   padding: const EdgeInsets.all(12),
                   child: SelectableText(
-                    _getFilteredLogText().isEmpty
+                    filtered.isEmpty
                         ? '暂无日志'
-                        : _getFilteredLogText(),
+                        : filtered.reversed
+                            .take(widget.maxEntries)
+                            .toList()
+                            .reversed
+                            .map((e) => e.format())
+                            .join('\n'),
                     style: TextStyle(
                       fontFamily: 'monospace',
                       fontSize: 11,

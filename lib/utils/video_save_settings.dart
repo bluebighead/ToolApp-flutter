@@ -13,7 +13,7 @@
 //  - Dart 端只存"URI 字符串" + 持久化权限（takePersistableUriPermission 在原生层完成）
 //  - 写入时调原生 MethodChannel "writeFileToSafTree" 让原生层打开 DocumentFile 并写入
 //  - 这样不需要任何 WRITE_EXTERNAL_STORAGE 权限（Scoped Storage 兼容）
-import 'package:shared_preferences/shared_preferences.dart';
+import 'app_settings.dart';
 
 /// 视频转换路径模式
 enum VideoSaveMode {
@@ -70,7 +70,7 @@ class VideoSaveSettings {
   /// 从 SharedPreferences 读取设置
   /// 缺失字段时返回默认值：默认沙盒模式
   static Future<VideoSaveSettingsSnapshot> load() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final modeIndex = prefs.getInt(_kKeyMode) ?? VideoSaveMode.defaultSandbox.index;
     // 防御：越界保护
     final mode = VideoSaveMode.values[
@@ -91,7 +91,7 @@ class VideoSaveSettings {
     String? customSafTreeUri,
     String? customDisplayName,
   }) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     if (mode != null) {
       await prefs.setInt(_kKeyMode, mode.index);
     }
@@ -105,7 +105,7 @@ class VideoSaveSettings {
 
   /// 清除自定义路径（恢复默认沙盒模式）
   static Future<void> clearCustom() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.remove(_kKeyCustomSafUri);
     await prefs.remove(_kKeyCustomDisplayName);
     await prefs.setInt(_kKeyMode, VideoSaveMode.defaultSandbox.index);

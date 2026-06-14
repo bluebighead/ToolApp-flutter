@@ -7,9 +7,8 @@ import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
 import '../../utils/app_logger.dart';
+import '../../utils/app_settings.dart';
 
 /// 抽奖记录数据模型
 class LotteryRecord {
@@ -119,7 +118,7 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
   /// 加载历史记录
   Future<void> _loadHistory() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       final jsonList = prefs.getStringList('wheel_lottery_history') ?? [];
       final records = jsonList.map((s) {
         try {
@@ -138,7 +137,7 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
   /// 保存历史记录
   Future<void> _saveHistory() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       final jsonList = _history.map((r) => _encodeJson(r.toJson())).toList();
       await prefs.setStringList('wheel_lottery_history', jsonList);
     } catch (e) {

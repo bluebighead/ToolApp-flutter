@@ -34,11 +34,14 @@ class NetworkSpeedLineChart extends StatelessWidget {
   Widget build(BuildContext context) {
     final spots = samplesToSpots(samples);
     final maxY = maxYFor(samples);
-    // 折线颜色 = 最后一个有效采样值
-    final lastValid = samples.lastWhere(
-      (s) => s != null,
-      orElse: () => null,
-    );
+    // 折线颜色 = 最后一个有效采样值（反向遍历，找到即止）
+    int? lastValid;
+    for (var i = samples.length - 1; i >= 0; i--) {
+      if (samples[i] != null) {
+        lastValid = samples[i];
+        break;
+      }
+    }
     final color = latencyColorFor(lastValid);
     return SizedBox(
       width: 280,

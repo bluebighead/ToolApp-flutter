@@ -9,6 +9,8 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'pages/auth/login_page.dart';
 import 'pages/home_page.dart';
+import 'services/ai_service.dart';
+import 'services/ai_tool_executor.dart';
 import 'services/auth_service.dart';
 import 'services/camera_stream_service.dart';
 import 'services/device_info_service.dart';
@@ -24,6 +26,7 @@ import 'utils/convert_coordinator.dart';
 import 'utils/convert_notification.dart';
 import 'utils/saf_directory_helper.dart';
 import 'utils/user_data_manager.dart';
+import 'widgets/ai_floating_button.dart';
 
 /// 根 Navigator 的 GlobalKey，用于悬浮按钮管理器获取上下文
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
@@ -58,6 +61,9 @@ void main() async {
   // 后台智能清理临时文件和过期数据（v1.51.2+）
   unawaited(AppStorage.smartClean());
 
+  // v1.53.0+ 初始化AI助手（注册所有可用工具）
+  AiService.init(AiToolExecutor.getToolsDescription());
+
   // 初始化视频转换后台通知服务
   // 注意：必须在 runApp 之前完成，否则 video_convert_page 第一次弹通知可能失败
   await ConvertNotification.instance.init();
@@ -81,16 +87,53 @@ class ToolApp extends StatefulWidget {
 }
 
 class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
+  OverlayEntry? _aiOverlay;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    appSettings.addListener(_onSettingsChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateAiOverlay());
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    appSettings.removeListener(_onSettingsChanged);
+    _aiOverlay?.remove();
     super.dispose();
+  }
+
+  void _onSettingsChanged() {
+    _updateAiOverlay();
+  }
+
+  void _updateAiOverlay() {
+    if (appSettings.aiEnabled) {
+      _insertAiOverlay();
+    } else {
+      _removeAiOverlay();
+    }
+  }
+
+  void _insertAiOverlay() {
+    if (_aiOverlay != null) return;
+    final overlay = rootNavigatorKey.currentState?.overlay;
+    if (overlay == null) return;
+    _aiOverlay = OverlayEntry(
+      builder: (context) => Positioned(
+        right: 16,
+        bottom: 16,
+        child: AiFloatingButton(navigatorKey: rootNavigatorKey),
+      ),
+    );
+    overlay.insert(_aiOverlay!);
+  }
+
+  void _removeAiOverlay() {
+    _aiOverlay?.remove();
+    _aiOverlay = null;
   }
 
   // 应用前后台切换回调
@@ -138,7 +181,6 @@ class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    AppLogger.d('ToolApp', '构建 MaterialApp');
     // 基础种子色：靛蓝色
     const seedColor = Colors.indigo;
 
@@ -176,24 +218,27 @@ class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
           title: AppInfo.appName,
           debugShowCheckedModeBanner: false,
           navigatorKey: rootNavigatorKey,
-          // 中文locale支持（经期宝日历组件需要）
+          builder: (context, child) {
+            // 保持原始 MediaQuery，不覆盖 viewInsets，确保键盘避让正常工作
+            return child!;
+          },
           localizationsDelegates: const [
-            GlobalMaterialLocalizations.delegate,
-            GlobalWidgetsLocalizations.delegate,
-            GlobalCupertinoLocalizations.delegate,
-          ],
-          supportedLocales: const [
-            Locale('zh', 'CN'),
-            Locale('en', 'US'),
-          ],
-          // 亮色主题
-          theme: lightTheme,
-          // 暗色主题
-          darkTheme: darkTheme,
-          // 根据用户设置决定使用哪个主题
-          themeMode: appSettings.darkMode ? ThemeMode.dark : ThemeMode.light,
-          // 认证路由：根据登录状态显示首页或登录页
-          home: const AuthWrapper(),
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+              GlobalCupertinoLocalizations.delegate,
+            ],
+            supportedLocales: const [
+              Locale('zh', 'CN'),
+              Locale('en', 'US'),
+            ],
+            // 亮色主题
+            theme: lightTheme,
+            // 暗色主题
+            darkTheme: darkTheme,
+            // 根据用户设置决定使用哪个主题
+            themeMode: appSettings.darkMode ? ThemeMode.dark : ThemeMode.light,
+            // 认证路由：根据登录状态显示首页或登录页
+            home: const AuthWrapper(),
         );
 
         // 将 navigatorKey 注册到 OnlineOverlayManager 用于获取根上下文

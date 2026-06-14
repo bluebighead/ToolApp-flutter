@@ -8,10 +8,9 @@
 //   - 每次会话（从"开始接收"到"停止接收"）生成一条记录
 import 'dart:convert';
 
-import 'package:shared_preferences/shared_preferences.dart';
-
 import 'app_logger.dart';
 import 'user_data_manager.dart';
+import 'app_settings.dart';
 import '../services/auth_service.dart';
 import '../services/sync_service.dart';
 
@@ -136,7 +135,7 @@ class HeartRateHistory {
   static Future<List<HeartRateRecord>> loadAll() async {
     if (_cache != null) return List.of(_cache!);
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       final raw = prefs.getString(_prefsKey);
       if (raw == null || raw.isEmpty) {
         _cache = [];
@@ -177,7 +176,7 @@ class HeartRateHistory {
   /// 清空所有历史
   static Future<void> clear() async {
     _cache = [];
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.remove(_prefsKey);
     AppLogger.i(_logTag, '清空所有心率历史');
   }
@@ -220,7 +219,7 @@ class HeartRateHistory {
   /// 持久化到 SharedPreferences
   static Future<void> _persist(List<HeartRateRecord> list) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       final raw = jsonEncode(list.map((e) => e.toJson()).toList());
       await prefs.setString(_prefsKey, raw);
     } catch (e, st) {

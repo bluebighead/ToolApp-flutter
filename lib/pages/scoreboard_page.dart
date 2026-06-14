@@ -6,9 +6,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
 import '../../utils/app_logger.dart';
+import '../../utils/app_settings.dart';
 
 class ScoreboardPage extends StatefulWidget {
   const ScoreboardPage({super.key});
@@ -55,7 +54,7 @@ class _ScoreboardPageState extends State<ScoreboardPage> {
   /// 加载历史记录
   Future<void> _loadHistory() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       final jsonList = prefs.getStringList('scoreboard_history') ?? [];
       final records = jsonList
           .map((s) {
@@ -86,7 +85,7 @@ class _ScoreboardPageState extends State<ScoreboardPage> {
         _history = _history.sublist(0, 50); // 最多保存50条
       }
 
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       final jsonList = _history.map((r) => jsonEncode(r.toJson())).toList();
       await prefs.setStringList('scoreboard_history', jsonList);
     } catch (e) {
@@ -102,7 +101,7 @@ class _ScoreboardPageState extends State<ScoreboardPage> {
     }
     setState(() {});
 
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final jsonList = _history.map((r) => jsonEncode(r.toJson())).toList();
     await prefs.setStringList('scoreboard_history', jsonList);
   }

@@ -3,9 +3,8 @@
 // 使用 SharedPreferences + JSON 持久化对局记录
 import 'dart:convert';
 
-import 'package:shared_preferences/shared_preferences.dart';
-
 import 'app_logger.dart';
+import 'app_settings.dart';
 
 // ============================================================
 // 数据模型
@@ -248,7 +247,7 @@ class MahjongStorage {
 
   /// 加载所有对局记录
   static Future<List<MahjongGame>> loadGames() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final jsonStr = prefs.getString(_kGamesKey);
     if (jsonStr == null || jsonStr.isEmpty) return [];
 
@@ -265,7 +264,7 @@ class MahjongStorage {
 
   /// 保存所有对局记录
   static Future<void> saveGames(List<MahjongGame> games) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final jsonStr = jsonEncode(games.map((e) => e.toJson()).toList());
     await prefs.setString(_kGamesKey, jsonStr);
     AppLogger.i('MahjongStorage', '保存对局记录：${games.length} 场');

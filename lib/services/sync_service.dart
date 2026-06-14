@@ -23,6 +23,20 @@ class SyncService {
   static final SyncService instance = SyncService._();
   SyncService._();
 
+  // 安全地将动态值解析为整数（兼容服务端返回字符串数值）
+  static int? _toInt(dynamic value) {
+    if (value is int) return value;
+    if (value is double) return value.toInt();
+    return double.tryParse(value?.toString() ?? '')?.toInt();
+  }
+
+  // 安全地将动态值解析为浮点数（兼容服务端返回字符串数值）
+  static double? _toDouble(dynamic value) {
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '');
+  }
+
   // 是否正在同步中
   bool _isSyncing = false;
   bool get isSyncing => _isSyncing;
@@ -247,13 +261,13 @@ class SyncService {
       final rows = await _downloadTable('heart_rate_sessions');
       if (rows.isEmpty) return _TableSyncResult(uploaded: 0);
       final records = rows.map((r) => HeartRateRecord(
-        id: (r['id'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch,
+        id: _toInt(r['id']) ?? DateTime.now().millisecondsSinceEpoch,
         startTimeMs: _parseTimeToMs(r['start_time']),
         endTimeMs: _parseTimeToMs(r['end_time']),
-        maxBpm: (r['max_hr'] as num?)?.toInt() ?? 0,
-        minBpm: (r['min_hr'] as num?)?.toInt() ?? 0,
-        avgBpm: (r['avg_hr'] as num?)?.toInt() ?? 0,
-        samples: (r['samples'] as num?)?.toInt() ?? 0,
+        maxBpm: _toInt(r['max_hr']) ?? 0,
+        minBpm: _toInt(r['min_hr']) ?? 0,
+        avgBpm: _toInt(r['avg_hr']) ?? 0,
+        samples: _toInt(r['samples']) ?? 0,
         connectionMode: _parseHeartRateMode(r['connection_mode'] as String?),
       )).toList();
       final merged = await HeartRateHistory.mergeFromServer(records);
@@ -275,11 +289,11 @@ class SyncService {
         timestamp: DateTime.tryParse(r['test_time'] as String? ?? '') ?? DateTime.now(),
         server: r['server_url'] as String? ?? '',
         samples: const [],
-        min: (r['min_latency'] as num?)?.toInt() ?? 0,
-        avg: (r['avg_latency'] as num?)?.toInt() ?? 0,
-        max: (r['max_latency'] as num?)?.toInt() ?? 0,
-        jitter: (r['jitter'] as num?)?.toInt() ?? 0,
-        lossRate: (r['loss_rate'] as num?)?.toDouble() ?? 0,
+        min: _toInt(r['min_latency']) ?? 0,
+        avg: _toInt(r['avg_latency']) ?? 0,
+        max: _toInt(r['max_latency']) ?? 0,
+        jitter: _toInt(r['jitter']) ?? 0,
+        lossRate: _toDouble(r['loss_rate']) ?? 0,
       )).toList();
       final merged = await NetworkSpeedHistory.mergeFromServer(records);
       return _TableSyncResult(uploaded: merged);
@@ -297,12 +311,12 @@ class SyncService {
       final rows = await _downloadTable('convert_history');
       if (rows.isEmpty) return _TableSyncResult(uploaded: 0);
       final records = rows.map((r) => ConvertHistoryEntry(
-        id: (r['id'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch,
-        timestampMs: (r['timestamp_ms'] as num?)?.toInt() ?? 0,
+        id: _toInt(r['id']) ?? DateTime.now().millisecondsSinceEpoch,
+        timestampMs: _toInt(r['timestamp_ms']) ?? 0,
         input: r['input_file'] as String? ?? '',
         isNetwork: false,
         outputPath: r['output_file'] as String?,
-        outputSize: (r['output_size'] as num?)?.toInt(),
+        outputSize: _toInt(r['output_size']),
         format: _parseConvertFormat(r['format'] as String?),
         quality: _parseConvertQuality(r['quality'] as String?),
         status: _parseConvertStatus(r['status'] as String?),
@@ -323,10 +337,10 @@ class SyncService {
       final rows = await _downloadTable('dice_records');
       if (rows.isEmpty) return _TableSyncResult(uploaded: 0);
       final records = rows.map((r) => DiceRecord(
-        id: (r['id'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch,
+        id: _toInt(r['id']) ?? DateTime.now().millisecondsSinceEpoch,
         diceType: DiceType.fromName(r['dice_type'] as String? ?? 'd6'),
-        result: (r['result'] as num?)?.toInt() ?? 1,
-        timestamp: (r['timestamp_ms'] as num?)?.toInt() ?? 0,
+        result: _toInt(r['result']) ?? 1,
+        timestamp: _toInt(r['timestamp_ms']) ?? 0,
       )).toList();
       final merged = await DiceHistory.mergeFromServer(records);
       return _TableSyncResult(uploaded: merged);
@@ -357,7 +371,7 @@ class SyncService {
           startDate: DateTime.tryParse(r['start_date'] as String? ?? '') ?? DateTime.now(),
           endDate: r['end_date'] != null ? DateTime.tryParse(r['end_date'] as String) : null,
           mode: r['record_mode'] as String? ?? 'period',
-          flowLevel: (r['flow_level'] as num?)?.toInt() ?? 2,
+          flowLevel: _toInt(r['flow_level']) ?? 2,
           symptoms: symptoms,
           notes: r['notes'] as String? ?? '',
         );
@@ -436,7 +450,7 @@ class SyncService {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
-        return _TableSyncResult(uploaded: data['uploaded'] as int? ?? 0);
+        return _TableSyncResult(uploaded: _toInt(data['uploaded']) ?? 0);
       }
 
       // 解析错误信息

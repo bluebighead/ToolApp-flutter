@@ -1,6 +1,6 @@
 // 网速测试用户设置读写工具
 // 持久化三个字段：是否启用自定义目标 URL、自定义 URL 字符串、显示模式（int 枚举 index）
-import 'package:shared_preferences/shared_preferences.dart';
+import 'app_settings.dart';
 
 /// 网速测试设置快照
 typedef NetworkSpeedSettingsSnapshot = ({
@@ -23,7 +23,7 @@ class NetworkSpeedSettings {
   /// 从 SharedPreferences 读取设置
   /// 缺失字段时返回默认值：useCustom=false, url='', displayMode=0
   static Future<NetworkSpeedSettingsSnapshot> load() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final useCustom = prefs.getBool(_kKeyUseCustom) ?? false;
     final url = prefs.getString(_kKeyCustomUrl) ?? '';
     final displayMode = prefs.getInt(_kKeyDisplayMode) ?? 0;
@@ -36,7 +36,7 @@ class NetworkSpeedSettings {
     String? url,
     int? displayMode,
   }) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     if (useCustom != null) {
       await prefs.setBool(_kKeyUseCustom, useCustom);
     }

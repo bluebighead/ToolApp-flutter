@@ -9,6 +9,7 @@ const path = require('path');
 const nodemailer = require('nodemailer');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const { spawn } = require('child_process');
 
 // ============================================================
 // 配置
@@ -2762,13 +2763,144 @@ function getNetworkInfo() {
 // v1.52.3+ 网址解析 API
 // 使用 axios + cheerio 爬取网页并提取结构化信息
 // ============================================================
+// ------------------------------------------------------------
+// 共享的 HTML 解析逻辑（axios 和 puppeteer 共用）
+// ------------------------------------------------------------
+function _extractPageData(html, targetUrl) {
+  const $ = cheerio.load(html);
+
+  const title = $('title').text().trim() ||
+                $('meta[property="og:title"]').attr('content')?.trim() ||
+                '';
+
+  const description = $('meta[name="description"]').attr('content')?.trim() ||
+                      $('meta[property="og:description"]').attr('content')?.trim() ||
+                      '';
+
+  const keywords = $('meta[name="keywords"]').attr('content')?.trim() || '';
+
+  const favicon = $('link[rel="icon"]').attr('href') ||
+                  $('link[rel="shortcut icon"]').attr('href') ||
+                  '/favicon.ico';
+
+  const links = [];
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href');
+    const text = $(el).text().trim();
+    if (href && text && !href.startsWith('#') && !href.startsWith('javascript:')) {
+      links.push({ text, href });
+    }
+  });
+
+  const headings = [];
+  for (let level = 1; level <= 6; level++) {
+    $(`h${level}`).each((_, el) => {
+      const text = $(el).text().trim();
+      if (text) {
+        headings.push({ level, text });
+      }
+    });
+  }
+
+  const images = [];
+  $('img[src]').each((_, el) => {
+    const src = $(el).attr('src');
+    const alt = $(el).attr('alt')?.trim() || '';
+    if (src) {
+      images.push({ src, alt });
+    }
+  });
+
+  $('script, style, noscript, iframe, nav, footer, header').remove();
+  const bodyText = $('body').text().replace(/\s{2,}/g, '\n').trim();
+  const textPreview = bodyText.substring(0, 5000);
+
+  const ogImage = $('meta[property="og:image"]').attr('content')?.trim() || '';
+  const ogType = $('meta[property="og:type"]').attr('content')?.trim() || '';
+  const ogSiteName = $('meta[property="og:site_name"]').attr('content')?.trim() || '';
+
+  // H 标签层级统计
+  const hCounts = { h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0 };
+  for (let i = 1; i <= 6; i++) {
+    hCounts[`h${i}`] = headings.filter(h => h.level === i).length;
+  }
+
+  const jsonLdScripts = [];
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try {
+      const parsed = JSON.parse($(el).html());
+      jsonLdScripts.push(parsed);
+    } catch {}
+  });
+
+  return {
+    url: targetUrl,
+    title,
+    description,
+    keywords,
+    favicon,
+    ogImage,
+    ogType,
+    ogSiteName,
+    headings: headings.slice(0, 50),
+    links: links.slice(0, 100),
+    images: images.slice(0, 30),
+    textPreview,
+    stats: {
+      wordCount: bodyText.length,
+      linkCount: links.length,
+      imageCount: images.length,
+      headingCount: headings.length,
+      headingsByLevel: hCounts,
+    },
+    jsonLd: jsonLdScripts.length > 0 ? jsonLdScripts : undefined,
+  };
+}
+
+// ------------------------------------------------------------
+// Python curl_cffi 兜底（处理 Cloudflare 等反爬网站，无需浏览器）
+// ------------------------------------------------------------
+async function _fetchWithPython(targetUrl) {
+  const scriptPath = require('path').join(__dirname, 'fetch_url.py');
+  return new Promise((resolve, reject) => {
+    const proc = spawn('python', [scriptPath], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (d) => { stdout += d; });
+    proc.stderr.on('data', (d) => { stderr += d; });
+    proc.on('close', (code) => {
+      // 优先解析 stdout 中的 JSON（Python 正常/异常都会输出 JSON 到 stdout）
+      try {
+        const result = JSON.parse(stdout.trim());
+        if (result.success) {
+          return resolve({ html: result.html, finalUrl: result.finalUrl });
+        }
+        // Python 端明确返回的错误
+        const errMsg = result.error || stderr.trim() || `Python exited with code ${code}`;
+        return reject(new Error(errMsg));
+      } catch (_) {
+        // stdout 不是有效 JSON 或为空，退而用 stderr
+        const errMsg = stderr.trim() || `Python exited with code ${code}`;
+        return reject(new Error(errMsg));
+      }
+    });
+    proc.on('error', reject);
+    proc.stdin.write(JSON.stringify({ url: targetUrl }) + '\n');
+    proc.stdin.end();
+  });
+}
+
+// ------------------------------------------------------------
+// 网址解析 API
+// ------------------------------------------------------------
 app.post('/api/url-parse', async (req, res) => {
   const { url } = req.body;
   if (!url) {
     return res.status(400).json({ error: '请提供网址' });
   }
 
-  // 校验 URL 格式
   let targetUrl = url.trim();
   if (!/^https?:\/\//i.test(targetUrl)) {
     targetUrl = 'https://' + targetUrl;
@@ -2780,8 +2912,13 @@ app.post('/api/url-parse', async (req, res) => {
     return res.status(400).json({ error: '网址格式不正确' });
   }
 
+  // 策略 1：先用 axios 快速抓取（轻量、适合普通网站）
+  let html;
+  let finalUrl;
+  let statusCode;
+  let usedFallback = false;
+
   try {
-    // 发起请求，设置 User-Agent 避免被反爬
     const response = await axios.get(targetUrl, {
       timeout: 15000,
       maxRedirects: 5,
@@ -2791,133 +2928,44 @@ app.post('/api/url-parse', async (req, res) => {
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       },
       responseType: 'text',
-      // 不验证证书，兼容更多网站
       httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
     });
-
-    const html = response.data;
-    const $ = cheerio.load(html);
-
-    // 提取页面标题
-    const title = $('title').text().trim() ||
-                  $('meta[property="og:title"]').attr('content')?.trim() ||
-                  '';
-
-    // 提取描述
-    const description = $('meta[name="description"]').attr('content')?.trim() ||
-                        $('meta[property="og:description"]').attr('content')?.trim() ||
-                        '';
-
-    // 提取关键词
-    const keywords = $('meta[name="keywords"]').attr('content')?.trim() || '';
-
-    // 提取页面图标
-    const favicon = $('link[rel="icon"]').attr('href') ||
-                    $('link[rel="shortcut icon"]').attr('href') ||
-                    '/favicon.ico';
-
-    // 提取所有链接
-    const links = [];
-    $('a[href]').each((_, el) => {
-      const href = $(el).attr('href');
-      const text = $(el).text().trim();
-      if (href && text && !href.startsWith('#') && !href.startsWith('javascript:')) {
-        links.push({ text, href });
-      }
-    });
-
-    // 提取标题结构（h1-h6）
-    const headings = [];
-    for (let level = 1; level <= 6; level++) {
-      $(`h${level}`).each((_, el) => {
-        const text = $(el).text().trim();
-        if (text) {
-          headings.push({ level, text });
-        }
-      });
-    }
-
-    // 提取所有图片
-    const images = [];
-    $('img[src]').each((_, el) => {
-      const src = $(el).attr('src');
-      const alt = $(el).attr('alt')?.trim() || '';
-      if (src) {
-        images.push({ src, alt });
-      }
-    });
-
-    // 提取正文文本（移除 script/style 标签后）
-    $('script, style, noscript, iframe, nav, footer, header').remove();
-    const bodyText = $('body').text().replace(/\s{2,}/g, '\n').trim();
-    // 截取前 5000 字符
-    const textPreview = bodyText.substring(0, 5000);
-
-    // 统计信息
-    const wordCount = bodyText.length;
-    const linkCount = links.length;
-    const imageCount = images.length;
-    const headingCount = headings.length;
-
-    // 提取 Open Graph 信息
-    const ogImage = $('meta[property="og:image"]').attr('content')?.trim() || '';
-    const ogType = $('meta[property="og:type"]').attr('content')?.trim() || '';
-    const ogSiteName = $('meta[property="og:site_name"]').attr('content')?.trim() || '';
-
-    // 提取结构化数据（JSON-LD）
-    const jsonLdScripts = [];
-    $('script[type="application/ld+json"]').each((_, el) => {
+    html = response.data;
+    finalUrl = response.request?.res?.responseUrl || targetUrl;
+    statusCode = response.status;
+  } catch (axiosErr) {
+    // 需要 Python curl_cffi 兜底的错误码
+    const fallbackCodes = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EPIPE'];
+    if (fallbackCodes.includes(axiosErr.code)) {
+      console.log(`[网址解析] axios 失败 (${axiosErr.code})，切换 curl_cffi 兜底: ${targetUrl}`);
       try {
-        const parsed = JSON.parse($(el).html());
-        jsonLdScripts.push(parsed);
-      } catch {}
-    });
-
-    // 构建结果
-    const result = {
-      url: targetUrl,
-      finalUrl: response.request?.res?.responseUrl || targetUrl,
-      statusCode: response.status,
-      title,
-      description,
-      keywords,
-      favicon,
-      ogImage,
-      ogType,
-      ogSiteName,
-      headings: headings.slice(0, 50),    // 最多 50 个标题
-      links: links.slice(0, 100),          // 最多 100 个链接
-      images: images.slice(0, 30),         // 最多 30 张图片
-      textPreview,
-      stats: {
-        wordCount,
-        linkCount,
-        imageCount,
-        headingCount,
-        headingsByLevel: {
-          h1: headings.filter(h => h.level === 1).length,
-          h2: headings.filter(h => h.level === 2).length,
-          h3: headings.filter(h => h.level === 3).length,
-          h4: headings.filter(h => h.level === 4).length,
-          h5: headings.filter(h => h.level === 5).length,
-          h6: headings.filter(h => h.level === 6).length,
-        },
-      },
-      jsonLd: jsonLdScripts.length > 0 ? jsonLdScripts : undefined,
-    };
-
-    console.log(`[网址解析] 成功: ${targetUrl} (${wordCount} 字符, ${linkCount} 链接)`);
-    res.json(result);
-  } catch (err) {
-    console.error(`[网址解析] 失败: ${targetUrl}`, err.message);
-    if (err.code === 'ECONNABORTED') {
+        const pyResult = await _fetchWithPython(targetUrl);
+        html = pyResult.html;
+        finalUrl = pyResult.finalUrl;
+        statusCode = 200;
+        usedFallback = true;
+      } catch (pyErr) {
+        console.error(`[网址解析] curl_cffi 也失败: ${targetUrl}`, pyErr.message);
+        return res.status(502).json({
+          error: '目标网站拒绝了连接，可能是 Cloudflare 防护或 IP 被封禁。可用手机浏览器打开确认能否访问',
+        });
+      }
+    } else if (axiosErr.code === 'ECONNABORTED') {
       return res.status(408).json({ error: '请求超时，请检查网址是否正确或网络连接' });
+    } else if (axiosErr.response?.status) {
+      return res.status(502).json({ error: `目标网站返回错误: HTTP ${axiosErr.response.status}` });
+    } else {
+      return res.status(500).json({ error: '网址解析失败: ' + (axiosErr.message || '未知错误') });
     }
-    if (err.response?.status) {
-      return res.status(502).json({ error: `目标网站返回错误: HTTP ${err.response.status}` });
-    }
-    res.status(500).json({ error: '网址解析失败: ' + (err.message || '未知错误') });
   }
+
+  // 共享的 HTML 解析
+  const data = _extractPageData(html, targetUrl);
+  data.finalUrl = finalUrl;
+  data.statusCode = statusCode;
+
+  console.log(`[网址解析] ${usedFallback ? '(Puppeteer) ' : ''}成功: ${targetUrl} (${data.stats.wordCount} 字符, ${data.stats.linkCount} 链接)`);
+  res.json(data);
 });
 
 const server = app.listen(PORT, '0.0.0.0', () => {

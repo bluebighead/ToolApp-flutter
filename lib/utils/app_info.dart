@@ -107,21 +107,24 @@ class AppInfo {
   //   - 新增电子元件计算工具（色环电阻/贴片电阻/电容换算/电感色码）
   //   - 新增转盘抽奖工具（自定义转盘/旋转动画/概率设置/历史记录）
   //   - 新增计分板小工具（全屏加减分/长按连续加减）
-  // v1.52.4+ 升级说明（Bug修复 - 转盘抽奖概率定位）：
-  //   - 修复转盘抽奖概率设置不生效的Bug：旋转角度计算未考虑上次旋转的残留角度，
-  //     导致后续旋转时选中项无法精确指向顶部指针，视觉上概率分布与设置不符
-  static const String version = '1.52.8';
+  // v1.52.13+ 升级说明（Bug修复 - AI输入框键盘弹出位置异常）：
+  //   - 彻底修复键盘弹出时输入框飞出屏幕的问题
+  //   - 根因：OverlayEntry 内手动计算键盘高度定位不可靠，不同设备/键盘高度下表现不一致
+  //   - 修复：废弃 OverlayEntry 自定义输入面板，改用 showModalBottomSheet
+  //   - showModalBottomSheet 自动处理键盘避让、Material上下文、动画，无需手动计算
+  //   - 代码从 218 行精简到 168 行，删除整个 _AiInputSheet 类
+  static const String version = '1.52.14';
 
   // 当前构建号（整数，每次发版递增）
   // 每次发版时同步更新 pubspec.yaml 中 version 字段的 + 号后的数字
-  static const int buildNumber = 189;
+  static const int buildNumber = 195;
 
   // 开发者署名
   static const String developer = 'SuperYH';
 
   // 最近一次发版的更新时间（格式：yyyy-MM-dd）
   // 每次发版时必须更新到当天日期
-  static const String lastUpdate = '2026-06-13';
+  static const String lastUpdate = '2026-06-14';
 
   // 完整版本字符串，UI 上直接显示使用
   static String get fullVersion => '$version (Build $buildNumber)';

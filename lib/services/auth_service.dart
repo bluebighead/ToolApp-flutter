@@ -9,7 +9,6 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 
 import '../utils/app_logger.dart';
@@ -74,7 +73,7 @@ class AuthService extends ChangeNotifier {
   Future<void> initialize() async {
     AppLogger.i('AuthService', '初始化认证服务 - 服务器: $_baseUrl');
 
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     _token = prefs.getString(_kToken);
     _userId = prefs.getString(_kUserId);
     _userEmail = prefs.getString(_kUserEmail);
@@ -153,7 +152,7 @@ class AuthService extends ChangeNotifier {
     _token = token;
     _userId = userId;
     _userEmail = email;
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.setString(_kToken, token);
     await prefs.setString(_kUserId, userId);
     await prefs.setString(_kUserEmail, email);
@@ -164,7 +163,7 @@ class AuthService extends ChangeNotifier {
     _token = null;
     _userId = null;
     _userEmail = null;
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.remove(_kToken);
     await prefs.remove(_kUserId);
     await prefs.remove(_kUserEmail);
@@ -173,7 +172,7 @@ class AuthService extends ChangeNotifier {
   /// 进入游客模式
   Future<void> enterGuestMode() async {
     _isGuestMode = true;
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.setBool(_kGuestMode, true);
     UserDataManager.instance.clearAllCaches();
     AppLogger.i('AuthService', '进入游客模式');
@@ -183,7 +182,7 @@ class AuthService extends ChangeNotifier {
   /// 退出游客模式（登录成功后调用）
   Future<void> exitGuestMode() async {
     _isGuestMode = false;
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.setBool(_kGuestMode, false);
     UserDataManager.instance.clearAllCaches();
     AppLogger.i('AuthService', '退出游客模式');
@@ -193,7 +192,7 @@ class AuthService extends ChangeNotifier {
   /// 静默退出游客模式（不触发 notifyListeners）
   Future<void> exitGuestModeQuiet() async {
     _isGuestMode = false;
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.setBool(_kGuestMode, false);
     UserDataManager.instance.clearAllCaches();
     AppLogger.i('AuthService', '静默退出游客模式');
@@ -603,7 +602,7 @@ class AuthService extends ChangeNotifier {
       _userId = null;
       _userEmail = null;
       _isGuestMode = false;
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs!;
       await prefs.remove(_kToken);
       await prefs.remove(_kUserId);
       await prefs.remove(_kUserEmail);
@@ -630,7 +629,7 @@ class AuthService extends ChangeNotifier {
   // ==================== 记住账号密码 ====================
 
   Future<void> saveCredentials(String email, String password) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.setBool(_kRememberMe, true);
     await prefs.setString(_kSavedEmail, email);
     await prefs.setString(_kSavedPassword, base64Encode(utf8.encode(password)));
@@ -641,7 +640,7 @@ class AuthService extends ChangeNotifier {
   // ==================== 多账号历史记录 ====================
 
   Future<List<Map<String, String>>> getAccountHistory() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final json = prefs.getString(_kAccountHistory);
     if (json == null) return [];
     try {
@@ -677,7 +676,7 @@ class AuthService extends ChangeNotifier {
     if (history.length > 10) {
       history.removeRange(10, history.length);
     }
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final jsonList = history.map((item) => {
       'email': item['email'],
       'password': item['password'],
@@ -698,7 +697,7 @@ class AuthService extends ChangeNotifier {
         history.removeRange(10, history.length);
       }
     }
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final jsonList = history.map((item) => {
       'email': item['email'],
       'password': item['password'],
@@ -709,7 +708,7 @@ class AuthService extends ChangeNotifier {
   Future<void> removeAccountFromHistory(String email) async {
     final history = await getAccountHistory();
     history.removeWhere((item) => item['email'] == email);
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final jsonList = history.map((item) => {
       'email': item['email'],
       'password': item['password'],
@@ -718,7 +717,7 @@ class AuthService extends ChangeNotifier {
   }
 
   Future<void> clearCredentials() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     await prefs.setBool(_kRememberMe, false);
     await prefs.remove(_kSavedEmail);
     await prefs.remove(_kSavedPassword);
@@ -726,17 +725,17 @@ class AuthService extends ChangeNotifier {
   }
 
   Future<bool> isRememberMe() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     return prefs.getBool(_kRememberMe) ?? false;
   }
 
   Future<String?> getSavedEmail() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     return prefs.getString(_kSavedEmail);
   }
 
   Future<String?> getSavedPassword() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final encoded = prefs.getString(_kSavedPassword);
     if (encoded == null) return null;
     try {

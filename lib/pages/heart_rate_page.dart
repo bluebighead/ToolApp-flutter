@@ -82,14 +82,26 @@ class _HeartRatePageState extends State<HeartRatePage> {
   // 当前会话开始时间（毫秒），null 表示未开始
   int? _sessionStartTimeMs;
 
+  // 节流：限制心率UI刷新频率 BPM 更新
+  DateTime _lastBpmUiUpdate = DateTime(2000);
+  static const Duration _bpmUiThrottle = Duration(milliseconds: 200); // 5fps 上限
+
+  // 节流：限制 BLE 扫描结果 UI 刷新频率
+  DateTime _lastScanUiUpdate = DateTime(2000);
+  static const Duration _scanUiThrottle = Duration(milliseconds: 500);
+
   @override
   void initState() {
     super.initState();
-    // 订阅设备列表更新
+    // 订阅设备列表更新（节流：限制刷新频率）
     _devicesSubscription = _ble.devicesStream.stream.listen(
       (devices) {
-        if (mounted) {
-          setState(() => _scannedDevices = devices);
+        if (!mounted) return;
+        _scannedDevices = devices;
+        final now = DateTime.now();
+        if (now.difference(_lastScanUiUpdate) >= _scanUiThrottle) {
+          _lastScanUiUpdate = now;
+          setState(() {});
         }
       },
     );
@@ -497,13 +509,18 @@ class _HeartRatePageState extends State<HeartRatePage> {
     if (!mounted) return;
     // 收集会话数据用于历史记录
     _sessionData.add(bpm);
-    setState(() {
-      _heartRate = bpm;
-      _history.add(bpm);
-      if (_history.length > _maxPoints) {
-        _history.removeAt(0);
-      }
-    });
+    _history.add(bpm);
+    if (_history.length > _maxPoints) {
+      _history.removeAt(0);
+    }
+    // 节流：限制 UI 刷新频率，避免 BPM 数据触发过度重建
+    final now = DateTime.now();
+    if (now.difference(_lastBpmUiUpdate) >= _bpmUiThrottle) {
+      _lastBpmUiUpdate = now;
+      setState(() {
+        _heartRate = bpm;
+      });
+    }
   }
 
   /// 处理心率错误
@@ -875,20 +892,22 @@ class _HeartRatePageState extends State<HeartRatePage> {
           ),
         );
       case DisplayMode.chart:
-        return Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.05),
-                blurRadius: 10,
-                offset: const Offset(0, 2),
-              ),
-            ],
+        return RepaintBoundary(
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.05),
+                  blurRadius: 10,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: HeartRateChart(data: List.unmodifiable(_history)),
           ),
-          child: HeartRateChart(data: List.unmodifiable(_history)),
         );
       case DisplayMode.combined:
         return Column(
@@ -901,20 +920,22 @@ class _HeartRatePageState extends State<HeartRatePage> {
             const SizedBox(height: 16),
             // 下方：折线图
             Expanded(
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.05),
-                      blurRadius: 10,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
+              child: RepaintBoundary(
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.05),
+                        blurRadius: 10,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: HeartRateChart(data: List.unmodifiable(_history)),
                 ),
-                child: HeartRateChart(data: List.unmodifiable(_history)),
               ),
             ),
           ],

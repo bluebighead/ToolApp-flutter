@@ -15,9 +15,9 @@
 import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_logger.dart';
+import 'app_settings.dart';
 import '../services/auth_service.dart';
 import 'heart_rate_history.dart';
 import 'dice_history.dart';
@@ -129,7 +129,7 @@ class UserDataManager {
   /// 迁移 SharedPreferences 中指定用户前缀的数据到新用户前缀
   /// 例如：guest_heart_rate_history_v1 → user_1_heart_rate_history_v1
   Future<void> _migratePrefsKeys(String fromTag, String toTag) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
     final allKeys = prefs.getKeys();
     final prefix = '${fromTag}_';
     int migrated = 0;
@@ -176,7 +176,7 @@ class UserDataManager {
   /// 仅在首次升级到用户隔离版本时执行一次
   /// 迁移逻辑：如果旧 key 存在且新 key 不存在，则复制数据并删除旧 key
   Future<void> migrateLegacyData() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs!;
 
     // 检查是否已完成迁移
     final migrationDone = prefs.getBool(_kMigrationDone) ?? false;

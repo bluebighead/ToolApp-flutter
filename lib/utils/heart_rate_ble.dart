@@ -3,8 +3,8 @@
 // 订阅心率测量特征值（0x2A37）并解析BPM值
 import 'dart:async';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'app_logger.dart';
+import 'app_settings.dart';
 
 /// 扫描到的设备信息
 class ScannedDevice {
@@ -307,7 +307,8 @@ class HeartRateBle {
   /// 保存最后连接的设备信息到本地存储
   Future<void> _saveLastConnectedDevice(String deviceId, String deviceName) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs;
+      if (prefs == null) return;
       await prefs.setString('last_connected_ble_device_id', deviceId);
       await prefs.setString('last_connected_ble_device_name', deviceName);
       AppLogger.i('HeartRateBle', '已保存记忆设备: $deviceName ($deviceId)');
@@ -319,7 +320,8 @@ class HeartRateBle {
   /// 获取最后连接的设备信息
   Future<Map<String, String>?> _getLastConnectedDevice() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = AppSettings.prefs;
+      if (prefs == null) return null;
       final deviceId = prefs.getString('last_connected_ble_device_id');
       final deviceName = prefs.getString('last_connected_ble_device_name');
       if (deviceId != null && deviceName != null) {

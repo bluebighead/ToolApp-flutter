@@ -6,12 +6,12 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/online_message.dart';
 import '../models/online_player.dart';
 import '../models/online_room.dart';
 import '../utils/app_logger.dart';
+import '../utils/app_settings.dart';
 import 'server_game_service.dart';
 
 /// 游戏服务角色
@@ -73,13 +73,15 @@ class OnlineGameService {
 
   /// 获取玩家名称（从 SharedPreferences）
   static Future<String> getPlayerName() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs;
+    if (prefs == null) return '';
     return prefs.getString(_playerNameKey) ?? '';
   }
 
   /// 保存玩家名称
   static Future<void> savePlayerName(String name) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = AppSettings.prefs;
+    if (prefs == null) return;
     await prefs.setString(_playerNameKey, name);
   }
 
