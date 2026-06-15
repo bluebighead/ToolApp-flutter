@@ -10,6 +10,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_nfc_kit/flutter_nfc_kit.dart';
 import 'package:ndef/ndef.dart';
 
+import '../../utils/route_observer.dart';
+import 'nfc_quick_write_page.dart';
+
 class _MifareSectorState {
   bool authenticated;
   String? keyA;
@@ -25,7 +28,7 @@ class NfcReaderPage extends StatefulWidget {
 }
 
 class _NfcReaderPageState extends State<NfcReaderPage>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, RouteAware {
   NFCAvailability _availability = NFCAvailability.not_supported;
   bool _isPolling = false;
   NFCTag? _currentTag;
@@ -65,7 +68,14 @@ class _NfcReaderPageState extends State<NfcReaderPage>
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    appRouteObserver.subscribe(this, ModalRoute.of(context)!);
+  }
+
+  @override
   void dispose() {
+    appRouteObserver.unsubscribe(this);
     WidgetsBinding.instance.removeObserver(this);
     _finishSession();
     _keyAController.dispose();
@@ -79,6 +89,11 @@ class _NfcReaderPageState extends State<NfcReaderPage>
     if (state == AppLifecycleState.resumed) {
       _checkNfcStatus();
     }
+  }
+
+  @override
+  void didPopNext() {
+    _checkNfcStatus();
   }
 
   bool get _isMifare => _currentTag?.type == NFCTagType.mifare_classic ||
@@ -147,7 +162,12 @@ class _NfcReaderPageState extends State<NfcReaderPage>
     if (_isPolling) return;
     _isPolling = true;
     try {
-      final tag = await FlutterNfcKit.poll();
+      const readerFlags = 0x01 | 0x02 | 0x04 | 0x08 | 0x80 | 0x100;
+      final tag = await FlutterNfcKit.poll(
+        androidReaderModeFlags: readerFlags,
+        androidPlatformSound: false,
+        androidCheckNDEF: false,
+      );
       if (!mounted) return;
       await _onTagDiscovered(tag);
     } catch (_) {
@@ -196,7 +216,8 @@ class _NfcReaderPageState extends State<NfcReaderPage>
   }
 
   Future<void> _returnToWaiting() async {
-    await _finishSession();
+    // 不先关闭 session，直接重新轮询
+    // poll() 内部会处理旧 session，避免 Reader Mode 关闭后系统弹窗
     if (!mounted) return;
     setState(() {
       _currentTag = null;
@@ -625,7 +646,8 @@ class _NfcReaderPageState extends State<NfcReaderPage>
           : '写入完成 — 成功 $success 个扇区，$fail 个失败';
     });
 
-    await _finishSession();
+    // 不调用 _finishSession()，直接重新轮询
+    // 避免 Reader Mode 关闭后系统弹出默认 NFC 识别弹窗
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -645,6 +667,21 @@ class _NfcReaderPageState extends State<NfcReaderPage>
       appBar: AppBar(
         title: const Text('NFC读写器'),
         actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: IconButton(
+              icon: const Icon(Icons.bolt, size: 22),
+              tooltip: '功能速写',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const NfcQuickWritePage(),
+                  ),
+                );
+              },
+            ),
+          ),
           if (_currentTag != null)
             Padding(
               padding: const EdgeInsets.only(right: 12),
@@ -1606,7 +1643,8 @@ class _NfcReaderPageState extends State<NfcReaderPage>
                     _statusMessage = '请将目标卡靠近手机感应区';
                     _cloneStatusMsg = '准备写入目标卡，请放置目标卡…';
                   });
-                  _finishSession();
+                  // 不调用 _finishSession()，直接重新轮询
+                  // 避免 Reader Mode 关闭后系统弹出默认 NFC 识别弹窗
                   _startPolling();
                 },
           icon: _isCloneWriting || _cloneWritePending

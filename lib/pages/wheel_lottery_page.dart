@@ -385,23 +385,33 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
                       '合计: ${_probabilities.fold(0.0, (a, b) => a + b) * 100}%',
                       style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                     ),
-                    const SizedBox(width: 8),
-                    TextButton(
-                      onPressed: () {
-                        final equalVal = (100 / _items.length).toStringAsFixed(1);
-                        for (int i = 0; i < probControllers.length; i++) {
-                          probControllers[i].text = equalVal;
-                        }
-                        setDialogState(() {});
-                      },
-                      style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                      child: const Text('平均分配', style: TextStyle(fontSize: 12)),
-                    ),
                   ],
+                ),
+                const SizedBox(height: 4),
+                SizedBox(
+                  width: double.infinity,
+                  child: TextButton.icon(
+                    onPressed: () {
+                      final n = _items.length;
+                      final baseVal = (100 / n).toStringAsFixed(1);
+                      final base = double.parse(baseVal);
+                      final sum = base * (n - 1);
+                      final lastVal = (100 - sum).toStringAsFixed(1);
+                      for (int i = 0; i < n - 1; i++) {
+                        probControllers[i].text = baseVal;
+                      }
+                      probControllers[n - 1].text = lastVal;
+                      setDialogState(() {});
+                    },
+                    icon: const Icon(Icons.auto_graph, size: 14),
+                    label: const Text('平均分配概率', style: TextStyle(fontSize: 12)),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      alignment: Alignment.centerLeft,
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 8),
                 ...List.generate(_items.length, (i) => Padding(
@@ -473,7 +483,7 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
                   );
                   return;
                 }
-                if (total > 100.01) {
+                if (total > 100.1) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('所有概率之和不能超过100%')),
                   );

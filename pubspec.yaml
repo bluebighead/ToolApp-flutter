@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.58.3+206
+version: 1.60.1+210
 
 environment:
   sdk: ^3.11.1
@@ -124,6 +124,11 @@ dependencies:
   flutter_nfc_kit: ^3.6.2
   # v1.53.0+ NDEF数据格式支持（NFC读写器依赖）
   ndef: ^0.4.0
+  # v1.58.5+ 哈希计算（MD5/SHA1/SHA256/SHA512）
+  crypto: ^3.0.6
+  # v1.60.2+ AES/RSA 加解密
+  encrypt: ^5.0.3
+  pointycastle: ^3.9.1
   # v1.54.0+ 电池状态监测：Android Profiler 工具
   battery_plus: ^6.0.3
   # v1.54.0+ 网络连接类型检测：Android Profiler 工具

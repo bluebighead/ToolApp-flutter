@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../utils/app_logger.dart';
+import '../../utils/encryptor_help.dart';
 
 class QrDecoderPage extends StatefulWidget {
   const QrDecoderPage({super.key});
@@ -173,6 +174,15 @@ class _QrDecoderPageState extends State<QrDecoderPage> {
       appBar: AppBar(
         title: const Text('二维码解码器'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.help_outline),
+            onPressed: () => showEncryptorHelp(
+              context,
+              name: '二维码解码',
+              principle: '二维码解码是从二维码图片中提取编码信息的过程。通过分析图像中黑白方块的排列模式，按QR Code标准（ISO/IEC 18004）还原原始数据。支持从本地图片读取和摄像头实时扫描两种方式。',
+              usage: '点击"从相册选择"按钮选择包含二维码的图片，或点击"扫码"按钮使用摄像头扫描。解码后的内容会显示在下方文本框中，可复制使用。',
+            ),
+          ),
           if (_decodedContent != null && _decodedContent!.isNotEmpty)
             IconButton(
               icon: const Icon(Icons.copy),

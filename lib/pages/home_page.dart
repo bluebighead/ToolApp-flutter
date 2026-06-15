@@ -45,6 +45,13 @@ class _HomePageState extends State<HomePage> {
   double _dragStartX = 0;
   bool _isDragging = false;
 
+  // 搜索状态
+  bool _showSearch = false;
+  final _searchCtrl = TextEditingController();
+  final _searchFocusNode = FocusNode();
+  List<ToolItem> _searchResults = [];
+  static final List<ToolItem> _allTools = [..._dailyTools, ..._geekTools];
+
   // 日常小白区工具列表
   // 面向普通用户的日常工具，开箱即用
   static final List<ToolItem> _dailyTools = [
@@ -170,6 +177,44 @@ class _HomePageState extends State<HomePage> {
     ),
   ];
 
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    _searchFocusNode.dispose();
+    super.dispose();
+  }
+
+  void _performSearch(String query) {
+    setState(() {
+      if (query.trim().isEmpty) {
+        _searchResults = [];
+        return;
+      }
+      final q = query.trim().toLowerCase();
+      _searchResults = _allTools.where((t) {
+        final nameMatch = t.name.toLowerCase().contains(q);
+        final subMatch = (t.subtitle ?? '').toLowerCase().contains(q);
+        return nameMatch || subMatch;
+      }).toList();
+    });
+  }
+
+  void _openSearch() {
+    setState(() => _showSearch = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _searchFocusNode.requestFocus();
+    });
+  }
+
+  void _closeSearch() {
+    setState(() {
+      _showSearch = false;
+      _searchCtrl.clear();
+      _searchResults = [];
+    });
+    _searchFocusNode.unfocus();
+  }
+
   // 构建区块：标题行 + 工具网格
   // accentColor 为区块标识色，用于标题左侧竖线和文字着色
   Widget _buildZone({
@@ -245,6 +290,61 @@ class _HomePageState extends State<HomePage> {
           },
         ),
       ],
+    );
+  }
+
+  Widget _buildSearchResults(BuildContext context) {
+    if (_searchCtrl.text.trim().isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.search, size: 64, color: Colors.grey[300]),
+            const SizedBox(height: 12),
+            Text('输入关键词搜索工具', style: TextStyle(fontSize: 14, color: Colors.grey[400])),
+          ],
+        ),
+      );
+    }
+    if (_searchResults.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.search_off, size: 64, color: Colors.grey[300]),
+            const SizedBox(height: 12),
+            Text('未找到匹配的工具', style: TextStyle(fontSize: 14, color: Colors.grey[400])),
+          ],
+        ),
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      itemCount: _searchResults.length,
+      separatorBuilder: (_, _) => const Divider(height: 1, indent: 16, endIndent: 16),
+      itemBuilder: (context, index) {
+        final tool = _searchResults[index];
+        return ListTile(
+          leading: Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: tool.color.withValues(alpha: 0.15),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(tool.icon, size: 22, color: tool.color),
+          ),
+          title: Text(tool.name, style: const TextStyle(fontWeight: FontWeight.w500)),
+          subtitle: tool.subtitle != null ? Text(tool.subtitle!, style: TextStyle(fontSize: 12, color: Colors.grey[500])) : null,
+          trailing: const Icon(Icons.chevron_right, size: 18),
+          onTap: () {
+            AppLogger.i('HomePage', '搜索 - 点击工具：${tool.name}');
+            SessionTracker.instance.logPageView(tool.name);
+            _closeSearch();
+            Navigator.push(context, MaterialPageRoute(builder: tool.pageBuilder));
+          },
+        );
+      },
     );
   }
 
@@ -511,7 +611,6 @@ class _HomePageState extends State<HomePage> {
       // 顶部应用栏
       appBar: AppBar(
         // 左上角：三明治菜单按钮（Flutter 在指定了 drawer 时自动渲染）
-        // 这里显式指定为三明治图标样式
         leading: Builder(
           builder: (innerContext) => IconButton(
             icon: const Icon(Icons.menu),
@@ -522,63 +621,117 @@ class _HomePageState extends State<HomePage> {
             },
           ),
         ),
-        title: const Text('实用工具箱'),
+        title: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 250),
+          transitionBuilder: (child, animation) {
+            return SlideTransition(
+              position: Tween<Offset>(
+                begin: const Offset(0.3, 0.0),
+                end: Offset.zero,
+              ).animate(CurvedAnimation(
+                parent: animation,
+                curve: Curves.easeOut,
+              )),
+              child: child,
+            );
+          },
+          child: _showSearch
+              ? Padding(
+                  key: const ValueKey('search'),
+                  padding: const EdgeInsets.only(right: 8),
+                  child: SizedBox(
+                    height: 40,
+                    child: TextField(
+                      key: const ValueKey('searchField'),
+                      controller: _searchCtrl,
+                      focusNode: _searchFocusNode,
+                      decoration: InputDecoration(
+                        hintText: '搜索工具…',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: BorderSide.none,
+                        ),
+                        filled: true,
+                        fillColor: Colors.grey.shade200,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+                        suffixIcon: _searchCtrl.text.isNotEmpty
+                            ? IconButton(
+                                icon: Icon(Icons.clear, size: 18, color: Colors.grey[500]),
+                                onPressed: () {
+                                  _searchCtrl.clear();
+                                  _performSearch('');
+                                },
+                              )
+                            : null,
+                      ),
+                      style: const TextStyle(fontSize: 14),
+                      onChanged: _performSearch,
+                    ),
+                  ),
+                )
+              : const Padding(
+                  key: ValueKey('title'),
+                  padding: EdgeInsets.only(right: 8),
+                  child: Text('实用工具箱'),
+                ),
+        ),
         actions: [
-          // 右上角：软件说明（圆形问号按钮）
-          _buildAboutButton(context),
+          IconButton(
+            icon: Icon(_showSearch ? Icons.close : Icons.search),
+            onPressed: _showSearch ? _closeSearch : _openSearch,
+          ),
+          if (!_showSearch) _buildAboutButton(context),
         ],
       ),
       // 主体：双区块布局 — 日常小白区 + 极客区
-      // 使用 Listener 监听原始指针事件，绕过手势竞技场冲突
-      // 外层 Builder 确保 context 是 Scaffold 的后代
-      body: Builder(
-        builder: (bodyContext) => Listener(
-          onPointerDown: (event) {
-            _dragStartX = event.position.dx;
-            _isDragging = true;
-          },
-          onPointerMove: (event) {
-            if (!_isDragging) return;
-            final delta = event.position.dx - _dragStartX;
-            // 滑动超过 100px 时触发打开 Drawer
-            if (delta > 100) {
-              _isDragging = false;
-              Scaffold.of(bodyContext).openDrawer();
-            }
-          },
-          onPointerUp: (_) {
-            _isDragging = false;
-          },
-          onPointerCancel: (_) {
-            _isDragging = false;
-          },
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // 日常小白区
-                _buildZone(
-                  context: bodyContext,
-                  title: '日常小白区',
-                  subtitle: '简单好用，开箱即用',
-                  accentColor: const Color(0xFF6750A4),
-                  tools: _dailyTools,
+      // 搜索状态下显示搜索结果
+      body: _showSearch
+          ? _buildSearchResults(context)
+          : Builder(
+              builder: (bodyContext) => Listener(
+                onPointerDown: (event) {
+                  _dragStartX = event.position.dx;
+                  _isDragging = true;
+                },
+                onPointerMove: (event) {
+                  if (!_isDragging) return;
+                  final delta = event.position.dx - _dragStartX;
+                  if (delta > 100) {
+                    _isDragging = false;
+                    Scaffold.of(bodyContext).openDrawer();
+                  }
+                },
+                onPointerUp: (_) {
+                  _isDragging = false;
+                },
+                onPointerCancel: (_) {
+                  _isDragging = false;
+                },
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildZone(
+                        context: bodyContext,
+                        title: '日常小白区',
+                        subtitle: '简单好用，开箱即用',
+                        accentColor: const Color(0xFF6750A4),
+                        tools: _dailyTools,
+                      ),
+                      const SizedBox(height: 24),
+                      _buildZone(
+                        context: bodyContext,
+                        title: '极客区',
+                        subtitle: '专业工具，硬核玩家',
+                        accentColor: const Color(0xFFFF6D00),
+                        tools: _geekTools,
+                      ),
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 24),
-                // 极客区
-                _buildZone(
-                  context: bodyContext,
-                  title: '极客区',
-                  subtitle: '专业工具，硬核玩家',
-                  accentColor: const Color(0xFFFF6D00),
-                  tools: _geekTools,
-                ),
-              ],
+              ),
             ),
-          ),
-        ),
-      ),
     );
   }
 

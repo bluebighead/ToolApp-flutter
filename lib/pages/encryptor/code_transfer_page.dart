@@ -20,6 +20,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../utils/app_logger.dart';
+import '../../utils/encryptor_help.dart';
 
 /// 在 isolate 中处理大文件内容（读取 + base64 编码）
 /// 避免大文件阻塞 UI 线程
@@ -96,6 +97,17 @@ class _CodeTransferPageState extends State<CodeTransferPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('扫码传信'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.help_outline),
+            onPressed: () => showEncryptorHelp(
+              context,
+              name: '扫码传信',
+              principle: '二维码（QR Code）是一种矩阵式条码，由日本电装公司在1994年发明。通过黑白方块排列存储数据，支持数字、字母、汉字等。具有容错能力强、识别速度快、信息容量大等优点。条形码（Barcode）则是一维编码，仅在一个方向上存储信息。',
+              usage: '在输入框中输入要编码的文本，选择二维码或条形码格式，下方自动生成对应的码图。可调整容错级别（仅二维码）和图片大小。生成的码图可保存到相册或分享。',
+            ),
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),

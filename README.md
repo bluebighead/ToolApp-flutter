@@ -6,7 +6,7 @@
 ![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)
 ![Dart](https://img.shields.io/badge/Dart-3.11-0175C2?logo=dart)
 ![License](https://img.shields.io/badge/license-Private-lightgrey)
-![Version](https://img.shields.io/badge/version-1.27.0%2B143-blue)
+![Version](https://img.shields.io/badge/version-1.60.2%2B210-blue)
 
 ---
 
@@ -33,7 +33,7 @@
 - 完全离线 / 端侧能力：不依赖任何后端服务，所有计算 / 转码均在手机上完成。
 - 工程化约束：源码全部中文注释，遵循统一的日志规范和发版规则（详见 [PROJECT_RULES.md](./PROJECT_RULES.md)）。
 
-> 当前最新版本：**1.27.0+143** （2026-06-11）
+> 当前最新版本：**1.60.2+210** （2026-06-16）
 
 ---
 
@@ -95,11 +95,23 @@
 - **会话管理**：自动跟踪用户在线状态和会话时长。
 - **访客模式**：无需注册也可使用基础功能。
 
-### 7. 骰子
+### 7. 设备检修（NFC）
+- **NFC 读写器**：读取 NFC 标签的 UID、NDEF 文本/URI/vCard 等数据，支持多种标签类型。
+- **NFC 功能速写**：支持写入网址、文本、名片（含微信/QQ互斥）、回家/WiFi/投屏/导航/支付共 8 种 NFC 标签模式。
+- **安卓系统弹窗抑制**：使用 `androidReaderModeFlags`（NFC_A/B/F/V + SKIP_NDEF_CHECK + NO_PLATFORM_SOUNDS）彻底屏蔽系统弹窗。
+- **页面状态保持**：使用 `RouteObserver` + `RouteAware` 在页面间跳转后自动恢复 NFC 感应。
+
+### 8. 加解密工具箱
+- 按 **古老加密技术** 和 **现代加密技术** 分区展示，共 18 个小工具。
+- **古老加密技术区**：摩斯电码、凯撒密码、Atbash、维吉尼亚密码、柏拉费密码、仿射密码、波利比乌斯方阵、栅栏密码、猪圈密码、简单替换密码。
+- **现代加密技术区**：Base64、哈希计算（MD5/SHA1/SHA256/SHA512）、密码生成器、URL 编解码、Unicode 编解码、进制转换、扫码传信、二维码解码、Hex 转换、XOR 加密、HMAC 计算、AES 加解密（128/192/256 位）、RSA 非对称加密（密钥对生成）、文字工具箱。
+- **原理说明**：每个工具右上角均有帮助按钮，弹窗展示加密原理和使用说明。
+
+### 9. 骰子
 - 支持自定义骰子面数和数量。
 - 掷骰动画和结果展示。
 
-### 8. 设置 / 关于 / 日志
+### 10. 设置 / 关于 / 日志
 - **设置页**：屏幕旋转、暗色模式、视频保存目录。
 - **关于页**：展示 App 信息（版本号、构建号、最后更新时间等）。
 - **日志页**：查看 / 清空 / 复制 / 导出最近 500 条内存日志。
@@ -129,7 +141,9 @@
 | 本地存储         | `shared_preferences`、`path_provider`                                                        |
 | 文件 / 目录选择  | `file_picker` + Android 原生 `SAF`（通过 MethodChannel 桥接）                                |
 | 音视频           | `noise_meter`、`ffmpeg_kit_flutter_new`                                                      |
+| 加解密           | `crypto`、`encrypt`、`pointycastle`                                                          |
 | 蓝牙 BLE         | `flutter_blue_plus`                                                                          |
+| NFC              | `flutter_nfc_kit`、`ndef`                                                                     |
 | 图表             | `fl_chart`                                                                                   |
 | 权限             | `permission_handler`                                                                         |
 | 系统通知         | `flutter_local_notifications`、`timezone`                                                    |
@@ -189,7 +203,36 @@ ToolApp/
 │   │   │   ├── online_lobby_page.dart    # 在线大厅
 │   │   │   └── guest_join_page.dart      # 访客加入页
 │   │   ├── batch_convert_page.dart       # 批量转换页
-│   │   └── dice_page.dart                # 骰子页面
+│   │   ├── dice_page.dart                # 骰子页面
+│   │   ├── device_inspect/               # 设备检修工具
+│   │   │   ├── nfc_reader_page.dart      # NFC 读写器
+│   │   │   └── nfc_quick_write_page.dart # NFC 功能速写
+│   │   ├── encryptor_page.dart           # 加解密工具箱入口（分区展示）
+│   │   └── encryptor/                    # 加解密小工具（18 个）
+│   │       ├── morse_code_page.dart      # 摩斯电码
+│   │       ├── caesar_page.dart          # 凯撒密码
+│   │       ├── atbash_page.dart          # Atbash
+│   │       ├── vigenere_page.dart        # 维吉尼亚密码
+│   │       ├── playfair_page.dart        # 柏拉费密码
+│   │       ├── affine_page.dart          # 仿射密码
+│   │       ├── polybius_page.dart        # 波利比乌斯方阵
+│   │       ├── rail_fence_page.dart      # 栅栏密码
+│   │       ├── pigpen_page.dart          # 猪圈密码
+│   │       ├── substitution_page.dart    # 简单替换密码
+│   │       ├── base64_page.dart          # Base64 编解码
+│   │       ├── hash_page.dart            # 哈希计算
+│   │       ├── password_page.dart        # 密码生成器
+│   │       ├── url_codec_page.dart       # URL 编解码
+│   │       ├── unicode_page.dart         # Unicode 编解码
+│   │       ├── radix_page.dart           # 进制转换
+│   │       ├── code_transfer_page.dart   # 扫码传信
+│   │       ├── qr_decoder_page.dart      # 二维码解码
+│   │       ├── hex_page.dart             # Hex 转换
+│   │       ├── xor_page.dart             # XOR 加密
+│   │       ├── hmac_page.dart            # HMAC 计算
+│   │       ├── aes_page.dart             # AES 加解密
+│   │       ├── rsa_page.dart             # RSA 加解密
+│   │       └── text_tools_page.dart      # 文字工具箱
 │   ├── services/             # 服务层
 │   │   ├── auth_service.dart            # 认证服务（注册/登录/登出）
 │   │   ├── sync_service.dart            # 数据同步服务
@@ -203,15 +246,17 @@ ToolApp/
 │   │   ├── convert_history.dart       # 转换历史持久化
 │   │   ├── convert_notification.dart  # 转换进度通知
 │   │   ├── convert_resume_state.dart  # 暂停恢复状态序列化
+│   │   ├── encryptor_help.dart        # 加解密帮助弹窗组件
 │   │   ├── ffmpeg_service.dart        # FFmpeg 封装
 │   │   ├── heart_rate_ble.dart        # BLE 蓝牙低功耗心率接收
 │   │   ├── heart_rate_history.dart    # 心率历史记录持久化
 │   │   ├── heart_rate_udp.dart        # WiFi UDP 心率接收
 │   │   ├── m3u8_normalizer.dart       # M3U8 规范化
 │   │   ├── network_speed_*.dart       # 网速相关工具
+│   │   ├── route_observer.dart        # 全局路由观察器（NFC 页面状态）
 │   │   ├── saf_directory_helper.dart  # SAF 目录工具
 │   │   ├── saf_helper.dart            # SAF 桥接工具
-│   │   └── video_save_settings.dart   # 视频保存设置
+│   │   ├── video_save_settings.dart   # 视频保存设置
 │   │   ├── period_model.dart          # 经期宝数据模型、存储和预测算法
 │   │   └── period_export.dart         # 经期宝数据导出工具（CSV/XLS/TXT/DOCX）
 │   └── widgets/              # 通用组件
@@ -314,6 +359,12 @@ adb install -r build/app/outputs/flutter-apk/app-release.apk
 
 | 版本          | 更新时间   | 开发者  | 主要变更                                                                 |
 | ------------- | ---------- | ------- | ------------------------------------------------------------------------ |
+| `1.60.2+210`  | 2026-06-16 | SuperYH | 加解密工具箱新增 6 个现代工具（Hex/XOR/HMAC/AES/RSA/文字工具箱）+ 每页帮助按钮。 |
+| `1.59.0+209`  | 2026-06-16 | SuperYH | 加解密工具分为古老/现代两区，新增 8 个古密码（Atbash/维吉尼亚/柏拉费/仿射/波利比乌斯/栅栏/猪圈/简单替换）。 |
+| `1.58.5+208`  | 2026-06-16 | SuperYH | 加解密工具箱新增 7 个工具（Base64/哈希/凯撒/密码生成/URL编解码/Unicode/进制转换）。 |
+| `1.56.0+206`  | 2026-06-15 | SuperYH | NFC 功能速写：名片增加微信/QQ号互斥输入，写入 URI 记录自动打开 App。 |
+| `1.55.0+205`  | 2026-06-15 | SuperYH | NFC 功能速写页面：8 种写入模式（网址/文本/名片/WiFi/回家/投屏/导航/支付）+ 系统弹窗抑制 + RouteAware 恢复感应。 |
+| `1.53.0+203`  | 2026-06-15 | SuperYH | NFC 读写器页面。 |
 | `1.27.0+143`  | 2026-06-11 | SuperYH | 管理软件设置页增强：连接模式切换、远程密码修改、内网穿透预留、使用说明。  |
 | `1.26.0+142`  | 2026-06-11 | SuperYH | 修复在线状态误报、同步失败提示、数据库大小计算、启动脚本等问题。          |
 | `1.22.0+138`  | 2026-06-10 | SuperYH | 经期宝记录模式（精确/模糊）+ 筛选功能 + 导出增加模式列。                |

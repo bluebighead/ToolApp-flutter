@@ -889,6 +889,80 @@ class MainActivity : FlutterFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // 注册应用启动器通道：用于 deep link 触发启动指定应用（如 OPPO 互联投屏）
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "app.launcher")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "launchApp" -> {
+                        val packageName = call.argument<String>("packageName")
+                        if (packageName == null) {
+                            result.error("ARG_ERROR", "packageName 不能为空", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            val intent = packageManager.getLaunchIntentForPackage(packageName)
+                            if (intent != null) {
+                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                startActivity(intent)
+                                result.success(true)
+                            } else {
+                                // 应用未安装，尝试打开应用市场
+                                val marketIntent = Intent(Intent.ACTION_VIEW).apply {
+                                    data = Uri.parse("market://details?id=$packageName")
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                startActivity(marketIntent)
+                                result.success(false)
+                            }
+                        } catch (e: Exception) {
+                            result.error("LAUNCH_ERROR", "启动应用失败: ${e.message}", null)
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // 注册 deep link 通道：将 Android intent 的 data 传递给 Flutter
+        deepLinkChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "android.intent")
+        // 检查当前 activity 是否带有 deep link intent
+        handleIncomingIntent(intent, deepLinkChannel!!)
+    }
+
+    // ----------------------------------------------------------------------
+    // Deep Link 处理：NFC 碰卡触发的投屏等指令
+    // ----------------------------------------------------------------------
+
+    private var deepLinkChannel: MethodChannel? = null
+
+    /**
+     * 处理传入的 intent，检查是否包含 deep link URI
+     * 冷启动时在 configureFlutterEngine 中调用
+     * 热启动时在 onNewIntent 中调用
+     */
+    private fun handleIncomingIntent(intent: Intent?, channel: MethodChannel) {
+        deepLinkChannel = channel
+        if (intent?.action == Intent.ACTION_VIEW) {
+            val uri = intent.data?.toString()
+            if (uri != null) {
+                Log.i(TAG, "收到 deep link: $uri")
+                // 延迟发送，确保 Flutter 端已准备好接收
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    channel.invokeMethod("handleDeepLink", uri)
+                }, 500)
+            }
+        }
+    }
+
+    /**
+     * 热启动时 Android 会通过 onNewIntent 传递新的 intent
+     * 例如 App 已在后台，碰 NFC 卡后系统通过 deep link 唤起 App
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        deepLinkChannel?.let { channel ->
+            handleIncomingIntent(intent, channel)
+        }
     }
 
     // ----------------------------------------------------------------------

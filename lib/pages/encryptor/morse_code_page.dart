@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'dart:async';
 
 import '../../utils/app_logger.dart';
+import '../../utils/encryptor_help.dart';
 
 // 摩斯电码映射表：字符 -> 摩斯电码
 const Map<String, String> _charToMorse = {
@@ -252,6 +253,16 @@ class _MorseCodePageState extends State<MorseCodePage> {
                 _showReference = !_showReference;
               });
             },
+          ),
+          IconButton(
+            icon: const Icon(Icons.info_outline),
+            tooltip: '帮助说明',
+            onPressed: () => showEncryptorHelp(
+              context,
+              name: '摩斯电码',
+              principle: '摩斯电码（Morse Code）是一种通过点和划（·和—）组合表示字母、数字和标点符号的编码方式。由萨缪尔·摩斯在1830年代发明，主要用于电报通信。每个字符由唯一的一组点和划序列表示，字符间用短停顿分隔，单词间用长停顿分隔。',
+              usage: '在输入框中输入文本或摩斯电码（点用"."，划用"-"或"—"），页面会自动进行双向转换。点击扬声器图标可播放摩斯电码声音，点击振动图标可触觉感知电码序列。',
+            ),
           ),
         ],
       ),

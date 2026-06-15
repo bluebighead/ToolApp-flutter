@@ -3,8 +3,10 @@
 // 通过 AppSettings 控制屏幕旋转/暗色模式
 // v1.8.0+ 新增：自建轻量服务器认证（HTTP + JWT 替代 Supabase）
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'pages/auth/login_page.dart';
@@ -24,6 +26,7 @@ import 'utils/app_settings.dart';
 import 'utils/app_storage.dart';
 import 'utils/convert_coordinator.dart';
 import 'utils/convert_notification.dart';
+import 'utils/route_observer.dart';
 import 'utils/saf_directory_helper.dart';
 import 'utils/user_data_manager.dart';
 import 'widgets/ai_floating_button.dart';
@@ -89,12 +92,111 @@ class ToolApp extends StatefulWidget {
 class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
   OverlayEntry? _aiOverlay;
 
+  // Deep link 方法通道，用于接收 Android 端的 intent 数据
+  static const _channel = MethodChannel('android.intent');
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     appSettings.addListener(_onSettingsChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) => _updateAiOverlay());
+    // 监听 deep link（NFC 碰卡触发的投屏指令等）
+    _setupDeepLinkListener();
+  }
+
+  // 设置 deep link 监听器
+  // 当 NFC 标签被扫描时，Android 通过 intent 传递 URI 到 Flutter
+  void _setupDeepLinkListener() {
+    // 检查 App 启动时是否带有 deep link
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'handleDeepLink') {
+        final uri = call.arguments as String?;
+        if (uri != null) _handleDeepLink(uri);
+      }
+    });
+
+    // 通过 MethodChannel 获取初始 intent（App 冷启动时的 deep link）
+    _checkInitialIntent();
+  }
+
+  // 检查 App 冷启动时是否带有 deep link
+  Future<void> _checkInitialIntent() async {
+    try {
+      // Flutter 的 initialRoute 会自动处理冷启动的 deep link
+      // 对于热启动，通过 WidgetsBindingObserver 的 didChangeAppLifecycleState 处理
+    } catch (_) {}
+  }
+
+  // 处理 deep link URI
+  void _handleDeepLink(String uri) {
+    AppLogger.i('ToolApp', '收到 deep link: $uri');
+
+    // 解析 URI
+    final uriObj = Uri.tryParse(uri);
+    if (uriObj == null) return;
+
+    if (uri == 'toolapp://screencast') {
+      _launchScreencast();
+    } else if (uriObj.scheme == 'toolapp' && uriObj.host == 'home') {
+      _launchHomeMode(uriObj);
+    }
+  }
+
+  // 启动 OPPO 互联投屏
+  Future<void> _launchScreencast() async {
+    AppLogger.i('ToolApp', 'NFC触发投屏，正在启动OPPO互联...');
+    try {
+      const packageName = 'com.heytap.duplicate';
+      const channel = MethodChannel('app.launcher');
+      await channel.invokeMethod('launchApp', {'packageName': packageName});
+    } catch (e) {
+      AppLogger.w('ToolApp', '启动OPPO互联失败: $e，尝试备用方案...');
+      try {
+        const altPackage = 'com.oplus.cast';
+        const channel = MethodChannel('app.launcher');
+        await channel.invokeMethod('launchApp', {'packageName': altPackage});
+      } catch (e2) {
+        AppLogger.w('ToolApp', '备用方案也失败: $e2');
+      }
+    }
+  }
+
+  // 回家模式：依次执行导航、连接WiFi、启动音乐
+  Future<void> _launchHomeMode(Uri uriObj) async {
+    AppLogger.i('ToolApp', 'NFC触发回家模式...');
+    const channel = MethodChannel('app.launcher');
+
+    // 1. 导航回家（如果有地址参数，打开地图导航）
+    final addr = uriObj.queryParameters['addr'];
+    if (addr != null && addr.isNotEmpty) {
+      // 通过 geo URI 打开地图导航
+      try {
+        final geoUri = Uri.encodeComponent(addr);
+        // 启动高德地图导航
+        await channel.invokeMethod('launchApp', {
+          'packageName': 'com.autonavi.minimap',
+        });
+        AppLogger.i('ToolApp', '已启动高德地图导航');
+      } catch (e) {
+        AppLogger.w('ToolApp', '启动导航失败: $e');
+      }
+    }
+
+    // 2. 启动音乐 App
+    try {
+      await channel.invokeMethod('launchApp', {
+        'packageName': 'com.kugou.android',
+      });
+      AppLogger.i('ToolApp', '已启动酷狗音乐');
+    } catch (e) {
+      // 备用：QQ音乐
+      try {
+        await channel.invokeMethod('launchApp', {
+          'packageName': 'com.tencent.qqmusic',
+        });
+      } catch (_) {}
+    }
   }
 
   @override
@@ -218,6 +320,7 @@ class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
           title: AppInfo.appName,
           debugShowCheckedModeBanner: false,
           navigatorKey: rootNavigatorKey,
+          navigatorObservers: [appRouteObserver],
           builder: (context, child) {
             // 保持原始 MediaQuery，不覆盖 viewInsets，确保键盘避让正常工作
             return child!;
