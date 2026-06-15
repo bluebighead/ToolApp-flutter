@@ -84,6 +84,9 @@ class MainActivity : FlutterFragmentActivity() {
     /** 当前活跃的进度事件流（用于 copyM3u8WithSegments 期间推送进度） */
     private var copyProgressSink: EventChannel.EventSink? = null
 
+    /** BLE 广播回调：startAdvertising 时创建，stopAdvertising 时复用以避免 callback cannot be null */
+    private var bleAdvertiseCallback: android.bluetooth.le.AdvertiseCallback? = null
+
     /** 选目录请求码：保证唯一，避免与 Flutter 自身 onActivityResult 冲突 */
     private val REQUEST_CODE_PICK_DIRECTORY = 0x1001
 
@@ -795,7 +798,7 @@ class MainActivity : FlutterFragmentActivity() {
                                 val settings = android.bluetooth.le.AdvertiseSettings.Builder()
                                     .setAdvertiseMode(android.bluetooth.le.AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
                                     .setTxPowerLevel(android.bluetooth.le.AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-                                    .setConnectable(false)
+                                    .setConnectable(true)
                                     .build()
                                 val dataBuilder = android.bluetooth.le.AdvertiseData.Builder()
                                     .setIncludeDeviceName(includeDeviceName)
@@ -812,9 +815,10 @@ class MainActivity : FlutterFragmentActivity() {
                                         }
                                         override fun onStartFailure(errorCode: Int) {
                                             Log.e(TAG, "BLE 外设广播启动失败: errorCode=$errorCode")
+                                            bleAdvertiseCallback = null
                                             result.error("ADV_FAIL", "广播启动失败: $errorCode", null)
                                         }
-                                    }
+                                    }.also { bleAdvertiseCallback = it }
                                 )
                             } else {
                                 result.error("API_LOW", "Android 5.0+ 才支持 BLE 外设模式", null)
@@ -828,13 +832,59 @@ class MainActivity : FlutterFragmentActivity() {
                         try {
                             val adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
                             if (adapter != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-                                adapter.bluetoothLeAdvertiser?.stopAdvertising(null)
+                                val cb = bleAdvertiseCallback
+                                if (cb != null) {
+                                    adapter.bluetoothLeAdvertiser?.stopAdvertising(cb)
+                                    bleAdvertiseCallback = null
+                                }
                             }
                             result.success(true)
                         } catch (e: Throwable) {
                             Log.e(TAG, "停止 BLE 外设广播异常", e)
                             result.error("EXCEPTION", e.message ?: "unknown", null)
                         }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // 注册 Android Profiler 通道：CPU/内存/网络/电量实时监控
+        val profilerHelper = ProfilerHelper(this)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.toolapp/profiler")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getCpuInfo" -> {
+                        try { result.success(profilerHelper.getCpuInfo()) }
+                        catch (e: Exception) { result.error("CPU_ERROR", e.message, null) }
+                    }
+                    "getMemoryInfo" -> {
+                        try { result.success(profilerHelper.getMemoryInfo()) }
+                        catch (e: Exception) { result.error("MEMORY_ERROR", e.message, null) }
+                    }
+                    "getNetworkInfo" -> {
+                        try { result.success(profilerHelper.getNetworkInfo()) }
+                        catch (e: Exception) { result.error("NETWORK_ERROR", e.message, null) }
+                    }
+                    "getBatteryInfo" -> {
+                        try { result.success(profilerHelper.getBatteryInfo()) }
+                        catch (e: Exception) { result.error("BATTERY_ERROR", e.message, null) }
+                    }
+                    "getProcessList" -> {
+                        try { result.success(profilerHelper.getProcessList()) }
+                        catch (e: Exception) { result.error("PROCESS_ERROR", e.message, null) }
+                    }
+                    "getAppBatteryUsage" -> {
+                        try { result.success(profilerHelper.getAppBatteryUsage()) }
+                        catch (e: Exception) { result.error("BATTERY_USAGE_ERROR", e.message, null) }
+                    }
+                    "isUsageStatsGranted" -> {
+                        result.success(profilerHelper.isUsageStatsGranted())
+                    }
+                    "openUsageStatsSettings" -> {
+                        try {
+                            profilerHelper.openUsageStatsSettings()
+                            result.success(true)
+                        } catch (e: Exception) { result.error("SETTINGS_ERROR", e.message, null) }
                     }
                     else -> result.notImplemented()
                 }

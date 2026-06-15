@@ -9,6 +9,11 @@
         android:maxSdkVersion="32" />
     <!-- 视频格式转换：Android 13+ 细粒度读取媒体文件 -->
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- v1.55.0+ 音乐播放器：Android 13+ 读取音频文件 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- v1.55.0+ 音乐播放器：扫描设备全部存储目录 -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
     <!-- 视频格式转换：保存转换后的 MP4 文件到下载目录（可选） -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29"
@@ -33,9 +38,14 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- BLE 广播权限：Android 12+ 作为 Peripheral 发布广播需要 -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <!-- v1.52.5+ GPS定位检测：粗略定位权限（GPS检测需要） -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- v1.54.0+ Android Profiler：查看进程排行和耗电排行 -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
     <!-- v1.53.0+ NFC读写器：NFC通信权限 -->
     <uses-permission android:name="android.permission.NFC" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />

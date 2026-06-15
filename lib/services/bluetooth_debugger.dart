@@ -93,6 +93,8 @@ class BluetoothDebugger {
       StreamController<List<BtDevice>>.broadcast();
   Stream<List<BtDevice>> get devicesStream => _devicesController.stream;
 
+  List<BtService> get services => List.unmodifiable(_services);
+
   final List<BtService> _services = [];
   final StreamController<List<BtService>> _servicesController =
       StreamController<List<BtService>>.broadcast();
@@ -155,6 +157,12 @@ class BluetoothDebugger {
         withServices: [],
         scanMode: ScanMode.lowLatency,
       ).listen((device) {
+        // 过滤无效设备：名称为空或"未知设备"且信号极弱的设备
+        final deviceName = device.name.isNotEmpty ? device.name : '未知设备';
+        final isUnknown = deviceName == '未知设备';
+        // 未知设备且信号极弱（RSSI < -90）则跳过
+        if (isUnknown && device.rssi < -90) return;
+
         final beaconInfo = _parseBeaconData(device);
         final existing = _scannedDevices.indexWhere((d) => d.id == device.id);
         if (existing >= 0) {
@@ -162,12 +170,12 @@ class BluetoothDebugger {
         } else {
           _scannedDevices.add(BtDevice(
             id: device.id,
-            name: device.name.isNotEmpty ? device.name : '未知设备',
+            name: deviceName,
             rssi: device.rssi,
             beaconType: beaconInfo.$1,
             beaconData: beaconInfo.$2,
           ));
-          _addLog('INFO', _logTag, '发现设备: ${device.name} (${device.id})');
+          _addLog('INFO', _logTag, '发现设备: $deviceName (${device.id})');
         }
         if (device.id == _connectedDeviceId) {
           _rssiHistory.add(device.rssi);

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../services/ble_peripheral.dart';
 
@@ -26,6 +27,15 @@ class _BlePeripheralPageState extends State<BlePeripheralPage> {
       await _service.stopAdvertising();
       if (mounted) setState(() => _isAdvertising = false);
     } else {
+      final advertise = await Permission.bluetoothAdvertise.request();
+      if (!advertise.isGranted) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('需要 BLE 广播权限才能启动广播'), backgroundColor: Colors.red),
+          );
+        }
+        return;
+      }
       final ok = await _service.startAdvertising(
         name: _nameController.text.trim(),
         serviceUuids: [],
@@ -41,6 +51,38 @@ class _BlePeripheralPageState extends State<BlePeripheralPage> {
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
+        // 使用说明卡片
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: const Color(0xFFE3F2FD),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFBBDEFB)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.info_outline, size: 16, color: Color(0xFF1565C0)),
+                  const SizedBox(width: 6),
+                  const Text('使用说明',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF1565C0))),
+                ],
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'BLE 广播让手机模拟一个低功耗蓝牙设备，其他设备可扫描到本机并进行连接。\n\n'
+                '• 点击「START ADVERTISING」启动广播\n'
+                '• 在「设备」Tab 中可被其他设备扫描到\n'
+                '• 蓝牙广播需开启蓝牙和位置权限\n'
+                '• 支持服务 UUID 广播（自定义 UUID 暂未开放）',
+                style: TextStyle(fontSize: 12, color: Color(0xFF444444), height: 1.5),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
         Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(

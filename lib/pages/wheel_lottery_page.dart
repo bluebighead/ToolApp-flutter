@@ -3,6 +3,7 @@
 // 支持概率设置、命名、历史记录
 // v1.50.0+ 新增
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'dart:ui' as ui;
 
@@ -36,6 +37,33 @@ class LotteryRecord {
     result: json['result'] ?? '',
     timestamp: DateTime.tryParse(json['timestamp'] ?? '') ?? DateTime.now(),
     items: List<String>.from(json['items'] ?? []),
+  );
+}
+
+/// 保存的转盘配置数据模型
+class SavedWheel {
+  final String name;
+  final List<String> items;
+  final List<double> probabilities;
+
+  SavedWheel({
+    required this.name,
+    required this.items,
+    required this.probabilities,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'items': items,
+    'probabilities': probabilities,
+  };
+
+  factory SavedWheel.fromJson(Map<String, dynamic> json) => SavedWheel(
+    name: json['name'] ?? '',
+    items: List<String>.from(json['items'] ?? []),
+    probabilities: (json['probabilities'] as List<dynamic>?)
+        ?.map((e) => (e as num).toDouble())
+        .toList() ?? [],
   );
 }
 
@@ -73,6 +101,12 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
   // 历史记录
   List<LotteryRecord> _history = [];
 
+  // 保存的转盘配置
+  List<SavedWheel> _savedWheels = [];
+
+  // 当前加载的已保存转盘名称（用于快速覆盖保存）
+  String? _currentSavedName;
+
   // 编辑模式
   final TextEditingController _nameController = TextEditingController();
 
@@ -92,6 +126,7 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
     );
     _initProbabilities();
     _loadHistory();
+    _loadSavedWheels();
     _nameController.text = _wheelName;
   }
 
@@ -350,6 +385,22 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
                       '合计: ${_probabilities.fold(0.0, (a, b) => a + b) * 100}%',
                       style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
                     ),
+                    const SizedBox(width: 8),
+                    TextButton(
+                      onPressed: () {
+                        final equalVal = (100 / _items.length).toStringAsFixed(1);
+                        for (int i = 0; i < probControllers.length; i++) {
+                          probControllers[i].text = equalVal;
+                        }
+                        setDialogState(() {});
+                      },
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: const Text('平均分配', style: TextStyle(fontSize: 12)),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 8),
@@ -559,6 +610,7 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
               setState(() {
                 _items.clear();
                 _probabilities.clear();
+                _currentSavedName = null;
               });
               Navigator.pop(ctx);
             },
@@ -592,7 +644,202 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
       _items.clear();
       _items.addAll(items);
       _initProbabilities();
+      _currentSavedName = null;
     });
+  }
+
+  // ============================================================
+  // 保存/加载转盘配置
+  // ============================================================
+
+  /// 加载保存的转盘配置
+  Future<void> _loadSavedWheels() async {
+    try {
+      final prefs = AppSettings.prefs!;
+      final jsonList = prefs.getStringList('wheel_lottery_saved_wheels') ?? [];
+      final wheels = jsonList.map((s) {
+        try {
+          return SavedWheel.fromJson(jsonDecode(s));
+        } catch (_) {
+          return null;
+        }
+      }).whereType<SavedWheel>().toList();
+      _savedWheels = wheels;
+    } catch (e) {
+      AppLogger.e('WheelLottery', '加载保存的转盘失败: $e');
+    }
+  }
+
+  /// 保存转盘配置列表
+  Future<void> _saveSavedWheels() async {
+    try {
+      final prefs = AppSettings.prefs!;
+      final jsonList = _savedWheels.map((w) => jsonEncode(w.toJson())).toList();
+      await prefs.setStringList('wheel_lottery_saved_wheels', jsonList);
+    } catch (e) {
+      AppLogger.e('WheelLottery', '保存转盘配置失败: $e');
+    }
+  }
+
+  /// 显示保存当前转盘弹窗
+  void _showSaveWheelDialog() {
+    final nameCtrl = TextEditingController(text: _wheelName);
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        final isOverwrite = _savedWheels.any((w) => w.name == nameCtrl.text.trim());
+        return AlertDialog(
+        title: const Text('保存转盘', style: TextStyle(fontWeight: FontWeight.bold)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(isOverwrite ? '同名转盘已存在，将直接覆盖' : '保存当前转盘配置，方便下次使用'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: nameCtrl,
+              decoration: InputDecoration(
+                labelText: '转盘名称',
+                hintText: '输入转盘名称',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final name = nameCtrl.text.trim();
+              if (name.isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('请输入转盘名称')),
+                );
+                return;
+              }
+              setState(() {
+                _savedWheels.removeWhere((w) => w.name == name);
+                _savedWheels.insert(0, SavedWheel(
+                  name: name,
+                  items: List.from(_items),
+                  probabilities: List.from(_probabilities),
+                ));
+              });
+              _saveSavedWheels();
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('转盘「$name」已保存')),
+              );
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      );
+    },
+    );
+  }
+
+  /// 显示加载转盘弹窗
+  void _showLoadWheelDialog() {
+    if (_savedWheels.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('暂无保存的转盘配置')),
+      );
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('加载转盘', style: TextStyle(fontWeight: FontWeight.bold)),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: 400,
+            child: ListView.builder(
+              itemCount: _savedWheels.length,
+              itemBuilder: (_, i) {
+                final wheel = _savedWheels[i];
+                return Card(
+                  child: ListTile(
+                    leading: Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: Colors.orange.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(Icons.toll, color: Colors.orange),
+                    ),
+                    title: Text(wheel.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                    subtitle: Text(
+                      '${wheel.items.length} 个选项',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline, color: Colors.red),
+                      onPressed: () {
+                        setDialogState(() {
+                          _savedWheels.removeAt(i);
+                        });
+                        _saveSavedWheels();
+                      },
+                    ),
+                    onTap: () {
+                      setState(() {
+                        _items.clear();
+                        _items.addAll(wheel.items);
+                        _probabilities.clear();
+                        _probabilities.addAll(wheel.probabilities);
+                        _wheelName = wheel.name;
+                        _nameController.text = wheel.name;
+                        _currentSavedName = wheel.name;
+                        _rotationAngle = 0.0;
+                        _result = null;
+                      });
+                      Navigator.pop(ctx);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('已加载转盘「${wheel.name}」')),
+                      );
+                    },
+                  ),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 快速覆盖保存当前转盘，如果已保存则直接覆盖，否则弹出命名对话框
+  void _quickSaveWheel() {
+    final savedIndex = _savedWheels.indexWhere((w) =>
+        _currentSavedName != null && w.name == _currentSavedName);
+    if (savedIndex >= 0) {
+      final name = _savedWheels[savedIndex].name;
+      setState(() {
+        _savedWheels[savedIndex] = SavedWheel(
+          name: name,
+          items: List.from(_items),
+          probabilities: List.from(_probabilities),
+        );
+      });
+      _saveSavedWheels();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('转盘「$name」已更新')),
+      );
+    } else {
+      _showSaveWheelDialog();
+    }
   }
 
   // ============================================================
@@ -620,6 +867,18 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
             icon: const Icon(Icons.history),
             tooltip: '历史记录',
             onPressed: _showHistoryDialog,
+          ),
+          // 保存转盘按钮
+          IconButton(
+            icon: const Icon(Icons.save_outlined),
+            tooltip: '保存转盘',
+            onPressed: _showSaveWheelDialog,
+          ),
+          // 加载转盘按钮
+          IconButton(
+            icon: const Icon(Icons.folder_open_outlined),
+            tooltip: '加载转盘',
+            onPressed: _showLoadWheelDialog,
           ),
         ],
       ),
@@ -720,16 +979,53 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
                       children: [
                         const Text('转盘选项', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
                         const Spacer(),
-                        // 预设按钮
+                        // 更多菜单（预设+已保存转盘）
                         PopupMenuButton<String>(
                           icon: const Icon(Icons.more_horiz, size: 20),
-                          tooltip: '使用预设',
-                          onSelected: _usePreset,
-                          itemBuilder: (_) => [
-                            const PopupMenuItem(value: 'dinner', child: Text('🍽️ 晚餐选择')),
-                            const PopupMenuItem(value: 'drink', child: Text('🥤 饮品选择')),
-                            const PopupMenuItem(value: 'activity', child: Text('🎮 活动选择')),
-                          ],
+                          tooltip: '更多选项',
+                          onSelected: (value) {
+                            if (value.startsWith('saved:')) {
+                              final savedName = value.substring(6);
+                              final wheel = _savedWheels.firstWhere((w) => w.name == savedName);
+                              setState(() {
+                                _items.clear();
+                                _items.addAll(wheel.items);
+                                _probabilities.clear();
+                                _probabilities.addAll(wheel.probabilities);
+                                _wheelName = wheel.name;
+                                _nameController.text = wheel.name;
+                                _currentSavedName = wheel.name;
+                                _rotationAngle = 0.0;
+                                _result = null;
+                              });
+                            } else {
+                              _usePreset(value);
+                            }
+                          },
+                          itemBuilder: (_) {
+                            final entries = <PopupMenuEntry<String>>[];
+                            entries.addAll([
+                              const PopupMenuItem(value: 'dinner', child: Text('🍽️ 晚餐选择')),
+                              const PopupMenuItem(value: 'drink', child: Text('🥤 饮品选择')),
+                              const PopupMenuItem(value: 'activity', child: Text('🎮 活动选择')),
+                            ]);
+                            if (_savedWheels.isNotEmpty) {
+                              entries.add(const PopupMenuDivider());
+                              for (final wheel in _savedWheels) {
+                                entries.add(PopupMenuItem(
+                                  value: 'saved:${wheel.name}',
+                                  child: Row(
+                                    children: [
+                                      Icon(Icons.toll, size: 16, color: Colors.orange.shade400),
+                                      const SizedBox(width: 8),
+                                      Text(wheel.name),
+                                    ],
+                                  ),
+                                ));
+                              }
+                            }
+                            return entries;
+                          },
                         ),
                         IconButton(
                           icon: const Icon(Icons.delete_sweep, size: 20),
@@ -819,6 +1115,22 @@ class _WheelLotteryPageState extends State<WheelLotteryPage>
                         ),
                       ),
                     ),
+                    if (_currentSavedName != null) ...[
+                      const SizedBox(height: 6),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _quickSaveWheel,
+                          icon: const Icon(Icons.save, size: 18),
+                          label: const Text('保存修改'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),

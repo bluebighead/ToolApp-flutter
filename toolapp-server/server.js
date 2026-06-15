@@ -79,6 +79,11 @@ function _migrateTableColumn(tableName, columnName, columnType = 'TEXT') {
   }
 }
 
+// v1.56.1 迁移：为 music_songs 表添加 album, lyrics, cover_path 字段
+_migrateTableColumn('music_songs', 'album', "TEXT DEFAULT ''");
+_migrateTableColumn('music_songs', 'lyrics', "TEXT DEFAULT ''");
+_migrateTableColumn('music_songs', 'cover_path', "TEXT DEFAULT ''");
+
 // 创建用户表
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -296,6 +301,31 @@ db.exec(`
     detected_at TEXT DEFAULT (datetime('now')),
     synced_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  -- v1.55.0+ 音乐歌曲表 - 存储云端音乐元信息
+  CREATE TABLE IF NOT EXISTS music_songs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    artist TEXT DEFAULT '未知艺术家',
+    album TEXT DEFAULT '',
+    duration INTEGER DEFAULT 0,
+    file_path TEXT NOT NULL,
+    file_size INTEGER DEFAULT 0,
+    lyrics TEXT DEFAULT '',
+    cover_path TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  -- v1.55.0+ 音乐收藏表 - 用户收藏的云端歌曲
+  CREATE TABLE IF NOT EXISTS music_favorites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    song_id INTEGER NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (song_id) REFERENCES music_songs(id),
+    UNIQUE(user_id, song_id)
   );
 `);
 
@@ -2732,6 +2762,393 @@ function handleWsDisconnect(ws) {
     console.log(`客人断开: ${playerId} from ${clientInfo.roomCode}`);
   }
 }
+
+// ============================================================
+// v1.55.0+ 云音乐 API
+// 提供歌曲列表、流式播放、收藏管理等功能
+// ============================================================
+
+// 音乐文件存储目录
+// 优先使用项目根目录的 music/ 文件夹（与 toolapp-server 同级）
+// 如果不存在则使用 toolapp-server/music/
+const PROJECT_ROOT = path.resolve(__dirname, '..');
+let MUSIC_DIR = path.join(PROJECT_ROOT, 'music');
+if (!fs.existsSync(MUSIC_DIR)) {
+  MUSIC_DIR = path.join(__dirname, 'music');
+}
+if (!fs.existsSync(MUSIC_DIR)) {
+  fs.mkdirSync(MUSIC_DIR, { recursive: true });
+}
+console.log('音乐目录: ' + MUSIC_DIR);
+// 静态托管音乐文件（供流式播放）
+app.use('/music/files', express.static(MUSIC_DIR));
+
+// 启动时自动扫描 music/ 目录，将未注册的音频文件写入数据库
+// 支持的音频扩展名
+const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma', '.ape', '.opus', '.alac', '.wv'];
+function scanMusicDirectory() {
+  try {
+    const files = fs.readdirSync(MUSIC_DIR);
+    let addedCount = 0;
+    for (const file of files) {
+      const ext = path.extname(file).toLowerCase();
+      if (!AUDIO_EXTENSIONS.includes(ext)) continue;
+
+      // 检查数据库中是否已存在该文件
+      const existing = db.prepare('SELECT id FROM music_songs WHERE file_path = ?').get(file);
+      if (existing) continue;
+
+      // 从文件名解析标题和艺术家
+      const nameWithoutExt = path.basename(file, ext);
+      let title = nameWithoutExt;
+      let artist = '未知艺术家';
+      if (nameWithoutExt.includes(' - ')) {
+        const parts = nameWithoutExt.split(' - ');
+        artist = parts[0].trim();
+        title = parts.slice(1).join(' - ').trim();
+      }
+
+      // 获取文件大小
+      const filePath = path.join(MUSIC_DIR, file);
+      const stat = fs.statSync(filePath);
+
+      // 自动查找同名 .lrc 歌词文件
+      let lyrics = '';
+      const lrcPath = path.join(MUSIC_DIR, nameWithoutExt + '.lrc');
+      if (fs.existsSync(lrcPath)) {
+        try {
+          lyrics = fs.readFileSync(lrcPath, 'utf-8');
+          console.log(`歌词关联: ${nameWithoutExt}.lrc`);
+        } catch (e) {
+          console.error(`读取歌词失败 ${lrcPath}:`, e.message);
+        }
+      }
+
+      // 自动查找同名封面文件（jpg/png）
+      let coverPath = '';
+      for (const coverExt of ['.jpg', '.png', '.jpeg']) {
+        const cp = nameWithoutExt + coverExt;
+        if (fs.existsSync(path.join(MUSIC_DIR, cp))) {
+          coverPath = cp;
+          console.log(`封面关联: ${cp}`);
+          break;
+        }
+      }
+      // 也检查通用封面文件
+      if (!coverPath) {
+        for (const genericCover of ['cover.jpg', 'cover.png', 'folder.jpg', 'folder.png']) {
+          if (fs.existsSync(path.join(MUSIC_DIR, genericCover))) {
+            coverPath = genericCover;
+            break;
+          }
+        }
+      }
+
+      db.prepare(
+        'INSERT INTO music_songs (title, artist, file_path, file_size, lyrics, cover_path) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(title, artist, file, stat.size, lyrics, coverPath);
+      addedCount++;
+      console.log(`音乐注册: ${artist} - ${title} (${(stat.size / 1024 / 1024).toFixed(1)}MB)${lyrics ? ' [有歌词]' : ''}${coverPath ? ' [有封面]' : ''}`);
+    }
+    if (addedCount > 0) {
+      console.log(`音乐扫描完成，新增 ${addedCount} 首歌曲`);
+    } else {
+      console.log('音乐扫描完成，无新增歌曲');
+    }
+  } catch (err) {
+    console.error('扫描音乐目录失败:', err.message);
+  }
+}
+// 服务器启动时执行扫描
+scanMusicDirectory();
+
+// 获取歌曲列表（公开接口，无需认证）
+app.get('/api/music/songs', (req, res) => {
+  try {
+    const songs = db.prepare(`
+      SELECT s.id, s.title, s.artist, s.album, s.duration, s.file_size, s.lyrics, s.cover_path, s.created_at
+      FROM music_songs s
+      ORDER BY s.created_at DESC
+    `).all();
+
+    // 如果用户已登录，查询收藏状态
+    const authHeader = req.headers.authorization;
+    let userId = null;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      try {
+        const decoded = jwt.verify(authHeader.substring(7), JWT_SECRET);
+        userId = decoded.userId;
+      } catch (_) {}
+    }
+
+    // 为每首歌添加收藏状态和封面 URL
+    const result = songs.map(song => ({
+      ...song,
+      is_favorite: userId ? !!db.prepare(
+        'SELECT id FROM music_favorites WHERE user_id = ? AND song_id = ?'
+      ).get(userId, song.id) : false,
+      // 根据 cover_path 生成封面 URL
+      cover_url: song.cover_path ? `${req.protocol}://${req.get('host')}/music/files/${song.cover_path}` : null,
+    }));
+
+    res.json({ songs: result });
+  } catch (err) {
+    console.error('获取歌曲列表失败:', err.message);
+    res.status(500).json({ error: '获取歌曲列表失败' });
+  }
+});
+
+// 获取歌曲歌词（公开接口，无需认证）
+app.get('/api/music/songs/:id/lyrics', (req, res) => {
+  try {
+    const song = db.prepare('SELECT lyrics, file_path FROM music_songs WHERE id = ?').get(req.params.id);
+    if (!song) {
+      return res.status(404).json({ error: '歌曲不存在' });
+    }
+
+    // 如果数据库中有歌词，直接返回
+    if (song.lyrics) {
+      return res.json({ lyrics: song.lyrics });
+    }
+
+    // 否则尝试从同名 .lrc 文件读取
+    const nameWithoutExt = path.basename(song.file_path, path.extname(song.file_path));
+    const lrcPath = path.join(MUSIC_DIR, nameWithoutExt + '.lrc');
+    if (fs.existsSync(lrcPath)) {
+      const lyrics = fs.readFileSync(lrcPath, 'utf-8');
+      // 更新数据库缓存
+      db.prepare('UPDATE music_songs SET lyrics = ? WHERE id = ?').run(lyrics, req.params.id);
+      return res.json({ lyrics });
+    }
+
+    res.json({ lyrics: '' });
+  } catch (err) {
+    console.error('获取歌词失败:', err.message);
+    res.status(500).json({ error: '获取歌词失败' });
+  }
+});
+
+// 重新扫描音乐目录（需要认证）
+app.post('/api/music/scan', authMiddleware, (req, res) => {
+  try {
+    scanMusicDirectory();
+    res.json({ message: '扫描完成' });
+  } catch (err) {
+    console.error('扫描失败:', err.message);
+    res.status(500).json({ error: '扫描失败' });
+  }
+});
+
+// 流式播放歌曲（公开接口，无需认证）
+app.get('/api/music/songs/:id/stream', (req, res) => {
+  try {
+    const song = db.prepare('SELECT * FROM music_songs WHERE id = ?').get(req.params.id);
+    if (!song) {
+      return res.status(404).json({ error: '歌曲不存在' });
+    }
+
+    const filePath = path.join(MUSIC_DIR, song.file_path);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: '歌曲文件不存在' });
+    }
+
+    const stat = fs.statSync(filePath);
+    const fileSize = stat.size;
+    const range = req.headers.range;
+
+    // 支持 Range 请求（流式播放）
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunkSize = end - start + 1;
+
+      const fileStream = fs.createReadStream(filePath, { start, end });
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunkSize,
+        'Content-Type': 'audio/mpeg',
+      });
+      fileStream.pipe(res);
+    } else {
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': 'audio/mpeg',
+      });
+      fs.createReadStream(filePath).pipe(res);
+    }
+  } catch (err) {
+    console.error('流式播放失败:', err.message);
+    res.status(500).json({ error: '播放失败' });
+  }
+});
+
+// 添加收藏（需要认证）
+app.post('/api/music/favorites', authMiddleware, (req, res) => {
+  try {
+    const { song_id } = req.body;
+    if (!song_id) {
+      return res.status(400).json({ error: '歌曲ID不能为空' });
+    }
+
+    // 检查歌曲是否存在
+    const song = db.prepare('SELECT id FROM music_songs WHERE id = ?').get(song_id);
+    if (!song) {
+      return res.status(404).json({ error: '歌曲不存在' });
+    }
+
+    // 检查是否已收藏
+    const existing = db.prepare(
+      'SELECT id FROM music_favorites WHERE user_id = ? AND song_id = ?'
+    ).get(req.userId, song_id);
+
+    if (existing) {
+      return res.status(200).json({ message: '已收藏' });
+    }
+
+    // 添加收藏
+    db.prepare(
+      'INSERT INTO music_favorites (user_id, song_id) VALUES (?, ?)'
+    ).run(req.userId, song_id);
+
+    res.status(201).json({ message: '收藏成功' });
+  } catch (err) {
+    console.error('添加收藏失败:', err.message);
+    res.status(500).json({ error: '添加收藏失败' });
+  }
+});
+
+// 取消收藏（需要认证）
+app.delete('/api/music/favorites/:songId', authMiddleware, (req, res) => {
+  try {
+    const result = db.prepare(
+      'DELETE FROM music_favorites WHERE user_id = ? AND song_id = ?'
+    ).run(req.userId, req.params.songId);
+
+    if (result.changes === 0) {
+      return res.status(404).json({ error: '未找到收藏记录' });
+    }
+
+    res.json({ message: '取消收藏成功' });
+  } catch (err) {
+    console.error('取消收藏失败:', err.message);
+    res.status(500).json({ error: '取消收藏失败' });
+  }
+});
+
+// 获取收藏列表（需要认证）
+app.get('/api/music/favorites', authMiddleware, (req, res) => {
+  try {
+    const songs = db.prepare(`
+      SELECT s.id, s.title, s.artist, s.album, s.duration, s.file_size, s.lyrics, s.cover_path, s.created_at, 1 as is_favorite
+      FROM music_songs s
+      INNER JOIN music_favorites f ON s.id = f.song_id
+      WHERE f.user_id = ?
+      ORDER BY f.created_at DESC
+    `).all(req.userId);
+
+    // 为每首歌添加封面 URL
+    const result = songs.map(song => ({
+      ...song,
+      cover_url: song.cover_path ? `${req.protocol}://${req.get('host')}/music/files/${song.cover_path}` : null,
+    }));
+
+    res.json({ songs: result });
+  } catch (err) {
+    console.error('获取收藏列表失败:', err.message);
+    res.status(500).json({ error: '获取收藏列表失败' });
+  }
+});
+
+// 上传歌曲（需要认证，管理员功能）
+// multer 已在文件顶部引入
+const musicUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, MUSIC_DIR),
+    filename: (req, file, cb) => {
+      // 使用时间戳 + 原始文件名避免冲突
+      const ext = path.extname(file.originalname);
+      const name = path.basename(file.originalname, ext);
+      cb(null, `${Date.now()}-${name}${ext}`);
+    },
+  }),
+  fileFilter: (req, file, cb) => {
+    const allowedExts = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowedExts.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('不支持的音频格式'));
+    }
+  },
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB 限制
+});
+
+app.post('/api/music/upload', authMiddleware, musicUpload.single('file'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: '请选择音频文件' });
+    }
+
+    // 从文件名中解析标题和艺术家
+    const originalName = req.file.originalname;
+    const nameWithoutExt = originalName.replace(/\.[^.]+$/, '');
+    let title = nameWithoutExt;
+    let artist = '未知艺术家';
+
+    if (nameWithoutExt.includes(' - ')) {
+      const parts = nameWithoutExt.split(' - ');
+      artist = parts[0].trim();
+      title = parts.slice(1).join(' - ').trim();
+    }
+
+    // 插入歌曲记录
+    const result = db.prepare(
+      'INSERT INTO music_songs (title, artist, file_path, file_size) VALUES (?, ?, ?, ?)'
+    ).run(title, artist, req.file.filename, req.file.size);
+
+    res.status(201).json({
+      message: '上传成功',
+      song: {
+        id: result.lastInsertRowid,
+        title,
+        artist,
+        file_size: req.file.size,
+      },
+    });
+  } catch (err) {
+    console.error('上传歌曲失败:', err.message);
+    res.status(500).json({ error: '上传失败' });
+  }
+});
+
+// 删除歌曲（需要认证）
+app.delete('/api/music/songs/:id', authMiddleware, (req, res) => {
+  try {
+    const song = db.prepare('SELECT * FROM music_songs WHERE id = ?').get(req.params.id);
+    if (!song) {
+      return res.status(404).json({ error: '歌曲不存在' });
+    }
+
+    // 删除歌曲文件
+    const filePath = path.join(MUSIC_DIR, song.file_path);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+
+    // 删除相关收藏记录
+    db.prepare('DELETE FROM music_favorites WHERE song_id = ?').run(req.params.id);
+
+    // 删除歌曲记录
+    db.prepare('DELETE FROM music_songs WHERE id = ?').run(req.params.id);
+
+    res.json({ message: '删除成功' });
+  } catch (err) {
+    console.error('删除歌曲失败:', err.message);
+    res.status(500).json({ error: '删除失败' });
+  }
+});
 
 // ============================================================
 // 官网静态文件兜底（放在所有 API 路由之后）

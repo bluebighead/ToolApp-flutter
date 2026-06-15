@@ -11,6 +11,7 @@ import 'package:share_plus/share_plus.dart';
 import '../../services/bluetooth_debugger.dart';
 import 'ble_peripheral_page.dart';
 import 'bluetooth_device_detail_page.dart';
+import 'bt_function_page.dart';
 
 class BluetoothDebugPage extends StatefulWidget {
   const BluetoothDebugPage({super.key});
@@ -32,6 +33,8 @@ class _BluetoothDebugPageState extends State<BluetoothDebugPage>
   bool _isScanning = false;
   int _deviceCount = 0;
 
+  bool _isNormalMode = true; // 默认普通模式
+
   @override
   void initState() {
     super.initState();
@@ -50,14 +53,15 @@ class _BluetoothDebugPageState extends State<BluetoothDebugPage>
         );
       }
     });
-    _startScanWithPermissions();
+    if (!_isNormalMode) {
+      _startScanWithPermissions();
+    }
   }
 
   @override
   void dispose() {
     _devicesSub?.cancel();
     _tabController.dispose();
-    _debugger.dispose();
     super.dispose();
   }
 
@@ -141,6 +145,14 @@ class _BluetoothDebugPageState extends State<BluetoothDebugPage>
 
   @override
   Widget build(BuildContext context) {
+    if (_isNormalMode) {
+      return BtFunctionPage(
+        debugger: _debugger,
+        showAppBar: true,
+        isNormalMode: _isNormalMode,
+        onToggleMode: () => setState(() => _isNormalMode = false),
+      );
+    }
     return Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
@@ -166,6 +178,7 @@ class _BluetoothDebugPageState extends State<BluetoothDebugPage>
           ),
         ),
         actions: [
+          _buildModeToggle(),
           IconButton(
             icon: const Icon(Icons.share, size: 20, color: Color(0xFF555555)),
             tooltip: '导出日志',
@@ -180,6 +193,42 @@ class _BluetoothDebugPageState extends State<BluetoothDebugPage>
           const BlePeripheralPage(),
           _buildLogTab(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildModeToggle() {
+    return GestureDetector(
+      onTap: () => setState(() => _isNormalMode = !_isNormalMode),
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: _isNormalMode ? const Color(0xFFE3F2FD) : const Color(0xFFFFF3E0),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: _isNormalMode ? const Color(0xFF1565C0) : const Color(0xFFE65100),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              _isNormalMode ? Icons.person : Icons.engineering,
+              size: 14,
+              color: _isNormalMode ? const Color(0xFF1565C0) : const Color(0xFFE65100),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              _isNormalMode ? '普通' : '专业',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: _isNormalMode ? const Color(0xFF1565C0) : const Color(0xFFE65100),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

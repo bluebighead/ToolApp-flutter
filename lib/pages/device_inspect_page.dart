@@ -13,6 +13,7 @@ import 'device_inspect/microphone_test_page.dart';
 import 'device_inspect/speaker_test_page.dart';
 import 'device_inspect/fingerprint_test_page.dart';
 import 'device_inspect/gps_test_page.dart';
+import 'device_inspect/profiler_page.dart';
 
 class DeviceInspectPage extends StatelessWidget {
   const DeviceInspectPage({super.key});
@@ -58,6 +59,13 @@ class DeviceInspectPage extends StatelessWidget {
       color: Colors.cyan,
       subtitle: '坐标·地图',
       pageBuilder: (_) => const GpsTestPage(),
+    ),
+    ToolItem(
+      name: 'Android Profiler',
+      icon: Icons.speed,
+      color: Colors.green,
+      subtitle: 'CPU·内存·网络·电量',
+      pageBuilder: (_) => const ProfilerPage(),
     ),
   ];
 

@@ -32,9 +32,13 @@ class BlePeripheralService {
     bool includeDeviceName = true,
   }) async {
     try {
+      // 如果没有指定 Service UUID，使用默认 UUID 以便其他设备可发现
+      final uuids = serviceUuids.isEmpty
+          ? ['0000FE00-0000-1000-8000-00805F9B34FB']
+          : serviceUuids;
       final result = await _channel.invokeMethod<bool>('startAdvertising', {
         'name': name,
-        'serviceUuids': serviceUuids,
+        'serviceUuids': uuids,
         'includeDeviceName': includeDeviceName,
       });
       if (result == true) {

@@ -31,6 +31,7 @@ import 'device_inspect/nfc_reader_page.dart';
 import 'encryptor_page.dart';
 import 'encryptor/url_parser_page.dart';
 import 'compressor_entry_page.dart';
+import 'music/music_player_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -93,6 +94,15 @@ class _HomePageState extends State<HomePage> {
       color: Colors.red,
       category: ToolCategory.daily,
       pageBuilder: (_) => const HeartRatePage(),
+    ),
+    // v1.55.0+ 音乐播放器
+    ToolItem(
+      name: '音乐播放器',
+      icon: Icons.music_note,
+      color: Colors.purple,
+      category: ToolCategory.daily,
+      subtitle: '本地 · 云音乐',
+      pageBuilder: (_) => const MusicPlayerPage(),
     ),
   ];
 
