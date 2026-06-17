@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.60.1+210
+version: 1.73.2+264
 
 environment:
   sdk: ^3.11.1
@@ -126,6 +126,8 @@ dependencies:
   ndef: ^0.4.0
   # v1.58.5+ 哈希计算（MD5/SHA1/SHA256/SHA512）
   crypto: ^3.0.6
+  # v1.64.0+ SQLite 数据库查看
+  sqflite: ^2.3.0
   # v1.60.2+ AES/RSA 加解密
   encrypt: ^5.0.3
   pointycastle: ^3.9.1
@@ -133,6 +135,12 @@ dependencies:
   battery_plus: ^6.0.3
   # v1.54.0+ 网络连接类型检测：Android Profiler 工具
   connectivity_plus: ^6.1.4
+  # v1.63.0+ PDF生成：PDF工具箱（合并/拆分/图片转PDF）
+  pdf: ^3.11.1
+  # v1.63.0+ 图片处理：图片水印/证件照制作（像素级图像操作）
+  image: ^4.2.0
+  # v1.63.0+ 图片选择：图片水印/证件照制作（从相册选择图片）
+  image_picker: ^1.1.2
 
 # v1.50.0+ 强制覆盖 record_linux 版本，解决 record_linux 0.7.2 与 record_platform_interface 1.6.0 不兼容问题
 dependency_overrides:

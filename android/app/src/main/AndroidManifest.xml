@@ -33,6 +33,13 @@
     <!-- 联机掷骰子：检查网络连接状态 -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- NFC WiFi速写：需要开关WiFi状态、连接网络的权限 -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- NFC WiFi碰卡自动连接：requestNetwork需要此权限 -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <!-- Android 12+：WiFi扫描需要 NEARBY_WIFI_DEVICES 权限（替代原位置权限） -->
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
     <!-- 心率广播接收器：BLE 蓝牙低功耗权限 -->
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
@@ -48,6 +55,9 @@
         tools:ignore="ProtectedPermissions" />
     <!-- v1.53.0+ NFC读写器：NFC通信权限 -->
     <uses-permission android:name="android.permission.NFC" />
+    <!-- v1.60.1+ 电池健康度检测：读取 dumpsys battery 数据 -->
+    <uses-permission android:name="android.permission.DUMP"
+        tools:ignore="ProtectedPermissions" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <application
@@ -90,6 +100,74 @@
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="toolapp" android:host="home"/>
             </intent-filter>
+            <!-- NFC WiFi速写：碰卡后自动连接WiFi -->
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="application/vnd.wfa.wsc"/>
+            </intent-filter>
+            <!-- NFC链接速写：碰卡后打开指定URL -->
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:scheme="http"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:scheme="https"/>
+            </intent-filter>
+            <!-- NFC文本速写：碰卡后显示文本 -->
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/plain"/>
+            </intent-filter>
+            <!-- NFC名片速写：碰卡后显示vCard -->
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/vcard"/>
+            </intent-filter>
+            <!-- NFC导航速写：碰卡后打开地图 -->
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:scheme="geo"/>
+            </intent-filter>
+            <!-- NFC支付/社交速写：碰卡后打开支付宝/微信/QQ
+                 本应用拦截这些scheme的NFC消息，然后在onNewIntent中
+                 通过ACTION_VIEW转发给对应的第三方应用 -->
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:scheme="alipays"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:scheme="weixin"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:scheme="mqqwpa"/>
+            </intent-filter>
+            <!-- NFC自定义MIME类型：本应用专用NFC数据格式
+                 用于微信/QQ/支付宝等第三方应用的NFC跳转
+                 AAR+自定义MIME确保本应用100%能接收到NFC intent -->
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="application/vnd.com.example.toolapp.nfc"/>
+            </intent-filter>
+            <!-- NFC通用TECH/TAG发现：兜底intent filter，确保任何NFC标签都能被本应用捕获 -->
+            <intent-filter>
+                <action android:name="android.nfc.action.TECH_DISCOVERED"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+            <meta-data android:name="android.nfc.action.TECH_DISCOVERED"
+                       android:resource="@xml/nfc_tech_filter"/>
         </activity>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
@@ -158,5 +236,9 @@
             <category android:name="android.intent.category.BROWSABLE"/>
             <data android:scheme="http"/>
         </intent>
+        <!-- NFC跳转：声明微信/QQ/支付宝包名，Android 11+必须声明才能通过setPackage启动 -->
+        <package android:name="com.tencent.mm"/>
+        <package android:name="com.tencent.mobileqq"/>
+        <package android:name="com.eg.android.AlipayGphone"/>
     </queries>
 </manifest>

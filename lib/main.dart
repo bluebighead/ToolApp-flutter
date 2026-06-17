@@ -3,7 +3,6 @@
 // 通过 AppSettings 控制屏幕旋转/暗色模式
 // v1.8.0+ 新增：自建轻量服务器认证（HTTP + JWT 替代 Supabase）
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -114,6 +113,13 @@ class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
         final uri = call.arguments as String?;
         if (uri != null) _handleDeepLink(uri);
       }
+      // 处理NFC文本类型的碰卡（文本/URL/名片速写等）
+      else if (call.method == 'handleNdefText') {
+        final text = call.arguments as String?;
+        if (text != null && text.isNotEmpty) {
+          _showNfcTextNotice(text);
+        }
+      }
     });
 
     // 通过 MethodChannel 获取初始 intent（App 冷启动时的 deep link）
@@ -123,9 +129,16 @@ class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
   // 检查 App 冷启动时是否带有 deep link
   Future<void> _checkInitialIntent() async {
     try {
-      // Flutter 的 initialRoute 会自动处理冷启动的 deep link
-      // 对于热启动，通过 WidgetsBindingObserver 的 didChangeAppLifecycleState 处理
-    } catch (_) {}
+      // 修复：原方法体为空导致冷启动 deep link 丢失
+      // 通过 MethodChannel 获取冷启动时的 intent data
+      final initialUri = await _channel.invokeMethod<String>('getInitialIntent');
+      if (initialUri != null && initialUri.isNotEmpty) {
+        _handleDeepLink(initialUri);
+      }
+    } catch (e, st) {
+      // 捕获并记录异常，避免静默失败导致 deep link 丢失难以排查
+      AppLogger.e('ToolApp', '检查初始 intent 失败: $e', e, st);
+    }
   }
 
   // 处理 deep link URI
@@ -140,6 +153,40 @@ class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
       _launchScreencast();
     } else if (uriObj.scheme == 'toolapp' && uriObj.host == 'home') {
       _launchHomeMode(uriObj);
+    }
+  }
+
+  // 显示NFC碰卡读取到的文本内容（用于文本/URL/名片速写等）
+  void _showNfcTextNotice(String text) {
+    AppLogger.i('ToolApp', 'NFC碰卡读取到文本: $text');
+    try {
+      final context = rootNavigatorKey.currentContext;
+      if (context != null) {
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.nfc, color: Color(0xFF1565C0), size: 24),
+                SizedBox(width: 8),
+                Text('NFC 碰卡信息'),
+              ],
+            ),
+            content: Text(
+              text,
+              style: const TextStyle(fontSize: 15),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('确定'),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e) {
+      AppLogger.e('ToolApp', '显示NFC文本失败: $e');
     }
   }
 
@@ -172,12 +219,11 @@ class _ToolAppState extends State<ToolApp> with WidgetsBindingObserver {
     if (addr != null && addr.isNotEmpty) {
       // 通过 geo URI 打开地图导航
       try {
-        final geoUri = Uri.encodeComponent(addr);
-        // 启动高德地图导航
+        // 启动高德地图导航（地址参数已记录，由高德 App 内部处理导航目标）
         await channel.invokeMethod('launchApp', {
           'packageName': 'com.autonavi.minimap',
         });
-        AppLogger.i('ToolApp', '已启动高德地图导航');
+        AppLogger.i('ToolApp', '已启动高德地图导航，目标地址: $addr');
       } catch (e) {
         AppLogger.w('ToolApp', '启动导航失败: $e');
       }

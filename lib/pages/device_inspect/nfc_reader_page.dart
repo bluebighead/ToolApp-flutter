@@ -5,13 +5,16 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_nfc_kit/flutter_nfc_kit.dart';
 import 'package:ndef/ndef.dart';
+import 'package:ndef/records/media/wifi.dart';
 
 import '../../utils/route_observer.dart';
 import 'nfc_quick_write_page.dart';
+import 'nfc_write_test_page.dart';
 
 class _MifareSectorState {
   bool authenticated;
@@ -162,11 +165,13 @@ class _NfcReaderPageState extends State<NfcReaderPage>
     if (_isPolling) return;
     _isPolling = true;
     try {
-      const readerFlags = 0x01 | 0x02 | 0x04 | 0x08 | 0x80 | 0x100;
+      // 简化轮询：统一使用androidCheckNDEF=true确保NDEF数据可读取
+      // 对CUID/MIFARE Classic卡，启用NDEF检查才能正确读取写入的NDEF数据
+      const readerFlags = 0x01 | 0x02 | 0x04 | 0x08 | 0x100;
       final tag = await FlutterNfcKit.poll(
         androidReaderModeFlags: readerFlags,
         androidPlatformSound: false,
-        androidCheckNDEF: false,
+        androidCheckNDEF: true,
       );
       if (!mounted) return;
       await _onTagDiscovered(tag);
@@ -198,7 +203,22 @@ class _NfcReaderPageState extends State<NfcReaderPage>
 
     // Load NDEF in background to avoid blocking UI
     try {
-      final records = await FlutterNfcKit.readNDEFRecords();
+      // 对于MIFARE Classic/CUID卡，优先使用标准NDEF API读取
+      // 如果标准NDEF API读取失败（CUID卡通常ndefAvailable=false），
+      // 则尝试通过块级读取来解析NDEF数据
+      List<NDEFRecord> records;
+      if (tag.type == NFCTagType.mifare_classic) {
+        // CUID/MIFARE Classic卡：先尝试标准NDEF读取，失败则用块级解析
+        try {
+          records = await FlutterNfcKit.readNDEFRecords();
+        } catch (_) {
+          // 标准NDEF读取失败，尝试从块数据中解析NDEF
+          records = await _parseNdefFromMifareBlocks(tag);
+        }
+      } else {
+        records = await FlutterNfcKit.readNDEFRecords();
+      }
+
       if (mounted) {
         setState(() {
           _ndefRecords = records;
@@ -212,6 +232,402 @@ class _NfcReaderPageState extends State<NfcReaderPage>
           _isLoadingNdef = false;
         });
       }
+    }
+  }
+
+  // 从MIFARE Classic/CUID卡的块数据中解析NDEF消息
+  // 用于修复CUID卡读取时显示"未包含NDEF数据"的问题
+  Future<List<NDEFRecord>> _parseNdefFromMifareBlocks(NFCTag tag) async {
+    final records = <NDEFRecord>[];
+    try {
+      // 获取扇区数和每扇区块数
+      final sectorCount = tag.mifareInfo?.sectorCount ??
+          (tag.mifareInfo?.blockCount != null
+              ? (tag.mifareInfo!.blockCount / 4).ceil()
+              : 16);
+      final blocksPerSector = tag.mifareInfo?.blockCount != null && sectorCount > 0
+          ? (tag.mifareInfo!.blockCount / sectorCount).ceil()
+          : 4;
+      const defaultKeyA = 'FFFFFFFFFFFF';
+
+      // 读取扇区0的块1（含CC）和块2+（含NDEF TLV数据）
+      final rawData = <int>[];
+
+      // 尝试扇区0认证并读取块1-3的数据
+      bool authOk = false;
+      try {
+        authOk = await FlutterNfcKit.authenticateSector(0, keyA: defaultKeyA);
+      } catch (_) {
+        authOk = false;
+      }
+
+      if (authOk) {
+        // 从块1开始读取，跳过块0(UID/厂商数据)
+        for (var block = 1; block < blocksPerSector - 1; block++) {
+          try {
+            final blockData = await FlutterNfcKit.readBlock(block);
+            rawData.addAll(blockData);
+          } catch (_) {
+            break;
+          }
+        }
+      }
+
+      // 继续读取其他扇区的数据
+      final authenticatedSectors = <int>{if (authOk) 0};
+      for (var sector = 1; sector < sectorCount; sector++) {
+        try {
+          if (!authenticatedSectors.contains(sector)) {
+            final sectorAuthOk = await FlutterNfcKit.authenticateSector(sector, keyA: defaultKeyA);
+            if (!sectorAuthOk) continue;
+            authenticatedSectors.add(sector);
+          }
+          // 读取当前扇区除尾部块外的所有块
+          for (var b = 0; b < blocksPerSector - 1; b++) {
+            final blockIdx = sector * blocksPerSector + b;
+            try {
+              final blockData = await FlutterNfcKit.readBlock(blockIdx);
+              rawData.addAll(blockData);
+            } catch (_) {
+              continue;
+            }
+          }
+        } catch (_) {
+          continue;
+        }
+      }
+
+      // 解析NDEF TLV数据
+      if (rawData.isNotEmpty) {
+        final ndefRecords = _parseTlvToNdefRecords(Uint8List.fromList(rawData));
+        records.addAll(ndefRecords);
+      }
+    } catch (_) {
+      // 解析失败，返回空列表
+    }
+    return records;
+  }
+
+  // 从TLV格式的字节数据中解析NDEF记录列表
+  // TLV格式: [Type 1字节] [Length 1-3字节] [Value]
+  // NDEF TLV: Type=0x03, Value为NDEF消息二进制
+  List<NDEFRecord> _parseTlvToNdefRecords(Uint8List data) {
+    final records = <NDEFRecord>[];
+    try {
+      int offset = 0;
+
+      // 跳过块1前的CC字节(16字节块数据中前4字节为CC)
+      // 寻找NDEF TLV标记0x03
+      while (offset < data.length - 4) {
+        // 寻找Capability Container (CC)标记 E1
+        // CC后可能是NDEF TLV
+        if (data[offset] == 0xE1) {
+          // 找到CC标记，跳过CC(一般4字节)
+          offset += 16; // 跳到下一个块开始
+          continue;
+        }
+
+        // 寻找NDEF TLV: 0x03
+        if (data[offset] == 0x03) {
+          // 读取长度
+          int length;
+          int lengthOffset;
+          if (offset + 1 >= data.length) break;
+          if (data[offset + 1] < 0xFF) {
+            length = data[offset + 1];
+            lengthOffset = 2;
+          } else {
+            // 长格式: 0xFF + 2字节长度
+            if (offset + 3 >= data.length) break;
+            length = (data[offset + 2] << 8) | data[offset + 3];
+            lengthOffset = 4;
+          }
+
+          // 读取NDEF消息内容
+          final payloadStart = offset + lengthOffset;
+          if (payloadStart + length <= data.length) {
+            final ndefMessage = Uint8List.sublistView(data, payloadStart, payloadStart + length);
+            // 解析NDEF消息为记录列表
+            final parsedRecords = _decodeNdefMessage(ndefMessage);
+            records.addAll(parsedRecords);
+            offset = payloadStart + length;
+          } else {
+            break;
+          }
+        } else if (data[offset] == 0xFE) {
+          // TLV结束标记
+          break;
+        } else if (data[offset] == 0x00) {
+          // 空字节，跳过
+          offset++;
+        } else {
+          // 未知TLV类型，尝试解析长度并跳过
+          if (offset + 1 < data.length && data[offset + 1] < 0xFF) {
+            offset += 2 + data[offset + 1];
+          } else {
+            offset++;
+          }
+        }
+      }
+    } catch (_) {
+      // 解析异常，返回已解析的部分
+    }
+    return records;
+  }
+
+  // 将二进制NDEF消息解码为NDEFRecord列表
+  // 这是_ndefToMifareClassic中_encodeNdefMessage的反向操作
+  List<NDEFRecord> _decodeNdefMessage(Uint8List message) {
+    final records = <NDEFRecord>[];
+    int offset = 0;
+
+    while (offset < message.length) {
+      try {
+        // 解析NDEF记录头部
+        final header = message[offset];
+        final isMessageBegin = (header & 0x80) != 0;
+        final isMessageEnd = (header & 0x40) != 0;
+        final isChunked = (header & 0x20) != 0;
+        final isShortRecord = (header & 0x10) != 0;
+        final hasIdLength = (header & 0x08) != 0;
+        final tnf = header & 0x07;
+
+        offset++; // 移动到Type Length
+        if (offset >= message.length) break;
+
+        final typeLength = message[offset];
+        offset++;
+
+        // 读取Payload Length
+        int payloadLength;
+        if (isShortRecord) {
+          if (offset >= message.length) break;
+          payloadLength = message[offset];
+          offset++;
+        } else {
+          if (offset + 4 > message.length) break;
+          payloadLength = (message[offset] << 24) |
+              (message[offset + 1] << 16) |
+              (message[offset + 2] << 8) |
+              message[offset + 3];
+          offset += 4;
+        }
+
+        // 读取ID Length (可选)
+        int idLength = 0;
+        if (hasIdLength) {
+          if (offset >= message.length) break;
+          idLength = message[offset];
+          offset++;
+        }
+
+        // 读取Type
+        if (offset + typeLength > message.length) break;
+        final typeData = Uint8List.sublistView(message, offset, offset + typeLength);
+        offset += typeLength;
+
+        // 读取ID
+        Uint8List? idData;
+        if (idLength > 0) {
+          if (offset + idLength > message.length) break;
+          idData = Uint8List.sublistView(message, offset, offset + idLength);
+          offset += idLength;
+        }
+
+        // 读取Payload
+        if (offset + payloadLength > message.length) break;
+        final payload = Uint8List.sublistView(message, offset, offset + payloadLength);
+        offset += payloadLength;
+
+        // 根据TNF和Type构建NDEFRecord
+        final record = _buildNdefRecordFromRaw(tnf, typeData, payload, idData);
+        if (record != null) {
+          records.add(record);
+        }
+
+        if (isMessageEnd) break;
+      } catch (_) {
+        break;
+      }
+    }
+    return records;
+  }
+
+  // 根据原始TNF、Type和Payload构建具体的NDEFRecord
+  NDEFRecord? _buildNdefRecordFromRaw(int tnf, Uint8List type, Uint8List payload, Uint8List? id) {
+    try {
+      final typeStr = utf8.decode(type, allowMalformed: true);
+
+      switch (tnf) {
+        case 0x01: // Well Known
+          if (typeStr == 'T') {
+            // Text Record
+            if (payload.isNotEmpty) {
+              final statusByte = payload[0];
+              final languageLength = statusByte & 0x3F;
+              final isUtf16 = (statusByte & 0x80) != 0;
+              if (payload.length > languageLength) {
+                final language = utf8.decode(payload.sublist(1, 1 + languageLength), allowMalformed: true);
+                final textData = payload.sublist(1 + languageLength);
+                final text = isUtf16
+                    ? String.fromCharCodes(textData)
+                    : utf8.decode(textData, allowMalformed: true);
+                final record = TextRecord(language: language, text: text);
+                record.id = id;
+                return record;
+              }
+            }
+            final record = TextRecord(text: '');
+            record.id = id;
+            return record;
+          } else if (typeStr == 'U') {
+            // URI Record
+            if (payload.isNotEmpty) {
+              final prefixCode = payload[0];
+              final restData = payload.sublist(1);
+              final restStr = utf8.decode(restData, allowMalformed: true);
+              final prefix = prefixCode < UriRecord.prefixMap.length
+                  ? UriRecord.prefixMap[prefixCode]
+                  : '';
+              final record = UriRecord.fromString(prefix + restStr);
+              record.id = id;
+              return record;
+            }
+            final record = UriRecord.fromString('');
+            record.id = id;
+            return record;
+          }
+          return NDEFRecord(
+            tnf: TypeNameFormat.values[tnf],
+            type: type,
+            payload: payload,
+            id: id,
+          );
+        case 0x02: // Media/MIME
+          // WiFi记录的MIME类型是application/vnd.wfa.wsc
+          // 尝试解析为WiFi配置信息
+          final wifiInfo = _parseWscTlvPayload(payload);
+          if (wifiInfo != null) {
+            // 返回一个自定义的WiFi记录，包含WiFi配置信息
+            final wifiRecord = MimeRecord(decodedType: typeStr, id: id);
+            wifiRecord.payload = payload;
+            // 在record中存储解析后的信息（通过扩展字段存储在payload中）
+            return wifiRecord;
+          }
+          return MimeRecord(
+            decodedType: typeStr,
+            payload: payload,
+            id: id,
+          );
+        case 0x04: // External (AAR等)
+          return NDEFRecord(
+            tnf: TypeNameFormat.values[tnf],
+            type: type,
+            payload: payload,
+            id: id,
+          );
+        default:
+          return NDEFRecord(
+            tnf: TypeNameFormat.values[tnf],
+            type: type,
+            payload: payload,
+            id: id,
+          );
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // 解析WSC (WiFi Simple Configuration) TLV格式，提取SSID、密码和加密类型
+  // WSC是NFC写入WiFi配置的标准格式
+  // TLV格式：Type(2字节) | Length(2字节) | Value(变长)
+  // 注：WSC使用嵌套TLV结构，主类型是0x100E (Credential)，里面包含SSID等子TLV
+  Map<String, String>? _parseWscTlvPayload(Uint8List payload) {
+    if (payload.length < 4) return null;
+    try {
+      final result = <String, String>{};
+
+      // 解析顶层TLV
+      void parseTlv(Uint8List data, int offset, int end) {
+        while (offset < end - 4) {
+          // 读取Type（2字节，大端）
+          final type = (data[offset] << 8) | data[offset + 1];
+          offset += 2;
+
+          // 读取Length（2字节，大端）
+          final length = (data[offset] << 8) | data[offset + 1];
+          offset += 2;
+
+          // 长度验证
+          if (length < 0 || offset + length > end) break;
+
+          // 读取Value
+          final value = Uint8List.sublistView(data, offset, offset + length);
+
+          // 处理不同的WSC属性类型
+          switch (type) {
+            case 0x100E: // Credential (嵌套容器)
+              // Credential内部包含更多TLV，递归解析
+              parseTlv(value, 0, value.length);
+              break;
+            case 0x1045: // SSID
+              result['ssid'] = utf8.decode(value, allowMalformed: true).trim();
+              break;
+            case 0x1027: // Network Key / Password
+              result['password'] = utf8.decode(value, allowMalformed: true);
+              break;
+            case 0x1003: // Authentication Type
+              // 0x0001 = Open, 0x0002 = WPA-Personal, 0x0008 = WPA2-Personal, 0x0010 = WPA2-Enterprise, 0x0020 = WPA3
+              if (length >= 2) {
+                final authType = (value[0] << 8) | value[1];
+                String authStr;
+                switch (authType) {
+                  case 0x0001: authStr = 'OPEN'; break;
+                  case 0x0002: authStr = 'WPA'; break;
+                  case 0x0008: authStr = 'WPA2'; break;
+                  case 0x0010: authStr = 'WPA2-Enterprise'; break;
+                  case 0x0020: authStr = 'WPA3'; break;
+                  default: authStr = 'WPA2';
+                }
+                result['authType'] = authStr;
+              }
+              break;
+            case 0x100F: // Encryption Type
+              // 0x0002 = TKIP, 0x0004 = AES
+              if (length >= 2) {
+                final encType = (value[0] << 8) | value[1];
+                result['encType'] = encType == 0x0002 ? 'TKIP' : 'AES';
+              }
+              break;
+            case 0x1001: // Network Index (网络索引，通常为0或1)
+              if (length >= 1) {
+                result['networkIndex'] = '${value[0]}';
+              }
+              break;
+            default:
+              // 其他TLV类型，忽略
+              break;
+          }
+          offset += length;
+        }
+      }
+
+      // 从payload开始解析，支持嵌套TLV
+      parseTlv(payload, 0, payload.length);
+
+      // 必须有SSID才认为是有效WiFi配置
+      if (result.containsKey('ssid') && result['ssid']!.isNotEmpty) {
+        // 默认设置authType
+        if (!result.containsKey('authType')) {
+          result['authType'] =
+              result.containsKey('password') && result['password']!.isNotEmpty ? 'WPA2' : 'OPEN';
+        }
+        return result;
+      }
+      return null;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -682,6 +1098,21 @@ class _NfcReaderPageState extends State<NfcReaderPage>
               },
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: IconButton(
+              icon: const Icon(Icons.science, size: 22),
+              tooltip: '写入测试',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const NfcWriteTestPage(),
+                  ),
+                );
+              },
+            ),
+          ),
           if (_currentTag != null)
             Padding(
               padding: const EdgeInsets.only(right: 12),
@@ -946,6 +1377,8 @@ class _NfcReaderPageState extends State<NfcReaderPage>
         '可用作卡片识别和计数，但部分卡支持UID改写（中国魔改卡）。',
     '标签类型': 'NFC卡所属的技术标准类型。\n\n'
         '• MIFARE Classic — 最常见，广泛用于门禁、公交、校园卡\n'
+        '  CUID/FUID是中国市场常见的MIFARE Classic兼容卡，\n'
+        '  使用相同协议但允许UID改写，读写器会识别为MIFARE Classic\n'
         '• MIFARE Ultralight — 低成本标签，用于门票、海报\n'
         '• MIFARE DESFire — 高安全型号，支持加密通信\n'
         '• ISO 15693 — 长距离读取，用于图书馆、资产管理\n'
@@ -1134,7 +1567,7 @@ class _NfcReaderPageState extends State<NfcReaderPage>
     }
 
     r('标签UID', tag.id);
-    r('标签类型', _tagTypeName(tag.type));
+    r('标签类型', _tagTypeName(tag));
     r('通信标准', tag.standard);
 
     final writable = tag.ndefWritable == true;
@@ -1161,18 +1594,73 @@ class _NfcReaderPageState extends State<NfcReaderPage>
     return rows;
   }
 
-  String _tagTypeName(NFCTagType type) {
+  /// 精确识别标签类型
+  /// 对于MIFARE Classic，通过ATQA/SAK/UID进一步区分CUID/标准卡
+  String _tagTypeName(NFCTag tag) {
+    final type = tag.type;
+    if (type == NFCTagType.mifare_classic) {
+      return _identifyMifareClassicType(tag);
+    }
     return switch (type) {
+      NFCTagType.mifare_classic => 'MIFARE Classic', // 不应到达此处，已在上面处理
       NFCTagType.iso7816 => 'ISO 7816 (接触式IC卡)',
       NFCTagType.iso15693 => 'ISO 15693 (Vicinity卡)',
       NFCTagType.iso18092 => 'ISO 18092 (NFC-F / FeliCa)',
-      NFCTagType.mifare_classic => 'MIFARE Classic',
       NFCTagType.mifare_ultralight => 'MIFARE Ultralight',
       NFCTagType.mifare_desfire => 'MIFARE DESFire',
       NFCTagType.mifare_plus => 'MIFARE Plus',
       NFCTagType.webusb => 'WebUSB (浏览器NFC)',
       NFCTagType.unknown => '未知类型',
     };
+  }
+
+  /// 精确识别MIFARE Classic类型：区分CUID卡与标准MIFARE Classic
+  /// 通过UID制造商代码、SAK、ATQA综合判断
+  String _identifyMifareClassicType(NFCTag tag) {
+    // 解析UID第一个字节（制造商代码）
+    // 0x04 = NXP Semiconductors（正品MIFARE）
+    // 其他值通常为兼容卡（CUID/FUID等）
+    final uid = tag.id;
+    int? manufacturerByte;
+    if (uid.length >= 2) {
+      manufacturerByte = int.tryParse(uid.substring(0, 2), radix: 16);
+    }
+
+    // 解析SAK确定容量
+    int? sak;
+    if (tag.sak != null && tag.sak!.isNotEmpty) {
+      sak = int.tryParse(tag.sak!, radix: 16);
+    }
+
+    // 确定容量
+    String capacity = '';
+    if (sak != null) {
+      if (sak == 0x08 || sak == 0x28) {
+        capacity = '1K';
+      } else if (sak == 0x18 || sak == 0x38) {
+        capacity = '4K';
+      } else if (sak == 0x09) {
+        capacity = 'Mini';
+      }
+    }
+    // SAK不可用时，使用mifareInfo判断
+    if (capacity.isEmpty && tag.mifareInfo != null) {
+      if (tag.mifareInfo!.size <= 1024) {
+        capacity = '1K';
+      } else {
+        capacity = '4K';
+      }
+    }
+    if (capacity.isEmpty) capacity = '1K';
+
+    // 根据制造商代码判断卡片类型
+    if (manufacturerByte != null && manufacturerByte != 0x04) {
+      // 非NXP制造商代码 → 兼容卡（CUID/FUID等）
+      return 'CUID卡 (兼容MIFARE Classic $capacity)';
+    }
+
+    // 制造商代码为0x04（NXP）→ 标准MIFARE Classic
+    return 'MIFARE Classic $capacity';
   }
 
   void _showFieldInfo(String title, String explanation) {
@@ -1297,7 +1785,122 @@ class _NfcReaderPageState extends State<NfcReaderPage>
     IconData typeIcon;
     String displayText;
 
-    if (record is TextRecord) {
+    // 检测WiFi记录（两种情况）：
+    // 1. 从标准NDEF API读取的WifiRecord（ndef包中）
+    // 2. 从MIFARE块级解析的MimeRecord (MIME类型application/vnd.wfa.wsc)
+    final isWifiRecord = record is WifiRecord ||
+        (record is MimeRecord &&
+            (record.decodedType == 'application/vnd.wfa.wsc' ||
+                record.decodedType == 'application/vnd.wfa.wsc '));
+
+    if (isWifiRecord) {
+      // WiFi记录：尝试获取详细信息
+      typeStr = 'WiFi配置';
+      typeIcon = Icons.wifi;
+      String? ssid;
+      String? password;
+      String? authType;
+
+      if (record is WifiRecord) {
+        // 从ndef包中WifiRecord获取信息
+        ssid = record.ssid;
+        password = record.networkKey;
+        authType = record.authenticationType?.toString().split('.').last.toUpperCase();
+        if (authType == null || authType.isEmpty) {
+          authType = record.authenticationType == WifiAuthenticationType.open ? 'OPEN' : 'WPA2';
+        }
+      } else {
+        // 从MimeRecord的payload解析WSC TLV
+        final wifiInfo = _parseWscTlvPayload((record as MimeRecord).payload ?? Uint8List(0));
+        if (wifiInfo != null) {
+          ssid = wifiInfo['ssid'];
+          password = wifiInfo['password'];
+          authType = wifiInfo['authType'];
+        }
+      }
+
+      if (ssid != null && ssid.isNotEmpty) {
+        final displaySsid = ssid;
+        final displayPassword = password ?? '';
+        final displayAuth = authType ?? 'WPA2';
+        final hasPassword = displayPassword.isNotEmpty;
+
+        // 显示WiFi信息，同时提供连接按钮
+        return Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.grey[50],
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.grey[200]!),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(typeIcon, size: 16, color: Colors.blue[600]),
+                  const SizedBox(width: 6),
+                  Text('记录 ${index + 1} · $typeStr',
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: Colors.grey[100]!),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('网络名称 (SSID):',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+                    const SizedBox(height: 2),
+                    SelectableText(displaySsid,
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                    const SizedBox(height: 6),
+                    Text('加密类型:',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+                    const SizedBox(height: 2),
+                    Text(displayAuth,
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                    if (hasPassword) ...[
+                      const SizedBox(height: 6),
+                      Text('密码:',
+                          style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+                      const SizedBox(height: 2),
+                      SelectableText(displayPassword,
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: () {
+                    _connectWifiFromNdef(displaySsid, displayPassword, displayAuth);
+                  },
+                  icon: const Icon(Icons.wifi, size: 18),
+                  label: const Text('连接此WiFi'),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    textStyle: const TextStyle(fontSize: 13),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      } else {
+        // WiFi解析失败，显示原始数据
+        displayText = 'WiFi配置 (原始数据长度: ${(record is MimeRecord ? (record as MimeRecord).payload?.length : 0) ?? 0} 字节)';
+      }
+    } else if (record is TextRecord) {
       typeStr = '文本记录';
       typeIcon = Icons.text_fields;
       displayText = record.text ?? '(空)';
@@ -1347,22 +1950,102 @@ class _NfcReaderPageState extends State<NfcReaderPage>
     );
   }
 
+  // 从NDEF WiFi记录调用原生层连接WiFi
+  Future<void> _connectWifiFromNdef(String ssid, String password, String authType) async {
+    try {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('正在连接WiFi: $ssid...')),
+        );
+      }
+
+      // 通过MethodChannel调用原生Android代码连接WiFi
+      const wifiChannel = MethodChannel('com.example.toolapp/wifi_helper');
+      final result = await wifiChannel.invokeMethod<bool>('connectWifi', {
+        'ssid': ssid,
+        'password': password,
+        'authType': authType,
+      });
+
+      if (mounted) {
+        if (result == true) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('WiFi连接成功: $ssid'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('WiFi连接失败，请手动添加网络'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('WiFi连接失败: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   List<Widget> _buildTechSection(NFCTag tag) {
     final items = <Widget>[];
-    void r(String label, String value) {
-      items.add(_buildKV(label, value));
+    void r(String label, String? value) {
+      if (value != null && value.isNotEmpty) {
+        items.add(_buildKV(label, value));
+      }
     }
 
-    if (tag.atqa != null) r('ATQA', tag.atqa!);
-    if (tag.sak != null) r('SAK', tag.sak!);
-    if (tag.historicalBytes != null) r('历史字节', tag.historicalBytes!);
-    if (tag.hiLayerResponse != null) r('高层响应', tag.hiLayerResponse!);
-    if (tag.protocolInfo != null) r('协议信息', tag.protocolInfo!);
-    if (tag.applicationData != null) r('应用数据', tag.applicationData!);
-    if (tag.manufacturer != null) r('制造商', tag.manufacturer!);
-    if (tag.systemCode != null) r('系统代码', tag.systemCode!);
-    if (tag.dsfId != null) r('DSFID', tag.dsfId!);
-    if (tag.ndefType != null) r('NDEF类型', tag.ndefType!);
+    // MIFARE卡特有信息
+    if (tag.type == NFCTagType.mifare_classic ||
+        tag.type == NFCTagType.mifare_ultralight ||
+        tag.type == NFCTagType.mifare_desfire ||
+        tag.type == NFCTagType.mifare_plus) {
+      // 尝试从ATQA/SAK中获取，如API返回空则提供MIFARE特定补充信息
+      r('ATQA', tag.atqa);
+      r('SAK', tag.sak);
+
+      // MIFARE信息补充
+      if (tag.mifareInfo != null) {
+        final mifareInfo = tag.mifareInfo!;
+        if (mifareInfo.blockCount > 0) {
+          r('块数', '${mifareInfo.blockCount}');
+        }
+        if (mifareInfo.blockSize > 0) {
+          r('每块字节', '${mifareInfo.blockSize}');
+        }
+        if (mifareInfo.size > 0) {
+          r('总容量', '${mifareInfo.size} 字节');
+        }
+        // 计算扇区数
+        final sectorCount = mifareInfo.sectorCount ??
+            (mifareInfo.blockCount > 0 ? (mifareInfo.blockCount / 4).ceil() : null);
+        if (sectorCount != null) {
+          r('扇区数', '$sectorCount');
+        }
+      }
+    } else {
+      // 非MIFARE卡：显示标准字段
+      r('ATQA', tag.atqa);
+      r('SAK', tag.sak);
+    }
+
+    r('历史字节', tag.historicalBytes);
+    r('高层响应', tag.hiLayerResponse);
+    r('协议信息', tag.protocolInfo);
+    r('应用数据', tag.applicationData);
+    r('制造商', tag.manufacturer);
+    r('系统代码', tag.systemCode);
+    r('DSFID', tag.dsfId);
+    r('NDEF类型', tag.ndefType);
 
     if (items.isEmpty) {
       items.add(Padding(

@@ -113,18 +113,43 @@ class AppInfo {
   //   - 修复：废弃 OverlayEntry 自定义输入面板，改用 showModalBottomSheet
   //   - showModalBottomSheet 自动处理键盘避让、Material上下文、动画，无需手动计算
   //   - 代码从 218 行精简到 168 行，删除整个 _AiInputSheet 类
-  static const String version = '1.52.14';
+  // v1.65.1+ 升级说明（稳定性测试修复 - 11个致命bug + 关键严重bug）：
+  //   - countdown_page：修复"每年重复"开关无法切换的致命bug
+  //   - image_watermark_page：修复中文字体不支持导致水印失效，改用Canvas绘制
+  //   - unit_converter_page：修复build中创建Controller导致内存泄漏、Dropdown不更新
+  //   - password_book_page：修复主密码明文存储、IV硬编码、复制密码/可见性切换未实现
+  //   - logcat_viewer_page：修复流回调setState崩溃、ScrollController未检查hasClients
+  //   - port_scanner_page：修复停止扫描按钮被禁用导致无法中断扫描
+  //   - MainActivity.kt：修复sysfs路径语义错误、dumpsys/parseBatteryFromZip主线程ANR
+  //   - main.dart：修复_checkInitialIntent空实现导致冷启动deep link丢失
+  // v1.65.2+ 升级说明（NFC WiFi 速写修复）：
+  //   - 修复输入WiFi密码后点击确认按钮无法进行WiFi连接的问题
+  //     原因：Android 10+ 的 verifyWifiPassword 使用 WifiNetworkSuggestion
+  //     无法强制立即连接，15秒超时内系统通常不会自动连接，导致验证总是失败
+  //     修复：验证失败时弹窗询问用户是否仍要继续写卡，不再直接阻止
+  //   - 修复碰卡后无法自动跳转（连接WiFi）的问题
+  //     原因：connectWifiAndroid10Plus 仅使用 WifiNetworkSuggestion 添加网络建议，
+  //     该API不会强制立即连接，10秒超时内通常无法连接成功
+  //     修复：优先使用 WifiNetworkSpecifier + requestNetwork 强制立即连接，
+  //     失败时回退到 WifiNetworkSuggestion，最终回退到打开系统WiFi设置页
+  // v1.65.3+ 升级说明（NFC WiFi 速写修复 - 彻底解决验证卡死问题）：
+  //   - 修复输入正确密码后点击确认一直显示"正在验证密码"最后无任何提示的问题
+  //     原因：密码验证过程长达15+秒，SnackBar只有10秒，验证完成时UI状态异常
+  //     修复：完全移除密码验证步骤，点击确认后直接进入写卡流程
+  //     理由：Android 10+密码验证机制不可靠且会中断当前WiFi连接，
+  //     用户对自己输入的密码负责，写卡后碰卡时密码错误系统会自然连接失败
+  static const String version = '1.65.3';
 
   // 当前构建号（整数，每次发版递增）
   // 每次发版时同步更新 pubspec.yaml 中 version 字段的 + 号后的数字
-  static const int buildNumber = 195;
+  static const int buildNumber = 230;
 
   // 开发者署名
   static const String developer = 'SuperYH';
 
   // 最近一次发版的更新时间（格式：yyyy-MM-dd）
   // 每次发版时必须更新到当天日期
-  static const String lastUpdate = '2026-06-14';
+  static const String lastUpdate = '2026-06-18';
 
   // 完整版本字符串，UI 上直接显示使用
   static String get fullVersion => '$version (Build $buildNumber)';

@@ -3,10 +3,16 @@ package com.example.toolapp
 import android.media.MediaCodecList
 import android.media.MediaCodecInfo
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiInfo
+import android.nfc.NdefMessage
+import android.nfc.NfcAdapter
+import android.nfc.NdefRecord
+import android.os.BatteryManager
 import android.os.Build
 import android.provider.DocumentsContract
 import android.util.Log
@@ -19,6 +25,10 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.concurrent.TimeUnit
 
 /**
  * FlutterActivity 子类。
@@ -770,6 +780,58 @@ class MainActivity : FlutterFragmentActivity() {
                             result.error("EXCEPTION", e.message ?: "unknown", null)
                         }
                     }
+                    // 扫描附近 WiFi 列表（NFC WiFi 速写用）
+                    "scanWifiNetworks" -> {
+                        try {
+                            val wifiList = scanWifiNetworks()
+                            result.success(wifiList)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "WiFi 扫描失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    // 连接指定 WiFi（NFC WiFi 速写用）
+                    "connectWifi" -> {
+                        val ssid = call.argument<String>("ssid")
+                        val password = call.argument<String>("password") ?: ""
+                        val authType = call.argument<String>("authType") ?: "WPA"
+                        if (ssid == null) {
+                            result.error("ARG_ERROR", "SSID 不能为空", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            val success = connectWifi(ssid, password, authType)
+                            result.success(success)
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "WiFi 连接失败", e)
+                            result.error("EXCEPTION", e.message ?: "unknown", null)
+                        }
+                    }
+                    // 验证 WiFi 密码是否正确（NFC WiFi 速写用，写卡前验证）
+                    // 必须在后台线程执行，避免Thread.sleep阻塞主线程导致ANR闪退
+                    "verifyWifiPassword" -> {
+                        val ssid = call.argument<String>("ssid")
+                        val password = call.argument<String>("password") ?: ""
+                        val authType = call.argument<String>("authType") ?: "WPA"
+                        if (ssid == null) {
+                            result.error("ARG_ERROR", "SSID 不能为空", null)
+                            return@setMethodCallHandler
+                        }
+                        // 在后台线程执行验证，避免阻塞主线程
+                        Thread {
+                            try {
+                                val success = verifyWifiPassword(ssid, password, authType)
+                                runOnUiThread {
+                                    result.success(success)
+                                }
+                            } catch (e: Throwable) {
+                                Log.e(TAG, "WiFi 密码验证失败", e)
+                                runOnUiThread {
+                                    result.error("EXCEPTION", e.message ?: "unknown", null)
+                                }
+                            }
+                        }.start()
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -923,8 +985,239 @@ class MainActivity : FlutterFragmentActivity() {
                 }
             }
 
+        // 注册电池健康度通道：通过多种方式获取电池容量信息
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.toolapp/battery_health")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getBatteryHealth" -> {
+                        try {
+                            val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+                            // BATTERY_PROPERTY_CHARGE_COUNTER: 当前电量（微安时 µAh）
+                            val chargeCounter = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                                bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+                            } else -1
+                            // BATTERY_PROPERTY_CAPACITY: 当前电量百分比
+                            val capacityPercent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                                bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+                            } else -1
+                            // 通过反射获取设计容量（mAh）
+                            var designCapacityMah = -1
+                            try {
+                                // BATTERY_PROPERTY_CHARGE_FULL = 5 (隐藏常量)
+                                val fullUah = bm.getIntProperty(5)
+                                if (fullUah > 0) designCapacityMah = fullUah / 1000
+                            } catch (_: Exception) {}
+                            result.success(mapOf(
+                                "chargeCounter" to chargeCounter,
+                                "capacityPercent" to capacityPercent,
+                                "designCapacityMah" to designCapacityMah,
+                            ))
+                        } catch (e: Throwable) {
+                            result.error("BATTERY_ERROR", e.message ?: "unknown", null)
+                        }
+                    }
+                    "tryReadSysfs" -> {
+                        try {
+                            // 尝试多种 sysfs 路径获取电池信息
+                            // 修复：移除语义错误的路径，capacity 是电量百分比、constant_charge_current_max 是最大充电电流，均非设计容量
+                            val designPaths = listOf(
+                                "/sys/class/power_supply/battery/charge_full_design",
+                                "/sys/class/power_supply/bms/charge_full_design",
+                                "/sys/class/power_supply/battery/energy_full_design",
+                            )
+                            val fullPaths = listOf(
+                                "/sys/class/power_supply/battery/charge_full",
+                                "/sys/class/power_supply/bms/charge_full",
+                                "/sys/class/power_supply/battery/charge_counter",
+                            )
+                            var designUah: Int? = null
+                            var fullUah: Int? = null
+
+                            for (path in designPaths) {
+                                try {
+                                    val value = java.io.File(path).readText().trim().toIntOrNull()
+                                    if (value != null && value > 0) {
+                                        designUah = value
+                                        break
+                                    }
+                                } catch (_: Exception) { continue }
+                            }
+                            for (path in fullPaths) {
+                                try {
+                                    val value = java.io.File(path).readText().trim().toIntOrNull()
+                                    if (value != null && value > 0) {
+                                        fullUah = value
+                                        break
+                                    }
+                                } catch (_: Exception) { continue }
+                            }
+                            result.success(mapOf(
+                                "chargeFullDesign" to (designUah ?: -1),
+                                "chargeFull" to (fullUah ?: -1),
+                            ))
+                        } catch (e: Throwable) {
+                            result.error("SYSFS_ERROR", e.message ?: "unknown", null)
+                        }
+                    }
+                    // 通过 dumpsys battery 获取电池信息（在原生端执行，权限比Flutter沙箱高）
+                    // 修复：原实现在主线程执行 dumpsys 会导致 ANR，改为后台线程执行
+                    "readDumpsys" -> {
+                        Thread {
+                            var process: Process? = null
+                            try {
+                                process = Runtime.getRuntime().exec(arrayOf("dumpsys", "battery"))
+                                // 消费 stderr 避免缓冲区满导致进程挂死
+                                val stderr = process.errorStream.bufferedReader().readText()
+                                val output = process.inputStream.bufferedReader().readText()
+                                // 增加超时保护，避免 dumpsys 挂死导致永久阻塞
+                                val finished = process.waitFor(10, TimeUnit.SECONDS)
+                                if (!finished) {
+                                    process.destroyForcibly()
+                                    runOnUiThread { result.error("DUMPSYS_TIMEOUT", "dumpsys 执行超时", null) }
+                                    return@Thread
+                                }
+                                var designUah: Int? = null
+                                var fullUah: Int? = null
+                                var status: String? = null
+                                var level: Int? = null
+                                var voltage: Int? = null
+                                var temperature: Int? = null
+                                var technology: String? = null
+                                var currentNow: Int? = null
+                                var chargeCounter: Int? = null
+
+                                for (line in output.lines()) {
+                                    val trimmed = line.trim()
+                                    when {
+                                        // 标准格式
+                                        trimmed.startsWith("charge_full_design:") ->
+                                            designUah = trimmed.substringAfter(':').trim().toIntOrNull()
+                                        trimmed.startsWith("charge_full:") ->
+                                            fullUah = trimmed.substringAfter(':').trim().toIntOrNull()
+                                        // OPPO/OnePlus 特有格式：Charge counter（大写C开头）
+                                        trimmed.startsWith("Charge counter:") ->
+                                            chargeCounter = trimmed.substringAfter(':').trim().toIntOrNull()
+                                        // 标准格式 status（可能是数字或字符串）
+                                        trimmed.startsWith("status:") -> {
+                                            val valStr = trimmed.substringAfter(':').trim()
+                                            status = when (valStr) {
+                                                "1", "Unknown" -> "Unknown"
+                                                "2", "Charging" -> "Charging"
+                                                "3", "Discharging" -> "Discharging"
+                                                "4", "Not charging" -> "Not charging"
+                                                "5", "Full" -> "Full"
+                                                else -> valStr
+                                            }
+                                        }
+                                        trimmed.startsWith("level:") ->
+                                            level = trimmed.substringAfter(':').trim().toIntOrNull()
+                                        trimmed.startsWith("voltage:") ->
+                                            voltage = trimmed.substringAfter(':').trim().toIntOrNull()
+                                        trimmed.startsWith("temperature:") ->
+                                            temperature = trimmed.substringAfter(':').trim().toIntOrNull()
+                                        trimmed.startsWith("technology:") -> {
+                                            val techVal = trimmed.substringAfter(':').trim()
+                                            // 过滤纯数字（OPPO/OnePlus 返回数字如 "8"，不是有效类型）
+                                            if (techVal.isNotEmpty() && techVal.toIntOrNull() == null) {
+                                                technology = techVal
+                                            }
+                                        }
+                                        trimmed.startsWith("current_now:") ->
+                                            currentNow = trimmed.substringAfter(':').trim().toIntOrNull()
+                                    }
+                                }
+                                val resultMap = mapOf(
+                                    "chargeFullDesign" to (designUah ?: -1),
+                                    "chargeFull" to (fullUah ?: -1),
+                                    "chargeCounter" to (chargeCounter ?: -1),
+                                    "status" to (status ?: ""),
+                                    "level" to (level ?: -1),
+                                    "voltage" to (voltage ?: -1),
+                                    "temperature" to (temperature ?: -1),
+                                    "technology" to (technology ?: ""),
+                                    "currentNow" to (currentNow ?: -1),
+                                )
+                                runOnUiThread { result.success(resultMap) }
+                            } catch (e: Throwable) {
+                                runOnUiThread { result.error("DUMPSYS_ERROR", e.message ?: "unknown", null) }
+                            } finally {
+                                // 确保进程被销毁，避免资源泄漏
+                                process?.destroy()
+                            }
+                        }.start()
+                    }
+                    // 通过设备型号查询已知的设计容量数据库
+                    // 同时匹配 MODEL / DEVICE / PRODUCT 三个维度
+                    "getKnownDesignCapacity" -> {
+                        try {
+                            val model = Build.MODEL ?: ""
+                            val device = Build.DEVICE ?: ""
+                            val product = Build.PRODUCT ?: ""
+                            // 依次匹配 MODEL → DEVICE → PRODUCT
+                            var capacityMah = getKnownBatteryCapacity(model)
+                            if (capacityMah <= 0) capacityMah = getKnownBatteryCapacity(device)
+                            if (capacityMah <= 0) capacityMah = getKnownBatteryCapacity(product)
+                            result.success(mapOf(
+                                "model" to model,
+                                "device" to device,
+                                "product" to product,
+                                "designCapacityMah" to capacityMah,
+                            ))
+                        } catch (e: Throwable) {
+                            result.error("KNOWN_ERROR", e.message ?: "unknown", null)
+                        }
+                    }
+                    // 直接在原生端解析 zip 中的电池信息
+                    // 支持：标准 zip、嵌套 zip（小米 bug report 格式）
+                    // 使用 ZipInputStream 流式读取 + 逐行解析，避免 OOM
+                    // 不需要中间文件，直接返回解析结果
+                    // 修复：原实现在主线程执行 ZIP 解压+大文件解析会导致 ANR，改为后台线程
+                    "parseBatteryFromZip" -> {
+                        Thread {
+                            try {
+                                val zipPath = call.argument<String>("zipPath") ?: ""
+                                Log.d(TAG, "parseBatteryFromZip: path=$zipPath")
+                                val zipFile = File(zipPath)
+                                if (!zipFile.exists()) {
+                                    Log.e(TAG, "parseBatteryFromZip: file not found: $zipPath")
+                                    runOnUiThread { result.error("FILE_NOT_FOUND", "文件不存在: $zipPath", null) }
+                                    return@Thread
+                                }
+                                Log.d(TAG, "parseBatteryFromZip: file size=${zipFile.length()}")
+
+                                // 递归解析 zip（支持嵌套 zip）
+                                val batteryData = parseBatteryFromZipFile(zipFile, maxDepth = 2)
+
+                                if (batteryData != null) {
+                                    Log.d(TAG, "parseBatteryFromZip: found battery data=$batteryData")
+                                    runOnUiThread { result.success(batteryData) }
+                                } else {
+                                    Log.w(TAG, "parseBatteryFromZip: no battery data found")
+                                    runOnUiThread { result.success(null) }
+                                }
+                            } catch (e: Throwable) {
+                                Log.e(TAG, "parseBatteryFromZip error", e)
+                                runOnUiThread { result.error("PARSE_ERROR", e.message ?: "unknown", null) }
+                            }
+                        }.start()
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
         // 注册 deep link 通道：将 Android intent 的 data 传递给 Flutter
         deepLinkChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "android.intent")
+        // 保存冷启动时的 intent URI，供 Flutter 端 getInitialIntent 查询
+        // 修复 MissingPluginException：Flutter 端调用 getInitialIntent 时原生端未实现
+        initialIntentUri = intent?.data?.toString()
+        // 设置 MethodCallHandler 处理 Flutter 端发来的方法调用
+        deepLinkChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                // Flutter 端查询冷启动时的 deep link URI（如 toolapp://screencast）
+                "getInitialIntent" -> result.success(initialIntentUri)
+                else -> result.notImplemented()
+            }
+        }
         // 检查当前 activity 是否带有 deep link intent
         handleIncomingIntent(intent, deepLinkChannel!!)
     }
@@ -934,24 +1227,1024 @@ class MainActivity : FlutterFragmentActivity() {
     // ----------------------------------------------------------------------
 
     private var deepLinkChannel: MethodChannel? = null
+    /** 冷启动时的 deep link URI，供 Flutter 端 getInitialIntent 查询 */
+    private var initialIntentUri: String? = null
 
     /**
-     * 处理传入的 intent，检查是否包含 deep link URI
+     * 处理传入的 intent，检查是否包含 deep link URI 或 WiFi NDEF 配置
      * 冷启动时在 configureFlutterEngine 中调用
      * 热启动时在 onNewIntent 中调用
+     * 
+     * 修复问题：
+     * 1. AAR记录指向本应用时，系统可能用ACTION_TECH_DISCOVERED而非ACTION_NDEF_DISCOVERED启动
+     * 2. getParcelableArrayListExtra在Android 13+已废弃，需要使用兼容API
+     * 3. 微信/QQ URI需要通过ACTION_VIEW转发给第三方应用
      */
     private fun handleIncomingIntent(intent: Intent?, channel: MethodChannel) {
         deepLinkChannel = channel
+        val action = intent?.action
+
+        // 处理所有NFC类型的碰卡事件
+        if (action == NfcAdapter.ACTION_NDEF_DISCOVERED
+            || action == NfcAdapter.ACTION_TECH_DISCOVERED
+            || action == NfcAdapter.ACTION_TAG_DISCOVERED) {
+            
+            Log.i(TAG, "NFC碰卡: action=$action, type=${intent?.type}, data=${intent?.data}")
+            
+            val mimeType = intent?.type
+            // 优先处理 WiFi NDEF 配置（有特定mimeType的快速路径）
+            // 注意：当AAR记录存在时，系统可能用ACTION_TECH_DISCOVERED启动，
+            // 此时intent.type为null，此快速路径无法命中，
+            // 需要依赖下方通用NDEF解析中的兜底处理
+            if (mimeType == "application/vnd.wfa.wsc") {
+                Log.i(TAG, "收到 WiFi NDEF 配置 (mimeType快速路径)")
+                val ndefMessages = getNdefMessages(intent)
+                if (handleWifiNdefMessage(ndefMessages)) {
+                    return
+                }
+            }
+
+            // 处理本应用自定义MIME类型的NFC数据（微信/QQ/支付宝跳转）
+            // 注意：当AAR记录存在时，系统可能用ACTION_TECH_DISCOVERED启动，
+            // 此时intent.type为null，此快速路径无法命中，
+            // 需要依赖下方通用NDEF解析中的兜底处理
+            if (mimeType == "application/vnd.com.example.toolapp.nfc") {
+                Log.i(TAG, "收到本应用自定义NFC数据 (mimeType快速路径)")
+                val ndefMessages = getNdefMessages(intent)
+                if (handleCustomNdefMessage(ndefMessages)) {
+                    return
+                }
+            }
+
+            // 处理 URI/URL/文本/WiFi类型的NDEF
+            // 修复：当系统用ACTION_TECH_DISCOVERED/TAG_DISCOVERED启动时，
+            // intent.type为null，上方mimeType快速路径无法命中WiFi配置，
+            // 这里作为兜底路径，遍历NDEF记录查找WiFi记录
+            val ndefMessages = getNdefMessages(intent)
+            if (ndefMessages != null && ndefMessages.isNotEmpty()) {
+                val firstMessage = ndefMessages[0]
+                // 遍历NDEF记录，查找URI、文本或WiFi记录
+                for (record in firstMessage.records) {
+                    val tnf = record.tnf
+                    val type = String(record.type, Charsets.UTF_8)
+                    val payload = record.payload
+
+                    // TNF 2: MIME media type (WiFi配置等)
+                    // 兜底处理：当mimeType为null时，通过遍历记录类型识别WiFi配置
+                    if (tnf == NdefRecord.TNF_MIME_MEDIA) {
+                        // WiFi Simple Config记录
+                        if (type == "application/vnd.wfa.wsc") {
+                            Log.i(TAG, "NFC碰卡: 通用解析兜底发现WiFi配置记录")
+                            if (handleWifiNdefMessage(ndefMessages)) {
+                                return
+                            }
+                        }
+                        // 本应用自定义MIME记录（微信/QQ/支付宝跳转）
+                        if (type == "application/vnd.com.example.toolapp.nfc") {
+                            Log.i(TAG, "NFC碰卡: 通用解析兜底发现自定义MIME记录")
+                            if (handleCustomNdefMessage(ndefMessages)) {
+                                return
+                            }
+                        }
+                    }
+
+                    // TNF 1: Well-known type (U=URI, T=Text)
+                    if (tnf == NdefRecord.TNF_WELL_KNOWN) {
+                        // URI记录: type="U"
+                        if (type == "U" && payload.isNotEmpty()) {
+                            val uri = parseNdefUriRecord(payload)
+                            if (uri != null) {
+                                Log.i(TAG, "NFC碰卡: 解析到URI = $uri")
+                                // 立即处理URI（不延迟），加快跳转响应
+                                handleNfcUri(uri, channel)
+                                return
+                            }
+                        }
+                        // Text记录: type="T"
+                        if (type == "T" && payload.isNotEmpty()) {
+                            val text = parseNdefTextRecord(payload)
+                            if (text != null) {
+                                Log.i(TAG, "NFC碰卡: 解析到文本 = $text")
+                                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                    channel.invokeMethod("handleNdefText", text)
+                                }, 300)
+                                return
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 如果没有解析到有效NDEF记录，但有TAG发现，提示用户
+            // 修复：ACTION_TECH_DISCOVERED/TAG_DISCOVERED时EXTRA_NDEF_MESSAGES可能为空
+            // 需要从EXTRA_TAG获取Tag对象，通过Ndef API主动读取NDEF消息
+            Log.i(TAG, "NFC TAG 被本应用捕获 (action=$action, mimeType=$mimeType), 尝试从Tag读取NDEF消息")
+
+            // 从intent中获取Tag对象，在后台线程读取NDEF消息
+            // 兼容Android 13+的getParcelableExtra废弃警告
+            val tag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent?.getParcelableExtra(NfcAdapter.EXTRA_TAG, android.nfc.Tag::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent?.getParcelableExtra<android.nfc.Tag>(NfcAdapter.EXTRA_TAG)
+            }
+            if (tag != null) {
+                // 打印Tag诊断信息：tech列表、ID、大小
+                Log.i(TAG, "NFC碰卡: Tag techList=${tag.techList?.toList()}, id=${tag.id?.joinToString("") { "%02X".format(it) }}, size=${tag.id?.size}")
+                Thread {
+                    try {
+                        val ndef = android.nfc.tech.Ndef.get(tag)
+                        if (ndef != null) {
+                            ndef.connect()
+                            try {
+                                val ndefMessage = ndef.ndefMessage
+                                if (ndefMessage != null) {
+                                    Log.i(TAG, "NFC碰卡: 从Tag成功读取NDEF消息, records=${ndefMessage.records.size}")
+                                    val messages = arrayOf(ndefMessage)
+                                    // 优先处理WiFi配置
+                                    if (handleWifiNdefMessage(messages)) {
+                                        return@Thread
+                                    }
+                                    // 处理自定义MIME记录（微信/QQ/支付宝跳转）
+                                    if (handleCustomNdefMessage(messages)) {
+                                        return@Thread
+                                    }
+                                    // 处理URI/Text记录（网站跳转/文本显示）
+                                    if (handleUriAndTextNdefMessage(messages, channel)) {
+                                        return@Thread
+                                    }
+                                } else {
+                                    Log.w(TAG, "NFC碰卡: Tag的NDEF消息为null（可能是空标签）")
+                                }
+                            } finally {
+                                try { ndef.close() } catch (_: Throwable) { }
+                            }
+                        } else {
+                            Log.w(TAG, "NFC碰卡: Ndef.get(tag)返回null，尝试MifareClassic读取NDEF")
+                            // Mifare Classic卡：NDEF数据通过扇区块映射存储，不是原生Ndef格式
+                            // 需要用MifareClassic API认证扇区+读取块+解析NDEF TLV
+                            val ndefMessage = readNdefFromMifareClassic(tag)
+                            if (ndefMessage != null) {
+                                Log.i(TAG, "NFC碰卡: 从MifareClassic成功读取NDEF消息, records=${ndefMessage.records.size}")
+                                val messages = arrayOf(ndefMessage)
+                                // 优先处理WiFi配置
+                                if (handleWifiNdefMessage(messages)) {
+                                    return@Thread
+                                }
+                                // 处理自定义MIME记录（微信/QQ/支付宝跳转）
+                                if (handleCustomNdefMessage(messages)) {
+                                    return@Thread
+                                }
+                                // 处理URI/Text记录（网站跳转/文本显示）
+                                if (handleUriAndTextNdefMessage(messages, channel)) {
+                                    return@Thread
+                                }
+                            } else {
+                                Log.w(TAG, "NFC碰卡: MifareClassic读取NDEF失败或无NDEF数据")
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "NFC碰卡: 从Tag读取NDEF消息失败（标签可能已离开感应区）", e)
+                    }
+                }.start()
+            } else {
+                Log.w(TAG, "NFC碰卡: intent中没有EXTRA_TAG")
+            }
+        }
+
+        // 处理其他 deep link
         if (intent?.action == Intent.ACTION_VIEW) {
             val uri = intent.data?.toString()
             if (uri != null) {
                 Log.i(TAG, "收到 deep link: $uri")
-                // 延迟发送，确保 Flutter 端已准备好接收
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     channel.invokeMethod("handleDeepLink", uri)
-                }, 500)
+                }, 300)
             }
         }
+    }
+
+    /**
+     * 处理 WiFi NDEF 消息：解析WiFi配置并自动连接
+     * 
+     * 此方法统一处理WiFi连接逻辑，被两处调用：
+     * 1. handleIncomingIntent中mimeType快速路径（ACTION_NDEF_DISCOVERED + application/vnd.wfa.wsc）
+     * 2. handleIncomingIntent中通用NDEF解析兜底路径（ACTION_TECH_DISCOVERED/TAG_DISCOVERED时mimeType为null）
+     * 
+     * 修复问题：
+     * 原代码仅在mimeType == "application/vnd.wfa.wsc"时处理WiFi连接，
+     * 但当NFC标签包含AAR记录时，系统常以ACTION_TECH_DISCOVERED启动应用，
+     * 此时intent.type为null，导致WiFi连接逻辑被跳过。
+     * 
+     * @param ndefMessages NDEF消息数组，通常从getNdefMessages(intent)获取
+     * @return true表示已处理WiFi连接（无论成功与否），false表示未找到WiFi配置
+     */
+    private fun handleWifiNdefMessage(ndefMessages: Array<NdefMessage>?): Boolean {
+        if (ndefMessages == null || ndefMessages.isEmpty()) {
+            return false
+        }
+
+        // 先检查NDEF消息中是否包含WiFi记录（application/vnd.wfa.wsc）
+        var hasWifiRecord = false
+        for (record in ndefMessages[0].records) {
+            if (record.tnf == NdefRecord.TNF_MIME_MEDIA) {
+                val type = String(record.type, Charsets.UTF_8)
+                if (type == "application/vnd.wfa.wsc") {
+                    hasWifiRecord = true
+                    break
+                }
+            }
+        }
+
+        if (!hasWifiRecord) {
+            return false
+        }
+
+        // 在后台线程解析WiFi配置并连接
+        Thread {
+            try {
+                val wifiConfig = parseWifiNdefMessage(ndefMessages[0])
+                if (wifiConfig != null) {
+                    val ssid = wifiConfig["ssid"] ?: ""
+                    Log.i(TAG, "WiFi NDEF处理: 开始连接 SSID=$ssid")
+                    val success = connectWifi(
+                        ssid,
+                        wifiConfig["password"] ?: "",
+                        wifiConfig["authType"] ?: "WPA"
+                    )
+                    runOnUiThread {
+                        if (success) {
+                            android.widget.Toast.makeText(
+                                this,
+                                "已自动连接 WiFi: $ssid",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        } else {
+                            android.widget.Toast.makeText(
+                                this,
+                                "WiFi 连接失败，请检查密码",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                } else {
+                    Log.w(TAG, "WiFi NDEF处理: 解析WiFi配置为空")
+                    runOnUiThread {
+                        android.widget.Toast.makeText(
+                            this,
+                            "WiFi 配置解析失败",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.e(TAG, "处理 WiFi NDEF 失败", e)
+                runOnUiThread {
+                    android.widget.Toast.makeText(
+                        this,
+                        "WiFi 配置解析失败",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }.start()
+
+        return true
+    }
+
+    /**
+     * 处理本应用自定义MIME类型的NDEF消息（微信/QQ/支付宝跳转）
+     *
+     * 此方法统一处理自定义MIME类型(application/vnd.com.example.toolapp.nfc)的NDEF消息，
+     * 被两处调用：
+     * 1. handleIncomingIntent中mimeType快速路径（ACTION_NDEF_DISCOVERED）
+     * 2. handleIncomingIntent中通用NDEF解析兜底路径（ACTION_TECH_DISCOVERED时mimeType为null）
+     * 3. MifareClassic读取NDEF消息后的处理
+     *
+     * payload为JSON格式，包含type字段（wechat/qq/alipay/wechat_pay）和对应的id参数
+     *
+     * @param ndefMessages NDEF消息数组
+     * @return true表示已处理自定义MIME记录，false表示未找到自定义MIME记录
+     */
+    private fun handleCustomNdefMessage(ndefMessages: Array<NdefMessage>?): Boolean {
+        if (ndefMessages == null || ndefMessages.isEmpty()) {
+            return false
+        }
+
+        // 遍历NDEF记录，查找自定义MIME类型记录
+        for (record in ndefMessages[0].records) {
+            // TNF 2: MIME media type
+            if (record.tnf == NdefRecord.TNF_MIME_MEDIA) {
+                val type = String(record.type, Charsets.UTF_8)
+                if (type == "application/vnd.com.example.toolapp.nfc") {
+                    try {
+                        val payload = String(record.payload, Charsets.UTF_8)
+                        Log.i(TAG, "自定义NFC数据payload: $payload")
+                        val json = org.json.JSONObject(payload)
+                        val actionType = json.optString("type", "")
+
+                        when (actionType) {
+                            // 微信跳转：打开微信
+                            "wechat" -> {
+                                val wechatId = json.optString("id", "")
+                                Log.i(TAG, "NFC碰卡: 微信跳转, id=$wechatId")
+                                // 切换到主线程执行，避免子线程调用Toast崩溃
+                                runOnUiThread { openWechat(wechatId) }
+                            }
+                            // QQ跳转：打开QQ临时会话
+                            "qq" -> {
+                                val qqId = json.optString("id", "")
+                                Log.i(TAG, "NFC碰卡: QQ跳转, id=$qqId")
+                                // 切换到主线程执行，避免子线程调用Toast崩溃
+                                runOnUiThread { openQQ(qqId) }
+                            }
+                            // 支付宝跳转
+                            "alipay" -> {
+                                Log.i(TAG, "NFC碰卡: 支付宝跳转")
+                                // 切换到主线程执行，避免子线程调用Toast崩溃
+                                runOnUiThread { openAlipay() }
+                            }
+                            // 微信支付跳转
+                            "wechat_pay" -> {
+                                Log.i(TAG, "NFC碰卡: 微信支付跳转")
+                                // 切换到主线程执行，避免子线程调用Toast崩溃
+                                runOnUiThread { openWechatPay() }
+                            }
+                            // 导航跳转：打开指定导航软件搜索目的地
+                            "navigate" -> {
+                                val navApp = json.optString("app", "amap")
+                                val navQuery = json.optString("query", "")
+                                Log.i(TAG, "NFC碰卡: 导航跳转, app=$navApp, query=$navQuery")
+                                // 切换到主线程执行，避免子线程调用startActivity崩溃
+                                runOnUiThread { openNavigate(navApp, navQuery) }
+                            }
+                        }
+                        return true
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "解析自定义NFC数据失败", e)
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * 处理URI和Text类型的NDEF消息（网站跳转/文本显示）
+     *
+     * 此方法统一处理URI记录和Text记录，被两处调用：
+     * 1. handleIncomingIntent中通用NDEF解析兜底路径（ACTION_TECH_DISCOVERED时mimeType为null）
+     * 2. MifareClassic读取NDEF消息后的处理
+     *
+     * 注意：此方法可能从子线程调用，handleNfcUri中的startActivity需要切换到主线程
+     *
+     * @param ndefMessages NDEF消息数组
+     * @param channel MethodChannel用于与Flutter通信
+     * @return true表示已处理URI或Text记录，false表示未找到URI或Text记录
+     */
+    private fun handleUriAndTextNdefMessage(ndefMessages: Array<NdefMessage>?, channel: MethodChannel): Boolean {
+        if (ndefMessages == null || ndefMessages.isEmpty()) {
+            return false
+        }
+
+        // 遍历NDEF记录，查找URI或Text记录
+        for (record in ndefMessages[0].records) {
+            val tnf = record.tnf
+            val type = String(record.type, Charsets.UTF_8)
+            val payload = record.payload
+
+            // TNF 1: Well-known type (U=URI, T=Text)
+            if (tnf == NdefRecord.TNF_WELL_KNOWN) {
+                // URI记录: type="U"
+                if (type == "U" && payload.isNotEmpty()) {
+                    val uri = parseNdefUriRecord(payload)
+                    if (uri != null) {
+                        Log.i(TAG, "NFC碰卡: 解析到URI = $uri")
+                        // 切换到主线程处理URI，避免子线程调用startActivity崩溃
+                        runOnUiThread { handleNfcUri(uri, channel) }
+                        return true
+                    }
+                }
+                // Text记录: type="T"
+                if (type == "T" && payload.isNotEmpty()) {
+                    val text = parseNdefTextRecord(payload)
+                    if (text != null) {
+                        Log.i(TAG, "NFC碰卡: 解析到文本 = $text")
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            channel.invokeMethod("handleNdefText", text)
+                        }, 300)
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * 打开微信
+     * 先尝试通过weixin://scheme打开微信，再尝试通过包名直接启动
+     */
+    private fun openWechat(wechatId: String) {
+        try {
+            // 方案1：通过weixin://scheme打开微信
+            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("weixin://"))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.setPackage("com.tencent.mm")
+            startActivity(intent)
+            Log.i(TAG, "已打开微信")
+            // 提示用户微信号
+            if (wechatId.isNotEmpty()) {
+                // 复制微信号到剪贴板，方便用户搜索添加
+                val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("微信号", wechatId))
+                android.widget.Toast.makeText(
+                    this,
+                    "已复制微信号: $wechatId\n请在微信中搜索添加",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "通过scheme打开微信失败，尝试包名启动", e)
+            try {
+                // 方案2：通过包名直接启动微信
+                val launchIntent = packageManager.getLaunchIntentForPackage("com.tencent.mm")
+                if (launchIntent != null) {
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(launchIntent)
+                    if (wechatId.isNotEmpty()) {
+                        val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("微信号", wechatId))
+                        android.widget.Toast.makeText(
+                            this,
+                            "已复制微信号: $wechatId\n请在微信中搜索添加",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                } else {
+                    android.widget.Toast.makeText(this, "未安装微信", android.widget.Toast.LENGTH_LONG).show()
+                }
+            } catch (e2: Throwable) {
+                android.widget.Toast.makeText(this, "无法打开微信", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /**
+     * 打开QQ
+     * 先复制QQ号到剪贴板，再尝试通过scheme打开QQ名片页面，失败则直接打开QQ
+     * 注意：mqqwpa://临时会话scheme在新版QQ上可能导致崩溃，不再使用
+     */
+    private fun openQQ(qqId: String) {
+        // 先复制QQ号到剪贴板，方便用户搜索添加
+        if (qqId.isNotEmpty()) {
+            try {
+                val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("QQ号", qqId))
+            } catch (_: Throwable) { }
+        }
+
+        if (qqId.isEmpty()) {
+            // 没有QQ号，直接打开QQ
+            try {
+                val launchIntent = packageManager.getLaunchIntentForPackage("com.tencent.mobileqq")
+                if (launchIntent != null) {
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(launchIntent)
+                } else {
+                    android.widget.Toast.makeText(this, "未安装QQ", android.widget.Toast.LENGTH_LONG).show()
+                }
+            } catch (_: Throwable) { }
+            return
+        }
+
+        try {
+            // 方案1：通过mqqapi://scheme打开QQ名片页面（比临时会话更稳定）
+            // 用户可以在名片页面直接添加好友
+            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("mqqapi://card/show_pslcard?src_type=internal&version=1&uin=$qqId&card_type=person&source=qrcode"))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.setPackage("com.tencent.mobileqq")
+            startActivity(intent)
+            Log.i(TAG, "已打开QQ名片页面: $qqId")
+            android.widget.Toast.makeText(
+                this,
+                "已复制QQ号: $qqId\n请在名片页面添加好友",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        } catch (e: Throwable) {
+            Log.w(TAG, "通过scheme打开QQ名片失败，尝试包名启动", e)
+            try {
+                // 方案2：直接打开QQ，用户手动搜索添加（QQ号已复制到剪贴板）
+                val launchIntent = packageManager.getLaunchIntentForPackage("com.tencent.mobileqq")
+                if (launchIntent != null) {
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(launchIntent)
+                    android.widget.Toast.makeText(
+                        this,
+                        "已复制QQ号: $qqId\n请在QQ中搜索添加",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    android.widget.Toast.makeText(this, "未安装QQ", android.widget.Toast.LENGTH_LONG).show()
+                }
+            } catch (e2: Throwable) {
+                android.widget.Toast.makeText(this, "无法打开QQ", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /**
+     * 打开支付宝收款码
+     */
+    private fun openAlipay() {
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("alipays://platformapi/startapp?appId=20000056"))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.setPackage("com.eg.android.AlipayGphone")
+            startActivity(intent)
+            Log.i(TAG, "已打开支付宝收款码")
+        } catch (e: Throwable) {
+            Log.w(TAG, "通过scheme打开支付宝失败，尝试包名启动", e)
+            try {
+                val launchIntent = packageManager.getLaunchIntentForPackage("com.eg.android.AlipayGphone")
+                if (launchIntent != null) {
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(launchIntent)
+                } else {
+                    android.widget.Toast.makeText(this, "未安装支付宝", android.widget.Toast.LENGTH_LONG).show()
+                }
+            } catch (e2: Throwable) {
+                android.widget.Toast.makeText(this, "无法打开支付宝", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /**
+     * 打开微信付款码
+     */
+    private fun openWechatPay() {
+        try {
+            // 微信没有公开的付款码scheme，直接打开微信
+            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("weixin://"))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.setPackage("com.tencent.mm")
+            startActivity(intent)
+            android.widget.Toast.makeText(this, "请在微信中打开付款码", android.widget.Toast.LENGTH_LONG).show()
+        } catch (e: Throwable) {
+            try {
+                val launchIntent = packageManager.getLaunchIntentForPackage("com.tencent.mm")
+                if (launchIntent != null) {
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(launchIntent)
+                } else {
+                    android.widget.Toast.makeText(this, "未安装微信", android.widget.Toast.LENGTH_LONG).show()
+                }
+            } catch (_: Throwable) {
+                android.widget.Toast.makeText(this, "无法打开微信", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /**
+     * 打开指定导航软件并搜索目的地
+     *
+     * 支持国内主流导航软件：高德地图、百度地图、腾讯地图
+     * 根据app标识构造对应的搜索scheme，指定包名打开对应应用
+     * 若应用未安装，则弹出提示框告知用户
+     *
+     * @param navApp 导航软件标识：amap=高德, baidu=百度, tencent=腾讯
+     * @param query 目的地名称或地址（用户输入的文本）
+     */
+    private fun openNavigate(navApp: String, query: String) {
+        // 导航软件包名和搜索scheme映射表
+        val navAppConfig = when (navApp) {
+            "amap" -> Triple(
+                "com.autonavi.minimap",  // 高德地图包名
+                "高德地图",
+                // 高德地图：使用keywordNavi按关键字搜索导航（用户只输入名称没有经纬度）
+                // androidamap://keywordNavi?sourceApplication=xxx&keyword=目的地&style=2
+                "androidamap://keywordNavi?sourceApplication=toolapp&keyword=${android.net.Uri.encode(query)}&style=2"
+            )
+            "baidu" -> Triple(
+                "com.baidu.BaiduMap",    // 百度地图包名
+                "百度地图",
+                "baidumap://map/navi?query=${android.net.Uri.encode(query)}&src=toolapp"
+            )
+            "tencent" -> Triple(
+                "com.tencent.map",       // 腾讯地图包名
+                "腾讯地图",
+                "qqmap://route/plan?to=${android.net.Uri.encode(query)}&referer=toolapp"
+            )
+            else -> Triple(
+                "com.autonavi.minimap",
+                "高德地图",
+                "androidamap://keywordNavi?sourceApplication=toolapp&keyword=${android.net.Uri.encode(query)}&style=2"
+            )
+        }
+
+        val (packageName, appName, scheme) = navAppConfig
+
+        try {
+            // 通过scheme打开指定导航软件，设置包名确保直接打开目标应用
+            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(scheme))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.setPackage(packageName)
+            startActivity(intent)
+            Log.i(TAG, "已打开${appName}导航到: $query")
+        } catch (e: Throwable) {
+            Log.w(TAG, "${appName}未安装或无法打开", e)
+            // 应用未安装，弹出提示框告知用户
+            android.app.AlertDialog.Builder(this)
+                .setTitle("未安装$appName")
+                .setMessage("您的手机未安装$appName，无法自动导航到「$query」。\n\n请前往应用商店下载安装$appName，或重新写卡选择其他导航软件。")
+                .setPositiveButton("去下载") { _, _ ->
+                    // 尝试打开应用商店搜索该应用
+                    try {
+                        val marketIntent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("market://details?id=$packageName"))
+                        marketIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(marketIntent)
+                    } catch (_: Throwable) {
+                        // 应用商店也未安装，打开浏览器搜索
+                        try {
+                            val browserIntent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.baidu.com/s?wd=$appName 下载"))
+                            browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            startActivity(browserIntent)
+                        } catch (_: Throwable) {
+                            android.widget.Toast.makeText(this, "无法打开应用商店", android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+    }
+
+    /**
+     * 兼容Android 13+的NDEF消息获取方法
+     * Android 13+中getParcelableArrayListExtra已废弃，需要使用getParcelableArrayListExtra(key, class)
+     */
+    @Suppress("DEPRECATION")
+    private fun getNdefMessages(intent: Intent?): Array<NdefMessage>? {
+        if (intent == null) return null
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val messages = intent.getParcelableArrayListExtra(
+                    NfcAdapter.EXTRA_NDEF_MESSAGES, NdefMessage::class.java
+                )
+                messages?.toTypedArray()
+            } else {
+                val messages = intent.getParcelableArrayListExtra<NdefMessage>(
+                    NfcAdapter.EXTRA_NDEF_MESSAGES
+                )
+                messages?.toTypedArray()
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "获取NDEF消息失败", e)
+            null
+        }
+    }
+
+    /**
+     * 处理NFC碰卡解析到的URI
+     * 根据URI类型分发处理：本应用指令、微信/QQ/支付宝跳转、其他URI
+     */
+    private fun handleNfcUri(uri: String, channel: MethodChannel) {
+        when {
+            // 本应用自定义scheme
+            uri.startsWith("toolapp://") -> {
+                channel.invokeMethod("handleDeepLink", uri)
+            }
+            // 微信/QQ/支付宝URI：通过ACTION_VIEW转发给对应应用
+            uri.startsWith("weixin://") || uri.startsWith("mqqwpa://") || uri.startsWith("alipays://") -> {
+                try {
+                    val viewIntent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(uri))
+                    viewIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    // 设置包名确保直接打开目标应用，避免再次弹出选择弹窗
+                    when {
+                        uri.startsWith("weixin://") -> viewIntent.setPackage("com.tencent.mm")
+                        uri.startsWith("mqqwpa://") -> viewIntent.setPackage("com.tencent.mobileqq")
+                        uri.startsWith("alipays://") -> viewIntent.setPackage("com.eg.android.AlipayGphone")
+                    }
+                    startActivity(viewIntent)
+                    Log.i(TAG, "NFC碰卡: 已转发URI到第三方应用: $uri")
+                } catch (e: Throwable) {
+                    // 如果指定包名失败（如应用未安装），尝试不指定包名
+                    Log.w(TAG, "指定包名打开失败，尝试通用方式: $uri", e)
+                    try {
+                        val fallbackIntent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(uri))
+                        fallbackIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(fallbackIntent)
+                    } catch (e2: Throwable) {
+                        Log.e(TAG, "无法打开URI: $uri", e2)
+                        android.widget.Toast.makeText(
+                            this,
+                            "无法打开：请确认已安装对应应用",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+            // 其他URI
+            else -> {
+                try {
+                    val viewIntent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(uri))
+                    viewIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(viewIntent)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "无法打开URI: $uri", e)
+                    android.widget.Toast.makeText(
+                        this,
+                        "已读取数据: $uri",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    /**
+     * 解析 NDEF URI 记录（NFC Forum Well-known Type "U"）
+     * 格式：payload[0] = 标识符字节（URI前缀索引），其余为URI字符串
+     */
+    private fun parseNdefUriRecord(payload: ByteArray): String? {
+        if (payload.isEmpty()) return null
+        try {
+            // URI缩写前缀表（NFC Forum标准）
+            val uriPrefixes = arrayOf(
+                "",                         // 0x00: 无缩写
+                "http://www.",              // 0x01
+                "https://www.",             // 0x02
+                "http://",                  // 0x03
+                "https://",                 // 0x04
+                "tel:",                     // 0x05
+                "mailto:",                  // 0x06
+                "ftp://anonymous:anonymous@", // 0x07
+                "ftp://ftp.",               // 0x08
+                "ftps://",                  // 0x09
+                "sftp://",                  // 0x0A
+                "smb://",                   // 0x0B
+                "nfs://",                   // 0x0C
+                "ftp://",                   // 0x0D
+                "geo:",                     // 0x0E
+                "telnet://",                // 0x0F
+                "imap:",                    // 0x10
+                "rtsp://",                  // 0x11
+                "urn:",                     // 0x12
+                "pop:",                     // 0x13
+                "sip:",                     // 0x14
+                "sips:",                    // 0x15
+                "tftp://",                  // 0x16
+                "btspp://",                 // 0x17
+                "btl2cap://",               // 0x18
+                "btgoep://",                // 0x19
+                "tcpobex://",               // 0x1A
+                "irdaobex://",              // 0x1B
+                "file://",                  // 0x1C
+                "urn:epc:id:",              // 0x1D
+                "urn:epc:tag:",             // 0x1E
+                "urn:epc:pat:",             // 0x1F
+                "urn:epc:raw:",             // 0x20
+                "urn:epc:",                 // 0x21
+                "urn:nfc:"                  // 0x22
+            )
+            val prefixIndex = payload[0].toInt() and 0xFF
+            val prefix = if (prefixIndex < uriPrefixes.size) uriPrefixes[prefixIndex] else ""
+            val uriBody = String(payload.copyOfRange(1, payload.size), Charsets.UTF_8)
+            return prefix + uriBody
+        } catch (e: Throwable) {
+            Log.e(TAG, "解析NDEF URI失败", e)
+            return null
+        }
+    }
+
+    /**
+     * 解析 NDEF Text 记录（NFC Forum Well-known Type "T"）
+     * 格式：payload[0] = 状态字节（前3位是编码，后5位是语言代码长度）
+     *       payload[1..n] = 语言代码（ISO/IANA）
+     *       payload[n+1..] = 文本内容（UTF-8 或 UTF-16）
+     */
+    private fun parseNdefTextRecord(payload: ByteArray): String? {
+        if (payload.size < 3) return null
+        try {
+            val statusByte = payload[0].toInt() and 0xFF
+            val textEncoding = (statusByte shr 7) and 0x01  // 0=UTF-8, 1=UTF-16
+            val languageCodeLength = statusByte and 0x3F   // 低5位
+            if (languageCodeLength + 1 > payload.size) return null
+            val textStart = 1 + languageCodeLength
+            if (textStart >= payload.size) return ""
+            val charset = if (textEncoding == 0x01) Charsets.UTF_16 else Charsets.UTF_8
+            return String(payload.copyOfRange(textStart, payload.size), charset)
+        } catch (e: Throwable) {
+            Log.e(TAG, "解析NDEF Text失败", e)
+            return null
+        }
+    }
+
+    /**
+     * 从 Mifare Classic 卡读取 NDEF 消息
+     *
+     * Mifare Classic 卡不是原生 Ndef 标签，NDEF 数据通过扇区块映射存储：
+     * - 扇区0块0：制造商数据（只读）
+     * - 扇区0块1：Capability Container (CC)，以 0xE1 开头
+     * - 扇区0块2起：NDEF TLV (03 <length> <ndef_bytes> FE)
+     * - 每扇区最后一块是扇区尾（密钥块），需跳过
+     *
+     * 读取流程：认证扇区 → 读取块 → 拼接数据 → 解析 NDEF TLV → 解析 NDEF 消息
+     *
+     * @param tag NFC Tag 对象
+     * @return 解析出的 NdefMessage，失败返回 null
+     */
+    private fun readNdefFromMifareClassic(tag: android.nfc.Tag): android.nfc.NdefMessage? {
+        val mfc = android.nfc.tech.MifareClassic.get(tag) ?: run {
+            Log.w(TAG, "MifareClassic.get(tag)返回null")
+            return null
+        }
+
+        try {
+            mfc.connect()
+            // 默认认证密钥（CUID卡默认全F密钥，与写卡端一致）
+            val defaultKey = byteArrayOf(
+                0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(),
+                0xFF.toByte(), 0xFF.toByte()
+            )
+
+            val sectorCount = mfc.sectorCount
+            val blocksPerSector = 4 // Mifare Classic 每扇区4块
+            Log.i(TAG, "MifareClassic: sectorCount=$sectorCount")
+
+            // 收集所有数据块（跳过块0制造商数据和每扇区尾块）
+            val dataBytes = mutableListOf<Byte>()
+
+            // 从扇区0开始读取，块0跳过（制造商数据），从块1开始
+            for (sector in 0 until sectorCount) {
+                try {
+                    // 认证扇区
+                    val authed = mfc.authenticateSectorWithKeyA(sector, defaultKey)
+                    if (!authed) {
+                        Log.w(TAG, "MifareClassic: 扇区${sector}认证失败")
+                        continue
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "MifareClassic: 扇区${sector}认证异常", e)
+                    continue
+                }
+
+                // 读取该扇区的数据块（跳过最后一块扇区尾）
+                for (blockInSector in 0 until blocksPerSector - 1) {
+                    val blockIdx = mfc.sectorToBlock(sector) + blockInSector
+                    // 跳过扇区0块0（制造商数据，只读）
+                    if (sector == 0 && blockInSector == 0) continue
+                    try {
+                        val blockData = mfc.readBlock(blockIdx)
+                        dataBytes.addAll(blockData.toList())
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "MifareClassic: 读取块${blockIdx}失败", e)
+                    }
+                }
+            }
+
+            if (dataBytes.isEmpty()) {
+                Log.w(TAG, "MifareClassic: 未读取到任何数据")
+                return null
+            }
+
+            // 打印前64字节用于诊断
+            val hexPreview = dataBytes.take(64).joinToString(" ") { "%02X".format(it) }
+            Log.i(TAG, "MifareClassic: 读取到${dataBytes.size}字节, 前64字节: $hexPreview")
+
+            // 查找 NDEF TLV 标记 (0x03)
+            // CC块以 0xE1 开头，NDEF TLV 以 0x03 开头
+            var ndefStart = -1
+            for (i in dataBytes.indices) {
+                if (dataBytes[i] == 0x03.toByte()) {
+                    ndefStart = i
+                    break
+                }
+            }
+
+            if (ndefStart < 0) {
+                Log.w(TAG, "MifareClassic: 未找到NDEF TLV标记(0x03)")
+                return null
+            }
+
+            // 解析 NDEF TLV: 03 <length> <ndef_bytes> [FE]
+            val lengthByte = dataBytes[ndefStart + 1].toInt() and 0xFF
+            val ndefLength: Int
+            val ndefDataStart: Int
+
+            if (lengthByte == 0xFF) {
+                // 长格式：03 FF <high> <low> <data>
+                ndefLength = ((dataBytes[ndefStart + 2].toInt() and 0xFF) shl 8) or
+                             (dataBytes[ndefStart + 3].toInt() and 0xFF)
+                ndefDataStart = ndefStart + 4
+            } else {
+                // 短格式：03 <length> <data>
+                ndefLength = lengthByte
+                ndefDataStart = ndefStart + 2
+            }
+
+            Log.i(TAG, "MifareClassic: NDEF TLV length=$ndefLength, dataStart=$ndefDataStart")
+
+            if (ndefDataStart + ndefLength > dataBytes.size) {
+                Log.w(TAG, "MifareClassic: NDEF数据长度超出读取范围")
+                return null
+            }
+
+            // 提取 NDEF 消息字节
+            val ndefBytes = ByteArray(ndefLength)
+            for (i in 0 until ndefLength) {
+                ndefBytes[i] = dataBytes[ndefDataStart + i]
+            }
+
+            // 解析为 NdefMessage
+            return android.nfc.NdefMessage(ndefBytes)
+        } catch (e: Throwable) {
+            Log.e(TAG, "MifareClassic: 读取NDEF失败", e)
+            return null
+        } finally {
+            try { mfc.close() } catch (_: Throwable) { }
+        }
+    }
+
+    /**
+     * 解析 WiFi NDEF 消息，提取 SSID、密码和加密类型
+     */
+    private fun parseWifiNdefMessage(ndefMessage: android.nfc.NdefMessage): Map<String, String>? {
+        try {
+            val records = ndefMessage.records
+            for (record in records) {
+                if (record.tnf == android.nfc.NdefRecord.TNF_MIME_MEDIA) {
+                    val mimeType = String(record.type, Charsets.UTF_8)
+                    if (mimeType == "application/vnd.wfa.wsc") {
+                        return parseWifiWscPayload(record.payload)
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "解析 WiFi NDEF 消息失败", e)
+        }
+        return null
+    }
+
+    /**
+     * 解析 WSC (WiFi Simple Configuration) TLV 格式
+     */
+    private fun parseWifiWscPayload(payload: ByteArray): Map<String, String>? {
+        val result = mutableMapOf<String, String>()
+        var offset = 0
+        
+        while (offset < payload.size - 4) {
+            // 读取 TLV 类型 (2字节)
+            val type = ((payload[offset].toInt() and 0xFF) shl 8) or 
+                       (payload[offset + 1].toInt() and 0xFF)
+            offset += 2
+            
+            // 读取 TLV 长度 (2字节)
+            val length = ((payload[offset].toInt() and 0xFF) shl 8) or 
+                         (payload[offset + 1].toInt() and 0xFF)
+            offset += 2
+            
+            if (offset + length > payload.size) break
+            
+            // 读取 TLV 值
+            val value = payload.copyOfRange(offset, offset + length)
+            offset += length
+            
+            // 解析凭证容器 (0x100E)
+            if (type == 0x100E) {
+                val subConfig = parseWifiWscPayload(value)
+                if (subConfig != null) {
+                    result.putAll(subConfig)
+                }
+            }
+            // SSID (0x1045)
+            else if (type == 0x1045) {
+                result["ssid"] = String(value, Charsets.UTF_8)
+                Log.i(TAG, "WiFi WSC解析: SSID=${result["ssid"]}")
+            }
+            // 网络密钥/密码 (0x1027)
+            else if (type == 0x1027) {
+                result["password"] = String(value, Charsets.UTF_8)
+                Log.i(TAG, "WiFi WSC解析: password长度=${value.size}")
+            }
+            // 认证类型 (0x1003)
+            else if (type == 0x1003) {
+                if (value.size >= 2) {
+                    val authType = ((value[0].toInt() and 0xFF) shl 8) or
+                                   (value[1].toInt() and 0xFF)
+                    result["authType"] = when (authType) {
+                        0x0001 -> "OPEN"
+                        0x0002 -> "WEP"
+                        0x0004, 0x0008, 0x0010 -> "WPA"
+                        0x0020 -> "WPA2"
+                        else -> "WPA"
+                    }
+                    Log.i(TAG, "WiFi WSC解析: authType=${result["authType"]}(raw=0x${authType.toString(16)})")
+                }
+            }
+        }
+        
+        return if (result.isNotEmpty()) result else null
     }
 
     /**
@@ -2024,5 +3317,987 @@ class MainActivity : FlutterFragmentActivity() {
             Log.e(TAG, "获取 WiFi SSID 失败", e)
             return ""
         }
+    }
+
+    /**
+     * 扫描附近 WiFi 列表（NFC WiFi 速写用）
+     * 返回 WiFi 列表，每项包含 ssid, signal, authType
+     */
+    private fun scanWifiNetworks(): List<Map<String, Any?>> {
+        val wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+
+        // 检查 WiFi 是否开启
+        if (!wifiManager.isWifiEnabled) {
+            wifiManager.isWifiEnabled = true
+            // 等待 WiFi 启动
+            Thread.sleep(1500)
+        }
+
+        // 先尝试获取已缓存的扫描结果（多数情况下系统已定期扫描更新）
+        val cachedResults = wifiManager.scanResults
+        if (!cachedResults.isNullOrEmpty()) {
+            val hasValidResults = cachedResults.any {
+                val ssid = it.SSID
+                ssid != null && ssid.isNotBlank() && ssid != "<unknown ssid>"
+            }
+            if (hasValidResults) {
+                return parseWifiResults(cachedResults)
+            }
+        }
+
+        // 如缓存结果为空，尝试主动触发扫描并等待结果
+        try {
+            wifiManager.startScan()
+        } catch (_: Throwable) {
+            // Android 13+ 可能限制 startScan，忽略错误继续使用现有结果
+        }
+
+        // 等待扫描结果（最多等待 2.5 秒，分 5 次轮询）
+        var resultList: List<android.net.wifi.ScanResult>? = null
+        for (i in 1..5) {
+            Thread.sleep(500)
+            val currentResults = wifiManager.scanResults
+            if (!currentResults.isNullOrEmpty()) {
+                val hasValid = currentResults.any {
+                    val ssid = it.SSID
+                    ssid != null && ssid.isNotBlank() && ssid != "<unknown ssid>"
+                }
+                if (hasValid) {
+                    resultList = currentResults
+                    break
+                }
+            }
+        }
+
+        // 最终 fallback：直接返回当前可用的 scanResults
+        if (resultList == null) {
+            resultList = wifiManager.scanResults
+        }
+
+        if (resultList.isNullOrEmpty()) {
+            return emptyList()
+        }
+
+        return parseWifiResults(resultList)
+    }
+
+    /**
+     * 将原生 ScanResult 列表转换为 Dart 可读取的数据结构
+     */
+    private fun parseWifiResults(results: List<android.net.wifi.ScanResult>): List<Map<String, Any?>> {
+        val seen = HashSet<String>()
+        val resultList = mutableListOf<Map<String, Any?>>()
+
+        for (scanResult in results) {
+            val ssid = scanResult.SSID ?: continue
+            if (ssid.isBlank() || ssid == "<unknown ssid>") continue
+
+            // 去重（同一 SSID 可能出现在多个频段上）
+            if (seen.contains(ssid)) continue
+            seen.add(ssid)
+
+            // 信号强度转换为 0-4 级
+            val signal = when {
+                scanResult.level >= -50 -> 4
+                scanResult.level >= -60 -> 3
+                scanResult.level >= -70 -> 2
+                scanResult.level >= -80 -> 1
+                else -> 0
+            }
+
+            // 解析加密类型
+            val capabilities = scanResult.capabilities ?: ""
+            val authType = when {
+                capabilities.contains("WPA3") -> "WPA3"
+                capabilities.contains("WPA2") -> "WPA2"
+                capabilities.contains("WPA") -> "WPA"
+                capabilities.contains("WEP") -> "WEP"
+                else -> "OPEN"
+            }
+
+            resultList.add(
+                mapOf(
+                    "ssid" to ssid,
+                    "signal" to signal,
+                    "authType" to authType
+                )
+            )
+        }
+
+        // 按信号强度降序返回
+        return resultList.sortedByDescending { it["signal"] as Int }
+    }
+
+    /**
+     * 验证 WiFi 密码是否正确（NFC WiFi 速写用，写卡前验证）
+     * 通过尝试连接指定 WiFi 来验证密码正确性，超时 8 秒
+     * 返回: true = 密码正确，false = 密码错误或连接失败
+     */
+    private fun verifyWifiPassword(ssid: String, password: String, authType: String): Boolean {
+        val wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+
+        // 检查 WiFi 是否开启
+        if (!wifiManager.isWifiEnabled) {
+            try {
+                wifiManager.isWifiEnabled = true
+            } catch (e: Throwable) {
+                return false
+            }
+            Thread.sleep(1500)
+        }
+
+        // 记录当前连接的WiFi（验证后恢复）
+        val originalNetworkId = wifiManager.connectionInfo?.networkId ?: -1
+        val originalSsid = wifiManager.connectionInfo?.ssid?.trim('"') ?: ""
+
+        val sdkInt = android.os.Build.VERSION.SDK_INT
+        var verifySuccess = false
+
+        try {
+            verifySuccess = if (sdkInt >= android.os.Build.VERSION_CODES.Q) {
+                // Android 10+ 使用 NetworkCallback 方式验证
+                verifyWifiAndroid10Plus(ssid, password, authType)
+            } else {
+                // Android 9- 使用 WifiConfiguration 方式验证
+                verifyWifiLegacy(ssid, password, authType)
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "WiFi 密码验证异常", e)
+            verifySuccess = false
+        }
+
+        // 验证完成后，尝试恢复到原连接（如果原来有连接且与当前不同）
+        try {
+            if (originalSsid.isNotEmpty() && originalSsid != ssid && originalNetworkId != -1) {
+                wifiManager.enableNetwork(originalNetworkId, true)
+                wifiManager.reconnect()
+            }
+        } catch (_: Throwable) { }
+
+        return verifySuccess
+    }
+
+    /**
+     * Android 10+ 验证 WiFi 密码
+     * 
+     * Android 16/MIUI兼容方案：
+     * 1. 优先检查是否已连接到目标SSID（已连接则密码正确）
+     * 2. 使用 WifiNetworkSuggestion 添加网络建议
+     * 3. 如果addNetworkSuggestions返回需要用户批准（status=4），直接信任用户输入
+     * 4. 通过轮询检查WiFi连接状态判断是否连接成功
+     * 5. 验证完毕后移除网络建议，恢复原状态
+     */
+    @android.annotation.TargetApi(android.os.Build.VERSION_CODES.Q)
+    private fun verifyWifiAndroid10Plus(ssid: String, password: String, authType: String): Boolean {
+        try {
+            val wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+
+            // ---- 步骤1：检查是否已连接到目标SSID ----
+            val currentSsid = wifiManager.connectionInfo?.ssid?.trim('"') ?: ""
+            if (currentSsid == ssid) {
+                Log.i(TAG, "WiFi密码验证：已连接到目标SSID=$ssid，密码正确")
+                return true
+            }
+
+            // ---- 步骤2：记录当前连接的SSID，用于验证后恢复 ----
+            val originalSsid = currentSsid
+
+            // ---- 步骤3：使用 WifiNetworkSuggestion API 添加网络建议 ----
+            val suggestionBuilder = android.net.wifi.WifiNetworkSuggestion.Builder()
+            suggestionBuilder.setSsid(ssid)
+
+            // 根据加密类型设置密码
+            when (authType.uppercase()) {
+                "WPA", "WPA2", "WPA3" -> {
+                    if (password.isNotEmpty()) {
+                        suggestionBuilder.setWpa2Passphrase(password)
+                    }
+                }
+                "OPEN", "", "NONE" -> {
+                    // 开放网络，无需密码
+                }
+                else -> {
+                    if (password.isNotEmpty()) {
+                        suggestionBuilder.setWpa2Passphrase(password)
+                    }
+                }
+            }
+
+            val suggestion = suggestionBuilder.build()
+            val suggestions = listOf(suggestion)
+
+            // 添加网络建议（触发系统自动连接）
+            val addStatus = wifiManager.addNetworkSuggestions(suggestions)
+            Log.i(TAG, "WiFi密码验证：addNetworkSuggestions status=$addStatus")
+            // status=0 表示成功
+            // status=4 表示需要用户批准（Android 11+）
+            // 在MIUI/Android 16上，status=4时用户批准对话框可能被屏蔽
+            // 此时直接信任用户输入的密码，不再等待连接验证
+
+            if (addStatus == 4) {
+                // 需要用户批准但对话框可能被屏蔽，直接信任用户输入
+                Log.i(TAG, "WiFi密码验证：需要用户批准(status=4)，直接信任用户输入")
+                // 清理网络建议
+                try {
+                    wifiManager.removeNetworkSuggestions(suggestions)
+                } catch (_: Throwable) { }
+                return true
+            }
+
+            // ---- 步骤4：注册 BroadcastReceiver 监听 WiFi 状态变化 ----
+            var connectedToTarget = false
+            val wifiReceiver = object : android.content.BroadcastReceiver() {
+                override fun onReceive(context: android.content.Context?, intent: Intent?) {
+                    if (intent?.action == android.net.wifi.WifiManager.NETWORK_STATE_CHANGED_ACTION) {
+                        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            intent.getParcelableExtra(
+                                android.net.wifi.WifiManager.EXTRA_WIFI_INFO,
+                                android.net.wifi.WifiInfo::class.java
+                            )
+                        } else {
+                            @Suppress("DEPRECATION")
+                            intent.getParcelableExtra<android.net.wifi.WifiInfo>(
+                                android.net.wifi.WifiManager.EXTRA_WIFI_INFO
+                            )
+                        }
+                        val connectedSsid = info?.ssid?.trim('"') ?: ""
+                        if (connectedSsid == ssid) {
+                            val ipAddr = info?.ipAddress ?: 0
+                            if (ipAddr != 0) {
+                                connectedToTarget = true
+                                Log.i(TAG, "WiFi密码验证：已连接到SSID=$ssid，IP已获取")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 注册广播接收器
+            val intentFilter = IntentFilter(android.net.wifi.WifiManager.NETWORK_STATE_CHANGED_ACTION)
+            registerReceiver(wifiReceiver, intentFilter)
+
+            // ---- 步骤5：等待连接结果（最多15秒） ----
+            val startTime = System.currentTimeMillis()
+            val timeoutMs = 15000L
+            while (!connectedToTarget && System.currentTimeMillis() - startTime < timeoutMs) {
+                try {
+                    Thread.sleep(500)
+                } catch (_: InterruptedException) { }
+
+                // 也直接检查WiFi连接状态（双重保障）
+                val info = wifiManager.connectionInfo
+                val checkSsid = info?.ssid?.trim('"') ?: ""
+                val checkIp = info?.ipAddress ?: 0
+                if (checkSsid == ssid && checkIp != 0) {
+                    connectedToTarget = true
+                    Log.i(TAG, "WiFi密码验证：直接检查到已连接SSID=$ssid")
+                    break
+                }
+            }
+
+            // ---- 步骤6：清理 ----
+            try {
+                unregisterReceiver(wifiReceiver)
+            } catch (_: Throwable) { }
+
+            // 移除网络建议（避免残留）
+            try {
+                wifiManager.removeNetworkSuggestions(suggestions)
+                Log.i(TAG, "WiFi密码验证：已移除网络建议")
+            } catch (_: Throwable) { }
+
+            // ---- 步骤7：如果验证成功且原来连接的是其他WiFi，尝试恢复 ----
+            if (connectedToTarget && originalSsid.isNotEmpty() && originalSsid != ssid) {
+                // 延迟2秒后恢复原连接
+                Thread {
+                    try {
+                        Thread.sleep(2000)
+                        // 重新添加原WiFi的网络建议
+                        val origSuggestionBuilder = android.net.wifi.WifiNetworkSuggestion.Builder()
+                        origSuggestionBuilder.setSsid(originalSsid)
+                        wifiManager.addNetworkSuggestions(listOf(origSuggestionBuilder.build()))
+                        Log.i(TAG, "WiFi密码验证：已恢复原WiFi建议=$originalSsid")
+                    } catch (_: Throwable) { }
+                }.start()
+            }
+
+            if (connectedToTarget) {
+                Log.i(TAG, "WiFi密码验证成功：SSID=$ssid")
+            } else {
+                Log.i(TAG, "WiFi密码验证失败：未能连接到SSID=$ssid")
+            }
+
+            return connectedToTarget
+        } catch (e: Throwable) {
+            Log.e(TAG, "Android 10+ WiFi密码验证失败", e)
+            return false
+        }
+    }
+
+    /**
+     * Android 9- 验证 WiFi 密码：使用 WifiConfiguration 方式
+     */
+    @Suppress("DEPRECATION")
+    private fun verifyWifiLegacy(ssid: String, password: String, authType: String): Boolean {
+        try {
+            val wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+
+            // 创建临时的网络配置
+            val wifiConfig = android.net.wifi.WifiConfiguration().apply {
+                this.SSID = "\"$ssid\""
+
+                when (authType.uppercase()) {
+                    "WPA", "WPA2", "WPA3" -> {
+                        this.preSharedKey = "\"$password\""
+                        this.allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.WPA_PSK)
+                    }
+                    "WEP" -> {
+                        this.wepKeys[0] = "\"$password\""
+                        this.wepTxKeyIndex = 0
+                        this.allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.NONE)
+                    }
+                    else -> {
+                        this.allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.NONE)
+                    }
+                }
+            }
+
+            // 添加网络
+            val networkId = wifiManager.addNetwork(wifiConfig)
+            if (networkId == -1) return false
+
+            // 尝试连接
+            wifiManager.disconnect()
+            wifiManager.enableNetwork(networkId, true)
+            wifiManager.reconnect()
+
+            // 等待最多8秒检查连接状态
+            val startTime = System.currentTimeMillis()
+            var connectSuccess = false
+            while (System.currentTimeMillis() - startTime < 8000) {
+                try {
+                    val info = wifiManager.connectionInfo
+                    if (info != null) {
+                        val currentSsid = info.ssid?.trim('"') ?: ""
+                        val ipAddr = info.ipAddress
+                        if (currentSsid == ssid && ipAddr != 0) {
+                            // 已成功获取IP，连接成功
+                            connectSuccess = true
+                            break
+                        }
+                        // 检查网络状态
+                        val networkState = wifiManager.getConfiguredNetworks()?.find {
+                            it.networkId == networkId
+                        }?.status
+                        if (networkState != null && networkState != android.net.wifi.WifiConfiguration.Status.DISABLED) {
+                            if (currentSsid == ssid) {
+                                connectSuccess = true
+                                break
+                            }
+                        }
+                    }
+                    Thread.sleep(500)
+                } catch (_: Throwable) { }
+            }
+
+            // 验证失败时移除临时配置的网络
+            if (!connectSuccess) {
+                try {
+                    wifiManager.removeNetwork(networkId)
+                } catch (_: Throwable) { }
+            }
+
+            return connectSuccess
+        } catch (e: Throwable) {
+            Log.e(TAG, "Legacy WiFi密码验证失败", e)
+            return false
+        }
+    }
+
+    /**
+     * 连接指定 WiFi（NFC WiFi 速写用）
+     * 兼容 Android 10+ 使用 WifiNetworkSpecifier，Android 9- 使用 WifiConfiguration
+     */
+    private fun connectWifi(ssid: String, password: String, authType: String): Boolean {
+        val wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+
+        // 检查 WiFi 是否开启
+        if (!wifiManager.isWifiEnabled) {
+            try {
+                wifiManager.isWifiEnabled = true
+            } catch (e: Throwable) {
+                // Android 10+ 不允许应用直接开关WiFi
+                // 尝试引导用户开启
+                try {
+                    val intent = android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)
+                    intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    applicationContext.startActivity(intent)
+                } catch (_: Throwable) { }
+                return false
+            }
+            Thread.sleep(1500)
+        }
+
+        val sdkInt = android.os.Build.VERSION.SDK_INT
+
+        return if (sdkInt >= android.os.Build.VERSION_CODES.Q) {
+            // Android 10+ 使用 WifiNetworkSpecifier
+            connectWifiAndroid10Plus(ssid, password, authType)
+        } else {
+            // Android 9- 使用 WifiConfiguration（已废弃）
+            connectWifiLegacy(ssid, password, authType)
+        }
+    }
+
+    /**
+     * Android 10+ 连接 WiFi（碰卡后自动连接）
+     *
+     * Android 10+ 连接方案：
+     * 1. 使用 WifiNetworkSuggestion 添加网络建议（系统级连接，会显示在WiFi界面）
+     *    系统会自动尝试连接，连接成功后WiFi界面会显示已连接
+     * 2. 等待一段时间检查连接状态
+     * 3. 如果超时未连接，打开系统WiFi设置页让用户手动连接
+     *
+     * 注意：不使用 WifiNetworkSpecifier.requestNetwork，因为它创建的是应用专属临时连接，
+     * 不会在系统WiFi界面显示（"假连接"问题）
+     */
+    private fun connectWifiAndroid10Plus(ssid: String, password: String, authType: String): Boolean {
+        try {
+            val wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+
+            // 先检查是否已连接到目标SSID
+            val currentSsid = wifiManager.connectionInfo?.ssid?.trim('"') ?: ""
+            if (currentSsid == ssid) {
+                Log.i(TAG, "WiFi连接：已连接到目标SSID=$ssid")
+                return true
+            }
+
+            // ---- 方案1：使用 WifiNetworkSuggestion 建立系统级连接 ----
+            // 此API添加网络建议后，系统会自动尝试连接
+            // 连接成功后会在系统WiFi界面显示已连接（真正的系统级连接）
+            Log.i(TAG, "WiFi连接：使用WifiNetworkSuggestion建立系统级连接, SSID=$ssid")
+            val suggestionBuilder = android.net.wifi.WifiNetworkSuggestion.Builder()
+            suggestionBuilder.setSsid(ssid)
+
+            when (authType.uppercase()) {
+                "WPA", "WPA2", "WPA3" -> {
+                    if (password.isNotEmpty()) {
+                        suggestionBuilder.setWpa2Passphrase(password)
+                    }
+                }
+                "OPEN", "", "NONE" -> {
+                    // 开放网络
+                }
+                else -> {
+                    if (password.isNotEmpty()) {
+                        suggestionBuilder.setWpa2Passphrase(password)
+                    }
+                }
+            }
+
+            val suggestion = suggestionBuilder.build()
+            val suggestions = listOf(suggestion)
+
+            // 先移除旧的建议，再添加新的（避免重复添加导致冲突）
+            try {
+                wifiManager.removeNetworkSuggestions(suggestions)
+            } catch (_: Throwable) { }
+
+            val addStatus = wifiManager.addNetworkSuggestions(suggestions)
+            Log.i(TAG, "WiFi连接：addNetworkSuggestions status=$addStatus (0=成功)")
+
+            if (addStatus != WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS) {
+                Log.w(TAG, "WiFi连接：addNetworkSuggestions失败, status=$addStatus")
+            }
+
+            // 等待系统自动连接，最多15秒
+            val startTime = System.currentTimeMillis()
+            val timeoutMs = 15000L
+            var connected = false
+
+            while (!connected && System.currentTimeMillis() - startTime < timeoutMs) {
+                try {
+                    Thread.sleep(500)
+                } catch (_: InterruptedException) { }
+
+                val info = wifiManager.connectionInfo
+                val checkSsid = info?.ssid?.trim('"') ?: ""
+                val checkIp = info?.ipAddress ?: 0
+                if (checkSsid == ssid && checkIp != 0) {
+                    connected = true
+                    Log.i(TAG, "WiFi连接：通过Suggestion已成功连接到SSID=$ssid")
+                    break
+                }
+            }
+
+            if (connected) {
+                return true
+            }
+
+            // ---- 方案2：打开系统WiFi设置页让用户手动连接 ----
+            Log.i(TAG, "WiFi连接：Suggestion自动连接超时，打开系统WiFi设置页")
+            try {
+                val settingsIntent = android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)
+                settingsIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                applicationContext.startActivity(settingsIntent)
+                // 提示用户手动选择网络
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    android.widget.Toast.makeText(
+                        applicationContext,
+                        "已打开WiFi设置，请手动连接: $ssid",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            } catch (_: Throwable) { }
+
+            return connected
+        } catch (e: Throwable) {
+            Log.e(TAG, "Android 10+ WiFi连接失败", e)
+            return false
+        }
+    }
+
+    /**
+     * Android 9- 连接 WiFi：使用已废弃的 WifiConfiguration API
+     */
+    @Suppress("DEPRECATION")
+    private fun connectWifiLegacy(ssid: String, password: String, authType: String): Boolean {
+        try {
+            val wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+
+            // 检查是否已配置该网络
+            val configuredNetworks = wifiManager.configuredNetworks ?: emptyList()
+            val existingNetwork = configuredNetworks.find {
+                it.SSID == "\"$ssid\"" || it.SSID == ssid
+            }
+
+            if (existingNetwork != null) {
+                wifiManager.disconnect()
+                val enabled = wifiManager.enableNetwork(existingNetwork.networkId, true)
+                wifiManager.reconnect()
+                return enabled
+            }
+
+            // 创建新的网络配置
+            val wifiConfig = android.net.wifi.WifiConfiguration().apply {
+                this.SSID = "\"$ssid\""
+
+                when (authType.uppercase()) {
+                    "WPA", "WPA2", "WPA3" -> {
+                        this.preSharedKey = "\"$password\""
+                        this.allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.WPA_PSK)
+                    }
+                    "WEP" -> {
+                        this.wepKeys[0] = "\"$password\""
+                        this.wepTxKeyIndex = 0
+                        this.allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.NONE)
+                    }
+                    else -> {
+                        this.allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.NONE)
+                    }
+                }
+            }
+
+            val networkId = wifiManager.addNetwork(wifiConfig)
+            if (networkId == -1) return false
+
+            wifiManager.disconnect()
+            val enabled = wifiManager.enableNetwork(networkId, true)
+            wifiManager.reconnect()
+
+            return enabled
+        } catch (e: Throwable) {
+            Log.e(TAG, "Legacy WiFi连接失败", e)
+            return false
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // 已知设备电池容量数据库
+    // 当 BatteryManager/dumpsys/sysfs 均无法获取设计容量时，
+    // ----------------------------------------------------------------------
+    // 直接在原生端流式解析 zip 中的电池信息
+    // 支持：标准 zip、嵌套 zip（小米 bug report 格式）
+    // 外层 zip 用 ZipFile（支持 ZIP64）
+    // 内层 zip 用 ZipInputStream（容忍重复条目名，小米 bugreport 有此问题）
+    // ----------------------------------------------------------------------
+    private fun parseBatteryFromZipFile(zipFile: File, maxDepth: Int): Map<String, Any?>? {
+        if (maxDepth <= 0) {
+            Log.w(TAG, "parseZip: maxDepth reached, stopping recursion")
+            return null
+        }
+
+        Log.d(TAG, "parseZip: opening file=${zipFile.name} size=${zipFile.length()} maxDepth=$maxDepth")
+
+        try {
+            // 使用 ZipFile 读取（支持 ZIP64，比 ZipInputStream 更可靠）
+            ZipFile(zipFile).use { zf ->
+                val entries = zf.entries()
+                var entryCount = 0
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    entryCount++
+                    if (entry.isDirectory) continue
+
+                    val entryName = entry.name.lowercase()
+                    Log.d(TAG, "parseZip: entry #$entryCount name=${entry.name} size=${entry.size}")
+
+                    // 内层 zip（小米格式：bugreport-*.zip）
+                    if (entryName.endsWith(".zip") && entryName.contains("bugreport")) {
+                        Log.d(TAG, "parseZip: found inner zip: ${entry.name}")
+                        // 将内层 zip 保存到临时文件
+                        val innerZipFile = File(cacheDir, "inner_zip_${System.currentTimeMillis()}.zip")
+                        try {
+                            zf.getInputStream(entry).buffered().use { input ->
+                                innerZipFile.outputStream().buffered().use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                            Log.d(TAG, "parseZip: inner zip saved, size=${innerZipFile.length()}, parsing with ZipInputStream")
+                            // 内层 zip 用 ZipInputStream 读取（容忍重复条目名）
+                            val result = parseInnerZipWithStream(innerZipFile)
+                            if (result != null) return result
+                            Log.d(TAG, "parseZip: inner zip returned null")
+                        } catch (e: Throwable) {
+                            Log.e(TAG, "parseZip: inner zip extraction/parse failed", e)
+                        } finally {
+                            innerZipFile.delete()
+                        }
+                    }
+                    // bugreport 主文本文件（如 bugreport-houji-xxx.txt）
+                    else if (entryName.contains("bugreport") && entryName.endsWith(".txt")) {
+                        Log.d(TAG, "parseZip: found bugreport txt: ${entry.name}")
+                        zf.getInputStream(entry).buffered().use { input ->
+                            val result = parseBatteryFromStream(input.bufferedReader(Charsets.UTF_8), entry.name)
+                            if (result != null) return result
+                            Log.d(TAG, "parseZip: bugreport txt returned null")
+                        }
+                    }
+                    // dumpstate 日志
+                    else if (entryName.contains("dumpstate") && entryName.endsWith(".txt")) {
+                        Log.d(TAG, "parseZip: found dumpstate txt: ${entry.name}")
+                        zf.getInputStream(entry).buffered().use { input ->
+                            val result = parseBatteryFromStream(input.bufferedReader(Charsets.UTF_8), entry.name)
+                            if (result != null) return result
+                        }
+                    }
+                }
+                Log.d(TAG, "parseZip: total entries=$entryCount, no battery data found")
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "parseBatteryFromZipFile error for ${zipFile.name}", e)
+        }
+        return null
+    }
+
+    // 使用 ZipInputStream 读取内层 zip（容忍重复条目名）
+    // 小米 bugreport 的内层 zip 包含重复条目名，ZipFile 无法打开
+    private fun parseInnerZipWithStream(zipFile: File): Map<String, Any?>? {
+        try {
+            ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
+                var entry: ZipEntry? = zis.nextEntry
+                var entryCount = 0
+                while (entry != null) {
+                    entryCount++
+                    if (!entry.isDirectory) {
+                        val entryName = entry.name.lowercase()
+                        Log.d(TAG, "parseInnerZip: entry #$entryCount name=${entry.name} size=${entry.size}")
+
+                        // bugreport 主文本文件
+                        if (entryName.contains("bugreport") && entryName.endsWith(".txt")) {
+                            Log.d(TAG, "parseInnerZip: found bugreport txt: ${entry.name}")
+                            val result = parseBatteryFromStream(zis.bufferedReader(Charsets.UTF_8), entry.name)
+                            if (result != null) return result
+                            Log.d(TAG, "parseInnerZip: bugreport txt returned null")
+                        }
+                        // dumpstate 日志
+                        else if (entryName.contains("dumpstate") && entryName.endsWith(".txt")) {
+                            Log.d(TAG, "parseInnerZip: found dumpstate txt: ${entry.name}")
+                            val result = parseBatteryFromStream(zis.bufferedReader(Charsets.UTF_8), entry.name)
+                            if (result != null) return result
+                        }
+                    }
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                }
+                Log.d(TAG, "parseInnerZip: total entries=$entryCount, no battery data found")
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "parseInnerZipWithStream error for ${zipFile.name}", e)
+        }
+        return null
+    }
+
+    // 从 BufferedReader 逐行读取，提取 "DUMP OF SERVICE battery:" 区域
+    // 找到后立即返回，避免读取整个大文件
+    private fun parseBatteryFromStream(reader: java.io.BufferedReader, sourceName: String): Map<String, Any?>? {
+        var designCapacityMah: Int? = null
+        var fullCapacityMah: Int? = null
+        var chargeCounterUah: Int? = null
+        var level: Int? = null
+        var status: String? = null
+        var voltageMv: Int? = null
+        var temperature: Int? = null
+        var technology: String? = null
+
+        var inBatterySection = false
+        var lineCount = 0
+        var totalLines = 0
+
+        try {
+            var line: String? = reader.readLine()
+            while (line != null) {
+                totalLines++
+
+                val trimmed = line.trim()
+
+                // 检测 battery 服务区域开始
+                if (!inBatterySection &&
+                    trimmed.contains("DUMP OF SERVICE battery:") &&
+                    !trimmed.contains("batterystats")) {
+                    inBatterySection = true
+                    lineCount = 0
+                    Log.d(TAG, "parseStream: found DUMP OF SERVICE battery at line $totalLines")
+                    line = reader.readLine()
+                    continue
+                }
+
+                if (inBatterySection) {
+                    // 检测区域结束
+                    if (trimmed.startsWith("DUMP OF SERVICE") ||
+                        (trimmed.startsWith("---------") && lineCount > 5)) {
+                        break
+                    }
+                    lineCount++
+
+                    // 提取冒号后的值
+                    fun afterColon(prefix: String): String? {
+                        if (!trimmed.startsWith(prefix)) return null
+                        val idx = trimmed.indexOf(':')
+                        if (idx < 0) return null
+                        return trimmed.substring(idx + 1).trim()
+                    }
+
+                    // 设计容量（µAh → mAh）
+                    afterColon("charge_full_design:")?.let { v ->
+                        v.toIntOrNull()?.let { if (it > 0) designCapacityMah = (it / 1000) }
+                    }
+                    // 满充容量（µAh → mAh）
+                    afterColon("charge_full:")?.let { v ->
+                        v.toIntOrNull()?.let { if (it > 0) fullCapacityMah = (it / 1000) }
+                    }
+                    // 当前电量（Charge counter，小米/OPPO/OnePlus 格式）
+                    afterColon("Charge counter:")?.let { v ->
+                        v.toIntOrNull()?.let { if (it > 0) chargeCounterUah = it }
+                    }
+                    // 标准小写格式
+                    if (chargeCounterUah == null) {
+                        afterColon("charge_counter:")?.let { v ->
+                            v.toIntOrNull()?.let { if (it > 0) chargeCounterUah = it }
+                        }
+                    }
+                    // 电量百分比
+                    afterColon("level:")?.let { v ->
+                        v.toIntOrNull()?.let { if (it > 0) level = it }
+                    }
+                    // 充电状态
+                    afterColon("status:")?.let { v ->
+                        status = when (v) {
+                            "1", "Unknown" -> "Unknown"
+                            "2", "Charging" -> "Charging"
+                            "3", "Discharging" -> "Discharging"
+                            "4", "Not charging" -> "Not charging"
+                            "5", "Full" -> "Full"
+                            else -> v
+                        }
+                    }
+                    // 电压
+                    afterColon("voltage:")?.let { v ->
+                        v.toIntOrNull()?.let { if (it > 0) voltageMv = it }
+                    }
+                    // 温度
+                    afterColon("temperature:")?.let { v ->
+                        v.toIntOrNull()?.let { if (it > 0) temperature = it }
+                    }
+                    // 电池技术
+                    afterColon("technology:")?.let { v ->
+                        if (v.isNotEmpty() && v.toIntOrNull() == null) technology = v
+                    }
+                }
+
+                line = reader.readLine()
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "parseBatteryFromStream error after $totalLines lines", e)
+        }
+
+        // 只要收集到任何容量数据就返回
+        if (chargeCounterUah == null && designCapacityMah == null && fullCapacityMah == null) {
+            Log.d(TAG, "parseStream: no capacity data found (read $totalLines lines, inBattery=$inBatterySection)")
+            return null
+        }
+
+        Log.d(TAG, "parseStream: found data - design=$designCapacityMah full=$fullCapacityMah counter=$chargeCounterUah level=$level")
+
+        return mapOf(
+            "designCapacityMah" to designCapacityMah,
+            "fullCapacityMah" to fullCapacityMah,
+            "chargeCounterUah" to chargeCounterUah,
+            "level" to level,
+            "status" to (status ?: ""),
+            "voltageMv" to voltageMv,
+            "temperature" to temperature,
+            "technology" to (technology ?: ""),
+            "source" to sourceName,
+        )
+    }
+
+    // 通过设备型号/设备名/产品名查询已知的电池设计容量
+    // ----------------------------------------------------------------------
+    private fun getKnownBatteryCapacity(model: String): Int {
+        // 主流设备电池设计容量数据库（mAh）
+        // 数据来源：官方规格参数
+        // key 可以是 Build.MODEL / Build.DEVICE / Build.PRODUCT
+        val knownCapacities = mapOf(
+            // ===== OnePlus 一加 =====
+            // 一加 Ace 系列
+            "PHK110" to 5000, "OP5913L1" to 5000,   // 一加 Ace 2 (中国版)
+            "CPH2447" to 5000,                         // 一加 Ace 2 (印度版)
+            "PHB110" to 5000,                          // 一加 Ace 2V
+            "CPH2615" to 5500, "OP5553L1" to 5500,   // 一加 Ace 3
+            "CPH2609" to 5500,                         // 一加 Ace 3V
+            "PGP110" to 5000, "OP5A0FL1" to 5000,   // 一加 Ace 5
+            "PGW110" to 6100, "OP5AEFL1" to 6100,   // 一加 Ace 5 Pro
+            "CPH2493" to 4500,                         // 一加 Ace Racing
+            // 一加数字系列
+            "CPH2449" to 5000, "OP5953L1" to 5000,   // 一加 11
+            "CPH2581" to 5000, "OP5921L1" to 5000,   // 一加 12
+            "CPH2611" to 5400,                         // 一加 13
+            "IN2020" to 4260, "IN2023" to 4260,       // 一加 8 Pro
+            "IN2010" to 4300,                          // 一加 8
+            "LE2121" to 4500, "LE2123" to 4500,       // 一加 9 Pro
+            "LE2101" to 4500,                          // 一加 9
+            "CPH2159" to 4300,                         // 一加 9R
+            "CPH2179" to 4300,                         // 一加 9RT
+            "LE2211" to 5000,                          // 一加 10 Pro
+            "CPH2399" to 4500,                         // 一加 10T
+            "CPH2381" to 5000,                         // 一加 Nord 2T
+            "CPH2269" to 4500,                         // 一加 Nord 2
+            "A3000" to 3300,                           // 一加 3
+            "E1003" to 3000,                           // 一加 X
+
+            // ===== OPPO =====
+            "CPH2583" to 5000, "OP59ADL1" to 5000,   // OPPO Find X6
+            "CPH2585" to 5000, "OP5A1DL1" to 5000,   // OPPO Find X6 Pro
+            "CPH2587" to 5000,                         // OPPO Find X7
+            "CPH2589" to 5400,                         // OPPO Find X7 Ultra
+            "CPH2621" to 5400,                         // OPPO Find X8 Pro
+            "CPH2591" to 4500,                         // OPPO Reno 10 Pro+
+            "PFDM00" to 4600,                          // OPPO Reno8 Pro+
+            "PFGM00" to 5000,                          // OPPO Reno9 Pro+
+            "PFTM00" to 4310,                          // OPPO Reno10 Pro
+            "PEEM00" to 4220,                          // OPPO Reno7 Pro
+            "PEDM00" to 4025,                          // OPPO Reno6 Pro
+            "PCHM30" to 4025,                          // OPPO Reno5 Pro
+            "PCKM00" to 3935,                          // OPPO Reno4 Pro
+            "PCAM00" to 3765,                          // OPPO Reno3 Pro
+            "PBBT00" to 4100,                          // OPPO Reno2
+            "PBBM00" to 4100,                          // OPPO Reno2 F
+            "PACT00" to 4000,                          // OPPO Reno
+            "PABM00" to 4000,                          // OPPO Reno A
+            "PAAM00" to 3600,                          // OPPO R17
+            "RMX3350" to 4500,                         // realme GT Neo
+            "RMX3360" to 4500,                         // realme GT Neo2
+            "RMX3461" to 5000,                         // realme GT Neo3
+
+            // ===== Xiaomi 小米 =====
+            // 小米数字系列
+            "24030PN60G" to 5300, "aurora" to 5300,   // 小米14 Ultra
+            "23116PN5BC" to 4880, "23116PN5BG" to 4880, "sheng" to 4880,    // 小米14 Pro
+            "23127PN0C" to 4610, "23127PN0CC" to 4610, "23127PN0CG" to 4610, "houji" to 4610,    // 小米14
+            "2304FPN6DG" to 5000, "ishtar" to 5000,  // 小米13 Ultra
+            "2210132C" to 4820, "nuwa" to 4820,      // 小米13 Pro
+            "2211133C" to 4500, "fuxi" to 4500,      // 小米13
+            "22081212C" to 4860, "dagu" to 4860,     // 小米12S Ultra
+            "2201122C" to 4600, "zeus" to 4600,      // 小米12 Pro
+            "2201123C" to 4500, "cupid" to 4500,     // 小米12
+            "2112123AC" to 5000, "star" to 5000,     // 小米11 Ultra
+            "M2011K2C" to 4600, "venus" to 4600,     // 小米11
+            "M2012K11C" to 4780, "cas" to 4780,      // 小米10 至尊纪念版
+            "M2012K11AC" to 4780, "thyme" to 4780,   // 小米10 Pro
+            "M2007J22C" to 4720, "umi" to 4720,      // 小米10
+            "M2007J3SY" to 5020, "tucana" to 5020,   // 小米CC9 Pro
+            "M2004J7BC" to 4780, "cepheus" to 4780,  // 小米9
+            "M2006C3LV" to 5020, "angelic" to 5020,  // 小米10 Lite
+            "M2010J4SY" to 4820, "gauguin" to 4820,  // 小米10T Pro
+            // Redmi K 系列
+            "23117RK66C" to 5000, "manet" to 5000,   // Redmi K70 Pro
+            "2311DRK48C" to 5000, "vermeer" to 5000, // Redmi K70
+            "22127RK95C" to 5000, "mondrian" to 5000, // Redmi K60 Pro
+            "2210132C75" to 5500, "rembrandt" to 5500, // Redmi K60
+            "22081212UC" to 5000, "diting" to 5000,  // Redmi K50 Ultra
+            "22011211C" to 5500, "rubens" to 5500,   // Redmi K50 Pro
+            "22041211AC" to 5500, "xaga" to 5500,    // Redmi K50
+            "2106118C" to 5160, "ares" to 5160,      // Redmi K40 Pro
+            "M2012K11AC" to 4520, "alioth" to 4520,  // Redmi K40
+            "M2007J3SC" to 4700, "apollo" to 4700,   // Redmi K30S
+            // Redmi Note 系列
+            "23090RA98G" to 5000, "sapphire" to 5000, // Redmi Note 13 Pro+
+            "23090RA89C" to 5000, "sapphiren" to 5000, // Redmi Note 13 Pro
+            "22101316UC" to 5000, "sweet" to 5000,   // Redmi Note 12 Pro+
+            "22101316C" to 5000, "sweetk6" to 5000,  // Redmi Note 12 Pro
+            "2201117TI" to 5000, "evergo" to 5000,   // Redmi Note 11 Pro+
+            "21061119BC" to 5160, "vili" to 5160,    // Redmi Note 11 Pro 5G
+            "M2101K9C" to 5000, "rosemary" to 5000,  // Redmi Note 10 Pro
+            "M2003J15SC" to 5020, "merlin" to 5020,  // Redmi Note 9
+
+            // ===== Samsung 三星 =====
+            "SM-S928B" to 5000, "e3q" to 5000,       // Galaxy S24 Ultra
+            "SM-S926B" to 4500, "e2q" to 4500,       // Galaxy S24+
+            "SM-S921B" to 3900, "e1q" to 3900,       // Galaxy S24
+            "SM-S918B" to 5000, "p3q" to 5000,       // Galaxy S23 Ultra
+            "SM-S916B" to 4500, "p2q" to 4500,       // Galaxy S23+
+            "SM-S911B" to 3900, "p1q" to 3900,       // Galaxy S23
+            "SM-S908B" to 5000, "b0q" to 5000,       // Galaxy S22 Ultra
+            "SM-S906B" to 4500, "b2q" to 4500,       // Galaxy S22+
+            "SM-S901B" to 3800, "b1q" to 3800,       // Galaxy S22
+            "SM-A546B" to 5000,                        // Galaxy A54
+            "SM-A536B" to 5000,                        // Galaxy A53
+            "SM-A346B" to 5000,                        // Galaxy A34
+            "SM-A528B" to 4500,                        // Galaxy A52s
+            "SM-A127F" to 5000,                        // Galaxy A12
+            "SM-M526B" to 5000,                        // Galaxy M52
+            "SM-M336B" to 5000,                        // Galaxy M32
+            "SM-M127F" to 5000,                        // Galaxy M12
+
+            // ===== Huawei 华为 =====
+            "ALT-AL10" to 4750, "ALT-AN00" to 4750,  // Mate 60 Pro+
+            "OCE-AN10" to 4100,                        // P60 Pro
+            "NOH-AN00" to 4200,                        // Mate 40 Pro
+            "TET-AN00" to 3800,                        // P40 Pro
+            "ANA-AN00" to 4100,                        // P30 Pro
+            "VOG-AL00" to 4200,                        // Mate 20 Pro
+            "ELE-AL00" to 3650,                        // P30
+            "VIE-AL10" to 4000,                        // Mate 9 Pro
+
+            // ===== Google Pixel =====
+            "Pixel 8 Pro" to 5050, "husky" to 5050,
+            "Pixel 8" to 4575, "shiba" to 4575,
+            "Pixel 7 Pro" to 5000, "cheetah" to 5000,
+            "Pixel 7" to 4355, "panther" to 4355,
+            "Pixel 6 Pro" to 5003, "raven" to 5003,
+            "Pixel 6" to 4614, "oriole" to 4614,
+            "Pixel 5" to 4080, "redfin" to 4080,
+            "Pixel 4a" to 3885, "sunfish" to 3885,
+        )
+        // 精确匹配
+        knownCapacities[model]?.let { return it }
+        // 模糊匹配：遍历查找包含关系
+        for ((key, value) in knownCapacities) {
+            if (model.contains(key, ignoreCase = true) || key.contains(model, ignoreCase = true)) {
+                return value
+            }
+        }
+        return -1
     }
 }

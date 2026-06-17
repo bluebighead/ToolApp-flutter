@@ -6,7 +6,7 @@
 ![Flutter](https://img.shields.io/badge/Flutter-3.x-02569B?logo=flutter)
 ![Dart](https://img.shields.io/badge/Dart-3.11-0175C2?logo=dart)
 ![License](https://img.shields.io/badge/license-Private-lightgrey)
-![Version](https://img.shields.io/badge/version-1.60.2%2B210-blue)
+![Version](https://img.shields.io/badge/version-1.73.2%2B264-blue)
 
 ---
 
@@ -33,7 +33,7 @@
 - 完全离线 / 端侧能力：不依赖任何后端服务，所有计算 / 转码均在手机上完成。
 - 工程化约束：源码全部中文注释，遵循统一的日志规范和发版规则（详见 [PROJECT_RULES.md](./PROJECT_RULES.md)）。
 
-> 当前最新版本：**1.60.2+210** （2026-06-16）
+> 当前最新版本：**1.73.2+264** （2026-06-18）
 
 ---
 
@@ -96,8 +96,13 @@
 - **访客模式**：无需注册也可使用基础功能。
 
 ### 7. 设备检修（NFC）
-- **NFC 读写器**：读取 NFC 标签的 UID、NDEF 文本/URI/vCard 等数据，支持多种标签类型。
-- **NFC 功能速写**：支持写入网址、文本、名片（含微信/QQ互斥）、回家/WiFi/投屏/导航/支付共 8 种 NFC 标签模式。
+- **NFC 读写器**：读取 NFC 标签的 UID、NDEF 文本/URI/vCard 等数据，支持多种标签类型（含 Mifare Classic 扇区级 NDEF 读取）。
+- **NFC 功能速写**：支持写入网址、文本、WiFi、微信QQ、导航、投屏、付款、回家模式共 8 种 NFC 标签模式。
+  - **已修复碰卡自动跳转**（无 Beta 标志）：网址写入、文本写入、WiFi 速写、微信QQ、导航速写。
+  - **Beta 功能**（碰卡跳转待优化）：投屏速写、付款速写、回家模式。
+  - **导航速写**：支持选择高德/百度/腾讯地图，写入指定导航软件到 NFC 卡，碰卡自动打开该软件搜索目的地，未安装则提示下载。
+  - **微信QQ**：碰卡自动打开微信/QQ并复制账号到剪贴板。
+  - **WiFi 速写**：碰卡自动连接 WiFi（使用 `WifiNetworkSuggestion` 建立系统级连接）。
 - **安卓系统弹窗抑制**：使用 `androidReaderModeFlags`（NFC_A/B/F/V + SKIP_NDEF_CHECK + NO_PLATFORM_SOUNDS）彻底屏蔽系统弹窗。
 - **页面状态保持**：使用 `RouteObserver` + `RouteAware` 在页面间跳转后自动恢复 NFC 感应。
 
@@ -359,6 +364,18 @@ adb install -r build/app/outputs/flutter-apk/app-release.apk
 
 | 版本          | 更新时间   | 开发者  | 主要变更                                                                 |
 | ------------- | ---------- | ------- | ------------------------------------------------------------------------ |
+| `1.73.2+264`  | 2026-06-18 | SuperYH | NFC功能速写界面整理：已修复工具排前、Beta工具排后；更新README。 |
+| `1.73.1+263`  | 2026-06-18 | SuperYH | 修复高德地图导航scheme（改用keywordNavi按关键字搜索）。 |
+| `1.73.0+262`  | 2026-06-18 | SuperYH | 导航速写重构：删除经纬度输入，新增导航软件选择（高德/百度/腾讯）+目的地名称，写入指定导航软件到NFC卡，未安装则提示下载。 |
+| `1.72.1+261`  | 2026-06-18 | SuperYH | 微信QQ加强互斥验证（微信号和QQ号不能同时填写）。 |
+| `1.72.0+260`  | 2026-06-18 | SuperYH | 名片速写改为"微信QQ"（仅保留微信/QQ输入）；修复网址写入碰卡自动跳转（提取handleUriAndTextNdefMessage方法）。 |
+| `1.71.7+259`  | 2026-06-18 | SuperYH | 修复QQ跳转崩溃（改用mqqapi://card/show_pslcard名片页面scheme）。 |
+| `1.71.6+258`  | 2026-06-18 | SuperYH | 修复子线程调用Toast导致崩溃（用runOnUiThread包裹跳转调用）。 |
+| `1.71.5+257`  | 2026-06-18 | SuperYH | 修复微信/QQ碰卡跳转（提取handleCustomNdefMessage方法，通用NDEF解析兜底+MifareClassic读取后处理自定义MIME）。 |
+| `1.71.4+256`  | 2026-06-18 | SuperYH | 修复WiFi"假连接"（改用WifiNetworkSuggestion建立系统级连接）。 |
+| `1.71.1+255`  | 2026-06-18 | SuperYH | 修复WiFi连接权限（添加CHANGE_NETWORK_STATE权限）+Mifare Classic NDEF读取逻辑。 |
+| `1.70.8+254`  | 2026-06-18 | SuperYH | 修复getInitialIntent的MissingPluginException。 |
+| `1.70.7+253`  | 2026-06-18 | SuperYH | 修复WiFi碰卡自动连接（提取handleWifiNdefMessage方法+通用NDEF解析兜底）。 |
 | `1.60.2+210`  | 2026-06-16 | SuperYH | 加解密工具箱新增 6 个现代工具（Hex/XOR/HMAC/AES/RSA/文字工具箱）+ 每页帮助按钮。 |
 | `1.59.0+209`  | 2026-06-16 | SuperYH | 加解密工具分为古老/现代两区，新增 8 个古密码（Atbash/维吉尼亚/柏拉费/仿射/波利比乌斯/栅栏/猪圈/简单替换）。 |
 | `1.58.5+208`  | 2026-06-16 | SuperYH | 加解密工具箱新增 7 个工具（Base64/哈希/凯撒/密码生成/URL编解码/Unicode/进制转换）。 |
